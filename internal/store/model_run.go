@@ -1,0 +1,84 @@
+package store
+
+import "database/sql"
+
+type ModelRun struct {
+	ID                 string  `json:"id"`
+	TaskID             string  `json:"taskId"`
+	ModelName          string  `json:"modelName"`
+	BranchName         *string `json:"branchName"`
+	LocalPath          *string `json:"localPath"`
+	PrURL              *string `json:"prUrl"`
+	OriginURL          *string `json:"originUrl"`
+	GsbScore           *string `json:"gsbScore"`
+	Status             string  `json:"status"`
+	StartedAt          *int64  `json:"startedAt"`
+	FinishedAt         *int64  `json:"finishedAt"`
+	SessionID          *string `json:"sessionId"`
+	ConversationRounds int     `json:"conversationRounds"`
+	ConversationDate   *int64  `json:"conversationDate"`
+}
+
+func (s *Store) ListModelRuns(taskID string) ([]ModelRun, error) {
+	rows, err := s.DB.Query(
+		`SELECT id, task_id, model_name, branch_name, local_path, pr_url, origin_url, gsb_score,
+		        status, started_at, finished_at, session_id, conversation_rounds, conversation_date
+		 FROM model_runs WHERE task_id = ?
+		 ORDER BY CASE WHEN UPPER(model_name) = 'ORIGIN' THEN 0 ELSE 1 END, model_name`, taskID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var runs []ModelRun
+	for rows.Next() {
+		var r ModelRun
+		if err := rows.Scan(
+			&r.ID, &r.TaskID, &r.ModelName, &r.BranchName, &r.LocalPath,
+			&r.PrURL, &r.OriginURL, &r.GsbScore, &r.Status, &r.StartedAt, &r.FinishedAt,
+			&r.SessionID, &r.ConversationRounds, &r.ConversationDate,
+		); err != nil {
+			return nil, err
+		}
+		runs = append(runs, r)
+	}
+	return runs, rows.Err()
+}
+
+func (s *Store) CreateModelRun(r ModelRun) error {
+	_, err := s.DB.Exec(
+		"INSERT INTO model_runs (id, task_id, model_name, local_path, status) VALUES (?,?,?,?,?)",
+		r.ID, r.TaskID, r.ModelName, r.LocalPath, "pending")
+	return err
+}
+
+func (s *Store) UpdateModelRun(taskID, modelName, status string, branchName, prURL *string, startedAt, finishedAt *int64) error {
+	_, err := s.DB.Exec(
+		"UPDATE model_runs SET status=?, branch_name=?, pr_url=?, started_at=?, finished_at=? WHERE task_id=? AND model_name=?",
+		status, branchName, prURL, startedAt, finishedAt, taskID, modelName)
+	return err
+}
+
+func (s *Store) GetModelRun(taskID, modelName string) (*ModelRun, error) {
+	var r ModelRun
+	err := s.DB.QueryRow(
+		`SELECT id, task_id, model_name, branch_name, local_path, pr_url, origin_url, gsb_score,
+		        status, started_at, finished_at, session_id, conversation_rounds, conversation_date
+		 FROM model_runs WHERE task_id = ? AND model_name = ?`, taskID, modelName).
+		Scan(&r.ID, &r.TaskID, &r.ModelName, &r.BranchName, &r.LocalPath,
+			&r.PrURL, &r.OriginURL, &r.GsbScore, &r.Status, &r.StartedAt, &r.FinishedAt,
+			&r.SessionID, &r.ConversationRounds, &r.ConversationDate)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &r, nil
+}
+
+func (s *Store) UpdateModelRunSession(id string, sessionID *string, rounds int, date *int64) error {
+	_, err := s.DB.Exec(
+		"UPDATE model_runs SET session_id=?, conversation_rounds=?, conversation_date=? WHERE id=?",
+		sessionID, rounds, date, id)
+	return err
+}
