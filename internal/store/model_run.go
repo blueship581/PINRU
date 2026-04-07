@@ -1,6 +1,9 @@
 package store
 
-import "database/sql"
+import (
+	"database/sql"
+	"fmt"
+)
 
 type ModelRun struct {
 	ID                 string  `json:"id"`
@@ -77,8 +80,18 @@ func (s *Store) GetModelRun(taskID, modelName string) (*ModelRun, error) {
 }
 
 func (s *Store) UpdateModelRunSession(id string, sessionID *string, rounds int, date *int64) error {
-	_, err := s.DB.Exec(
+	res, err := s.DB.Exec(
 		"UPDATE model_runs SET session_id=?, conversation_rounds=?, conversation_date=? WHERE id=?",
 		sessionID, rounds, date, id)
-	return err
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return fmt.Errorf("model run %q not found", id)
+	}
+	return nil
 }
