@@ -1,12 +1,13 @@
 import React, { useState, useEffect } from 'react';
 import {
   Search, Clock, GitBranch, CheckCircle2, CircleDashed, PlayCircle,
-  X, ExternalLink, ChevronDown, ChevronRight, Plus, Trash2,
+  X, ExternalLink, ChevronDown, ChevronRight, Plus, Trash2, Settings, Eye, EyeOff,
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { useAppStore, TaskStatus, Task } from '../store';
 import { motion, AnimatePresence } from 'motion/react';
 import { getActiveProjectId } from '../services/config';
+import { updateProject, type ProjectConfig } from '../services/config';
 import {
   createTask,
   deleteTask,
@@ -40,6 +41,10 @@ export default function Board() {
   const loadTasks   = useAppStore(s => s.loadTasks);
   const addTaskToStore = useAppStore(s => s.addTask);
   const removeTaskFromStore = useAppStore(s => s.removeTask);
+  const activeProject = useAppStore(s => s.activeProject);
+  const setActiveProject = useAppStore(s => s.setActiveProject);
+  const loadActiveProject = useAppStore(s => s.loadActiveProject);
+  const [showProjectPanel, setShowProjectPanel] = useState(false);
   const [search, setSearch]   = useState('');
   const [selected, setSelected] = useState<Task | null>(null);
   const [showCreateModal, setShowCreateModal] = useState(false);
@@ -64,6 +69,7 @@ export default function Board() {
   });
 
   useEffect(() => { loadTasks(); }, [loadTasks]);
+  useEffect(() => { loadActiveProject(); }, [loadActiveProject]);
 
   useEffect(() => {
     if (!selected?.id) {
@@ -211,6 +217,13 @@ export default function Board() {
           <span className="text-sm text-stone-400 dark:text-stone-500 font-medium ml-auto">
             共 {filtered.length} 条任务
           </span>
+          <button
+            onClick={() => setShowProjectPanel(true)}
+            className="p-2 rounded-2xl bg-white dark:bg-stone-900 border border-stone-200 dark:border-stone-700 text-stone-500 dark:text-stone-400 hover:text-stone-700 dark:hover:text-stone-200 transition-colors cursor-default"
+            title="项目配置"
+          >
+            <Settings className="w-4 h-4" />
+          </button>
           <button
             onClick={openCreateModal}
             className="inline-flex items-center gap-2 px-4 py-2 bg-[#111827] hover:bg-[#1F2937] dark:bg-[#E5EAF2] dark:hover:bg-[#F3F6FB] text-white dark:text-[#0D1117] rounded-2xl text-sm font-semibold transition-colors shadow-sm cursor-default"
@@ -620,6 +633,53 @@ export default function Board() {
             </motion.aside>
           </>
         )}
+        {showProjectPanel && activeProject && (
+          <>
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setShowProjectPanel(false)}
+              className="fixed inset-0 bg-black/20 dark:bg-black/40 backdrop-blur-sm z-20"
+            />
+            <ProjectPanel
+              project={activeProject}
+              onClose={() => setShowProjectPanel(false)}
+              onSaved={(updated) => {
+                setActiveProject(updated);
+                setShowProjectPanel(false);
+              }}
+            />
+          </>
+        )}
+        {showProjectPanel && !activeProject && (
+          <>
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setShowProjectPanel(false)}
+              className="fixed inset-0 bg-black/20 dark:bg-black/40 backdrop-blur-sm z-20"
+            />
+            <motion.aside
+              initial={{ x: '100%' }}
+              animate={{ x: 0 }}
+              exit={{ x: '100%' }}
+              transition={{ type: 'spring', damping: 26, stiffness: 220 }}
+              className="fixed top-0 right-0 bottom-0 w-[480px] bg-white dark:bg-stone-900 border-l border-stone-200 dark:border-stone-800 shadow-2xl z-30 flex flex-col rounded-l-3xl"
+            >
+              <div className="px-7 py-6 border-b border-stone-100 dark:border-stone-800 flex items-center justify-between">
+                <h2 className="text-lg font-bold text-stone-900 dark:text-stone-50">项目配置</h2>
+                <button onClick={() => setShowProjectPanel(false)} className="p-2 rounded-xl hover:bg-stone-100 dark:hover:bg-stone-800 text-stone-400 cursor-default">
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+              <div className="flex-1 flex items-center justify-center text-sm text-stone-400 dark:text-stone-500">
+                暂无激活项目，请先在设置中创建并激活项目
+              </div>
+            </motion.aside>
+          </>
+        )}
       </AnimatePresence>
     </div>
   );
@@ -762,4 +822,142 @@ function modelRunPresentation(status: string) {
     iconCls: 'text-stone-400',
     badgeCls: 'bg-stone-100 dark:bg-stone-800/60 text-stone-500 dark:text-stone-400',
   };
+}
+
+function ProjectPanel({
+  project,
+  onClose,
+  onSaved,
+}: {
+  project: ProjectConfig;
+  onClose: () => void;
+  onSaved: (updated: ProjectConfig) => void;
+}) {
+  const [form, setForm] = useState<ProjectConfig>({ ...project });
+  const [showToken, setShowToken] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+
+  const set = (key: keyof ProjectConfig, value: string) =>
+    setForm((prev) => ({ ...prev, [key]: value }));
+
+  const handleSave = async () => {
+    setSaving(true);
+    setError('');
+    try {
+      await updateProject(form);
+      onSaved(form);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '保存失败');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <motion.aside
+      initial={{ x: '100%' }}
+      animate={{ x: 0 }}
+      exit={{ x: '100%' }}
+      transition={{ type: 'spring', damping: 26, stiffness: 220 }}
+      className="fixed top-0 right-0 bottom-0 w-[480px] bg-white dark:bg-stone-900 border-l border-stone-200 dark:border-stone-800 shadow-2xl z-30 flex flex-col rounded-l-3xl"
+    >
+      {/* Header */}
+      <div className="px-7 py-6 border-b border-stone-100 dark:border-stone-800 flex items-center justify-between gap-4">
+        <div>
+          <h2 className="text-lg font-bold text-stone-900 dark:text-stone-50">项目配置</h2>
+          <p className="text-xs text-stone-400 dark:text-stone-500 mt-0.5 font-mono">{project.id}</p>
+        </div>
+        <button
+          onClick={onClose}
+          className="p-2 rounded-xl hover:bg-stone-100 dark:hover:bg-stone-800 text-stone-400 cursor-default"
+        >
+          <X className="w-4 h-4" />
+        </button>
+      </div>
+
+      {/* Body */}
+      <div className="flex-1 overflow-y-auto p-7 space-y-5">
+        <label className="block">
+          <span className="block text-xs font-bold uppercase tracking-wider text-stone-400 dark:text-stone-500 mb-2">项目名称</span>
+          <input
+            value={form.name}
+            onChange={(e) => set('name', e.target.value)}
+            className="w-full px-4 py-2.5 rounded-2xl bg-stone-50 dark:bg-stone-800 border border-stone-200 dark:border-stone-700 text-sm focus:outline-none focus:ring-2 focus:ring-slate-400/30"
+          />
+        </label>
+
+        <label className="block">
+          <span className="block text-xs font-bold uppercase tracking-wider text-stone-400 dark:text-stone-500 mb-2">GitLab URL</span>
+          <input
+            value={form.gitlabUrl}
+            onChange={(e) => set('gitlabUrl', e.target.value)}
+            placeholder="https://gitlab.example.com"
+            className="w-full px-4 py-2.5 rounded-2xl bg-stone-50 dark:bg-stone-800 border border-stone-200 dark:border-stone-700 text-sm focus:outline-none focus:ring-2 focus:ring-slate-400/30"
+          />
+        </label>
+
+        <label className="block">
+          <span className="block text-xs font-bold uppercase tracking-wider text-stone-400 dark:text-stone-500 mb-2">GitLab Token</span>
+          <div className="relative">
+            <input
+              type={showToken ? 'text' : 'password'}
+              value={form.gitlabToken}
+              onChange={(e) => set('gitlabToken', e.target.value)}
+              className="w-full px-4 py-2.5 pr-11 rounded-2xl bg-stone-50 dark:bg-stone-800 border border-stone-200 dark:border-stone-700 text-sm focus:outline-none focus:ring-2 focus:ring-slate-400/30"
+            />
+            <button
+              type="button"
+              onClick={() => setShowToken((v) => !v)}
+              className="absolute right-3 top-1/2 -translate-y-1/2 text-stone-400 hover:text-stone-600 dark:hover:text-stone-300 cursor-default"
+            >
+              {showToken ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+            </button>
+          </div>
+        </label>
+
+        <label className="block">
+          <span className="block text-xs font-bold uppercase tracking-wider text-stone-400 dark:text-stone-500 mb-2">本地克隆路径</span>
+          <input
+            value={form.cloneBasePath}
+            onChange={(e) => set('cloneBasePath', e.target.value)}
+            placeholder="~/code/pinru"
+            className="w-full px-4 py-2.5 rounded-2xl bg-stone-50 dark:bg-stone-800 border border-stone-200 dark:border-stone-700 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-slate-400/30"
+          />
+        </label>
+
+        <label className="block">
+          <span className="block text-xs font-bold uppercase tracking-wider text-stone-400 dark:text-stone-500 mb-2">模型列表（逗号分隔）</span>
+          <textarea
+            value={form.models}
+            onChange={(e) => set('models', e.target.value)}
+            rows={3}
+            placeholder="ORIGIN, cotv21-pro, cotv21.2-pro"
+            className="w-full px-4 py-2.5 rounded-2xl bg-stone-50 dark:bg-stone-800 border border-stone-200 dark:border-stone-700 text-sm font-mono resize-none focus:outline-none focus:ring-2 focus:ring-slate-400/30"
+          />
+        </label>
+
+        {error && (
+          <p className="text-sm text-red-500">{error}</p>
+        )}
+      </div>
+
+      {/* Footer */}
+      <div className="px-7 py-5 border-t border-stone-100 dark:border-stone-800 flex gap-3">
+        <button
+          onClick={onClose}
+          className="flex-1 py-2.5 bg-stone-100 dark:bg-stone-800 hover:bg-stone-200 dark:hover:bg-stone-700 rounded-2xl text-sm font-semibold text-stone-700 dark:text-stone-300 transition-colors cursor-default"
+        >
+          取消
+        </button>
+        <button
+          onClick={handleSave}
+          disabled={saving}
+          className="flex-1 py-2.5 bg-[#111827] hover:bg-[#1F2937] dark:bg-[#E5EAF2] dark:hover:bg-[#F3F6FB] text-white dark:text-[#0D1117] rounded-2xl text-sm font-semibold transition-colors shadow-sm disabled:opacity-50 cursor-default"
+        >
+          {saving ? '保存中...' : '保存'}
+        </button>
+      </div>
+    </motion.aside>
+  );
 }
