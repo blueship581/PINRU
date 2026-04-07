@@ -6,8 +6,7 @@ import {
 import { useNavigate } from 'react-router-dom';
 import { useAppStore, TaskStatus, Task } from '../store';
 import { motion, AnimatePresence } from 'motion/react';
-import { getActiveProjectId } from '../services/config';
-import { updateProject, type ProjectConfig } from '../services/config';
+import { getActiveProjectId, updateProject, type ProjectConfig } from '../services/config';
 import {
   createTask,
   deleteTask,
@@ -838,7 +837,7 @@ function ProjectPanel({
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
 
-  const set = (key: keyof ProjectConfig, value: string) =>
+  const setField = <K extends keyof Pick<ProjectConfig, 'name' | 'gitlabUrl' | 'gitlabToken' | 'cloneBasePath' | 'models'>>(key: K, value: string) =>
     setForm((prev) => ({ ...prev, [key]: value }));
 
   const handleSave = async () => {
@@ -846,7 +845,7 @@ function ProjectPanel({
     setError('');
     try {
       await updateProject(form);
-      onSaved(form);
+      onSaved({ ...form, updatedAt: Math.floor(Date.now() / 1000) });
     } catch (err) {
       setError(err instanceof Error ? err.message : '保存失败');
     } finally {
@@ -882,7 +881,7 @@ function ProjectPanel({
           <span className="block text-xs font-bold uppercase tracking-wider text-stone-400 dark:text-stone-500 mb-2">项目名称</span>
           <input
             value={form.name}
-            onChange={(e) => set('name', e.target.value)}
+            onChange={(e) => setField('name', e.target.value)}
             className="w-full px-4 py-2.5 rounded-2xl bg-stone-50 dark:bg-stone-800 border border-stone-200 dark:border-stone-700 text-sm focus:outline-none focus:ring-2 focus:ring-slate-400/30"
           />
         </label>
@@ -891,7 +890,7 @@ function ProjectPanel({
           <span className="block text-xs font-bold uppercase tracking-wider text-stone-400 dark:text-stone-500 mb-2">GitLab URL</span>
           <input
             value={form.gitlabUrl}
-            onChange={(e) => set('gitlabUrl', e.target.value)}
+            onChange={(e) => setField('gitlabUrl', e.target.value)}
             placeholder="https://gitlab.example.com"
             className="w-full px-4 py-2.5 rounded-2xl bg-stone-50 dark:bg-stone-800 border border-stone-200 dark:border-stone-700 text-sm focus:outline-none focus:ring-2 focus:ring-slate-400/30"
           />
@@ -903,7 +902,7 @@ function ProjectPanel({
             <input
               type={showToken ? 'text' : 'password'}
               value={form.gitlabToken}
-              onChange={(e) => set('gitlabToken', e.target.value)}
+              onChange={(e) => setField('gitlabToken', e.target.value)}
               className="w-full px-4 py-2.5 pr-11 rounded-2xl bg-stone-50 dark:bg-stone-800 border border-stone-200 dark:border-stone-700 text-sm focus:outline-none focus:ring-2 focus:ring-slate-400/30"
             />
             <button
@@ -920,7 +919,7 @@ function ProjectPanel({
           <span className="block text-xs font-bold uppercase tracking-wider text-stone-400 dark:text-stone-500 mb-2">本地克隆路径</span>
           <input
             value={form.cloneBasePath}
-            onChange={(e) => set('cloneBasePath', e.target.value)}
+            onChange={(e) => setField('cloneBasePath', e.target.value)}
             placeholder="~/code/pinru"
             className="w-full px-4 py-2.5 rounded-2xl bg-stone-50 dark:bg-stone-800 border border-stone-200 dark:border-stone-700 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-slate-400/30"
           />
@@ -930,7 +929,7 @@ function ProjectPanel({
           <span className="block text-xs font-bold uppercase tracking-wider text-stone-400 dark:text-stone-500 mb-2">模型列表（逗号分隔）</span>
           <textarea
             value={form.models}
-            onChange={(e) => set('models', e.target.value)}
+            onChange={(e) => setField('models', e.target.value)}
             rows={3}
             placeholder="ORIGIN, cotv21-pro, cotv21.2-pro"
             className="w-full px-4 py-2.5 rounded-2xl bg-stone-50 dark:bg-stone-800 border border-stone-200 dark:border-stone-700 text-sm font-mono resize-none focus:outline-none focus:ring-2 focus:ring-slate-400/30"
