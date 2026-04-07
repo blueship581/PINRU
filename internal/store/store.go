@@ -28,6 +28,9 @@ func Open(dbPath string, migrationSQL string) (*Store, error) {
 
 func (s *Store) Close() error { return s.DB.Close() }
 
+// migrate runs each semicolon-separated SQL statement.
+// Convention: migration files must not use semicolons inside comments or string literals.
+// "duplicate column name" errors are silently skipped to make ALTER TABLE ADD COLUMN idempotent.
 func (s *Store) migrate(sqlText string) error {
 	for _, stmt := range strings.Split(sqlText, ";") {
 		stmt = strings.TrimSpace(stmt)
