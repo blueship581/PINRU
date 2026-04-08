@@ -61,8 +61,9 @@ export default function Submit() {
 
   const repo = useMemo(() => {
     if (!account || !task) return '';
-    return `${account.username}/${slugify(task.projectName)}-${taskId}`;
-  }, [account, task, taskId]);
+    const projectName = activeProject?.name ?? task.projectName;
+    return `${account.username}/${slugify(projectName)}-${taskId}`;
+  }, [account, task, taskId, activeProject]);
 
   useEffect(() => {
     (async () => {
