@@ -56,7 +56,12 @@ jobs:
 
       - name: Package (macOS)
         if: runner.os == 'macOS'
-        run: zip -j PINRU-${{ matrix.name }}.zip build/bin/pinru
+        run: |
+          mkdir -p PINRU.app/Contents/MacOS
+          mkdir -p PINRU.app/Contents/Resources
+          cp build/bin/pinru PINRU.app/Contents/MacOS/pinru
+          cp build/darwin/Info.plist PINRU.app/Contents/Info.plist
+          zip -r PINRU-${{ matrix.name }}.zip PINRU.app
 
       - name: Package (Windows)
         if: runner.os == 'Windows'
