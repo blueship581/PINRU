@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import {
   Search, Clock, GitBranch, CheckCircle2, CircleDashed, PlayCircle,
-  X, ExternalLink, ChevronDown, ChevronRight, Plus, Trash2, Settings, Eye, EyeOff,
+  X, ExternalLink, ChevronDown, ChevronRight, Plus, Trash2, Settings,
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { useAppStore, TaskStatus, Task } from '../store';
@@ -833,7 +833,6 @@ function ProjectPanel({
   onSaved: (updated: ProjectConfig) => void;
 }) {
   const [form, setForm] = useState<ProjectConfig>({ ...project });
-  const [showToken, setShowToken] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const [addingModel, setAddingModel] = useState(false);
@@ -911,36 +910,7 @@ function ProjectPanel({
         </label>
 
         <label className="block">
-          <span className="block text-xs font-bold uppercase tracking-wider text-stone-400 dark:text-stone-500 mb-2">GitLab URL</span>
-          <input
-            value={form.gitlabUrl}
-            onChange={(e) => setField('gitlabUrl', e.target.value)}
-            placeholder="https://gitlab.example.com"
-            className="w-full px-4 py-2.5 rounded-2xl bg-stone-50 dark:bg-stone-800 border border-stone-200 dark:border-stone-700 text-sm focus:outline-none focus:ring-2 focus:ring-slate-400/30"
-          />
-        </label>
-
-        <label className="block">
-          <span className="block text-xs font-bold uppercase tracking-wider text-stone-400 dark:text-stone-500 mb-2">GitLab Token</span>
-          <div className="relative">
-            <input
-              type={showToken ? 'text' : 'password'}
-              value={form.gitlabToken}
-              onChange={(e) => setField('gitlabToken', e.target.value)}
-              className="w-full px-4 py-2.5 pr-11 rounded-2xl bg-stone-50 dark:bg-stone-800 border border-stone-200 dark:border-stone-700 text-sm focus:outline-none focus:ring-2 focus:ring-slate-400/30"
-            />
-            <button
-              type="button"
-              onClick={() => setShowToken((v) => !v)}
-              className="absolute right-3 top-1/2 -translate-y-1/2 text-stone-400 hover:text-stone-600 dark:hover:text-stone-300 cursor-default"
-            >
-              {showToken ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-            </button>
-          </div>
-        </label>
-
-        <label className="block">
-          <span className="block text-xs font-bold uppercase tracking-wider text-stone-400 dark:text-stone-500 mb-2">本地克隆路径</span>
+          <span className="block text-xs font-bold uppercase tracking-wider text-stone-400 dark:text-stone-500 mb-2">本地文件位置</span>
           <input
             value={form.cloneBasePath}
             onChange={(e) => setField('cloneBasePath', e.target.value)}
@@ -997,6 +967,13 @@ function ProjectPanel({
               </button>
             )}
           </div>
+        </div>
+
+        <div>
+          <span className="block text-xs font-bold uppercase tracking-wider text-stone-400 dark:text-stone-500 mb-2">创建时间</span>
+          <p className="text-sm text-stone-500 dark:text-stone-400">
+            {new Date(project.createdAt * 1000).toLocaleString('zh-CN', { dateStyle: 'medium', timeStyle: 'short' })}
+          </p>
         </div>
 
         {error && (
