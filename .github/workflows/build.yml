@@ -3,6 +3,8 @@ name: Build
 on:
   push:
     branches: [ main ]
+  release:
+    types: [ created ]
 
 jobs:
   build:
@@ -51,28 +53,25 @@ jobs:
 
       - name: Package (macOS)
         if: runner.os == 'macOS'
-        run: |
-          cd build/bin
-          if ls *.app 1>/dev/null 2>&1; then
-            zip -r ../../PINRU-${{ matrix.name }}.zip *.app
-          else
-            zip -r ../../PINRU-${{ matrix.name }}.zip *
-          fi
+        run: zip -j PINRU-${{ matrix.name }}.zip build/bin/pinru
 
-      - name: Upload artifact (macOS)
-        if: runner.os == 'macOS'
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Compress-Archive -Path build/bin/pinru.exe -DestinationPath PINRU-${{ matrix.name }}.zip
+
+      # push to main: 上传到 Actions Artifacts
+      - name: Upload artifact
+        if: github.event_name == 'push'
         uses: actions/upload-artifact@v4
         with:
           name: PINRU-${{ matrix.name }}
           path: PINRU-${{ matrix.name }}.zip
-          if-no-files-found: error
           retention-days: 30
 
-      - name: Upload artifact (Windows)
-        if: runner.os == 'Windows'
-        uses: actions/upload-artifact@v4
+      # 创建 Release 时: 上传到 Release Assets
+      - name: Upload to Release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
         with:
-          name: PINRU-${{ matrix.name }}
-          path: build/bin/
-          if-no-files-found: error
-          retention-days: 30
+          files: PINRU-${{ matrix.name }}.zip
