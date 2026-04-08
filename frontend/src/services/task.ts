@@ -1,10 +1,18 @@
 import { callService } from './wails';
 
+export interface TaskSession {
+  sessionId: string;
+  taskType: string;
+  consumeQuota: boolean;
+}
+
 export interface TaskFromDB {
   id: string;
   gitlabProjectId: number;
   projectName: string;
   status: string;
+  taskType: string;
+  sessionList: TaskSession[];
   localPath: string | null;
   promptText: string | null;
   createdAt: number;
@@ -34,7 +42,10 @@ export interface ModelRunFromDB {
 export interface CreateTaskRequest {
   gitlabProjectId: number;
   projectName: string;
+  taskType?: string;
   localPath: string | null;
+  sourceModelName?: string | null;
+  sourceLocalPath?: string | null;
   models: string[];
   projectConfigId?: string | null;
 }
@@ -67,6 +78,19 @@ export async function createTask(task: CreateTaskRequest): Promise<TaskFromDB> {
 
 export async function updateTaskStatus(id: string, status: string): Promise<void> {
   return callService('TaskService', 'UpdateTaskStatus', id, status);
+}
+
+export async function updateTaskType(id: string, taskType: string): Promise<void> {
+  return callService('TaskService', 'UpdateTaskType', id, taskType);
+}
+
+export interface UpdateTaskSessionListRequest {
+  id: string;
+  sessionList: TaskSession[];
+}
+
+export async function updateTaskSessionList(req: UpdateTaskSessionListRequest): Promise<void> {
+  return callService('TaskService', 'UpdateTaskSessionList', req);
 }
 
 export async function updateModelRun(request: UpdateModelRunRequest): Promise<void> {

@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -198,11 +199,12 @@ func (s *SubmitService) markErrorMsg(taskID, modelName, branchName, errMsg strin
 // --- SubmitAll: single endpoint that handles origin push + all model PRs ---
 
 type SubmitAllRequest struct {
-	TaskID         string   `json:"taskId"`
-	Models         []string `json:"models"` // selected non-ORIGIN model names
-	TargetRepo     string   `json:"targetRepo"`
-	GitHubUsername string   `json:"githubUsername"`
-	GitHubToken    string   `json:"githubToken"`
+	TaskID          string   `json:"taskId"`
+	Models          []string `json:"models"` // selected non-ORIGIN model names
+	TargetRepo      string   `json:"targetRepo"`
+	SourceModelName string   `json:"sourceModelName"`
+	GitHubUsername  string   `json:"githubUsername"`
+	GitHubToken     string   `json:"githubToken"`
 }
 
 type ModelSubmitResult struct {
@@ -230,12 +232,17 @@ func (s *SubmitService) SubmitAll(req SubmitAllRequest) (*SubmitAllResult, error
 		return nil, fmt.Errorf("未找到任务: %s", req.TaskID)
 	}
 
-	originRun, err := s.store.GetModelRun(req.TaskID, "ORIGIN")
-	if err != nil || originRun == nil {
-		return nil, fmt.Errorf("未找到 ORIGIN 记录，请先在领题页下载项目")
+	sourceModelName := strings.TrimSpace(req.SourceModelName)
+	if sourceModelName == "" {
+		sourceModelName = "ORIGIN"
 	}
-	if originRun.LocalPath == nil {
-		return nil, fmt.Errorf("ORIGIN 缺少本地路径，无法推送源码")
+
+	sourceRun, err := s.store.GetModelRun(req.TaskID, sourceModelName)
+	if err != nil || sourceRun == nil {
+		return nil, fmt.Errorf("未找到源码记录 %s，请先在领题页下载项目", sourceModelName)
+	}
+	if sourceRun.LocalPath == nil {
+		return nil, fmt.Errorf("源码记录 %s 缺少本地路径，无法推送源码", sourceModelName)
 	}
 
 	token := strings.TrimSpace(req.GitHubToken)
@@ -253,10 +260,10 @@ func (s *SubmitService) SubmitAll(req SubmitAllRequest) (*SubmitAllResult, error
 	result := &SubmitAllResult{}
 	now := time.Now().Unix()
 
-	// ── Step 1: push origin to main ──
-	s.store.UpdateModelRun(req.TaskID, "ORIGIN", "running", nil, nil, &now, nil)
+	// ── Step 1: push configured source folder to main ──
+	s.store.UpdateModelRun(req.TaskID, sourceModelName, "running", nil, nil, &now, nil)
 
-	sourcePath := util.ExpandTilde(*originRun.LocalPath)
+	sourcePath := util.ExpandTilde(*sourceRun.LocalPath)
 	repo, repoErr := github.EnsureRepository(targetRepo, token, &task.ProjectName)
 	if repoErr == nil {
 		workspacePath := gitops.WorkspacePath(targetRepo)
@@ -285,8 +292,8 @@ func (s *SubmitService) SubmitAll(req SubmitAllRequest) (*SubmitAllResult, error
 
 	if repoErr != nil {
 		finishedAt := time.Now().Unix()
-		s.store.UpdateModelRun(req.TaskID, "ORIGIN", "error", nil, nil, &now, &finishedAt)
-		s.store.SetModelRunError(req.TaskID, "ORIGIN", repoErr.Error())
+		s.store.UpdateModelRun(req.TaskID, sourceModelName, "error", nil, nil, &now, &finishedAt)
+		s.store.SetModelRunError(req.TaskID, sourceModelName, repoErr.Error())
 		s.store.UpdateTaskStatus(req.TaskID, "Error")
 		result.RepoError = repoErr.Error()
 		return result, nil
@@ -294,9 +301,9 @@ func (s *SubmitService) SubmitAll(req SubmitAllRequest) (*SubmitAllResult, error
 
 	finishedAt := time.Now().Unix()
 	repoURL := repo.HTMLURL
-	s.store.UpdateModelRun(req.TaskID, "ORIGIN", "done", nil, nil, &now, &finishedAt)
-	s.store.SetModelRunOriginURL(req.TaskID, "ORIGIN", repoURL)
-	s.store.SetModelRunError(req.TaskID, "ORIGIN", "")
+	s.store.UpdateModelRun(req.TaskID, sourceModelName, "done", nil, nil, &now, &finishedAt)
+	s.store.SetModelRunOriginURL(req.TaskID, sourceModelName, repoURL)
+	s.store.SetModelRunError(req.TaskID, sourceModelName, "")
 	result.RepoURL = repoURL
 
 	// ── Step 2: submit each model as PR ──
@@ -309,18 +316,19 @@ func (s *SubmitService) SubmitAll(req SubmitAllRequest) (*SubmitAllResult, error
 		if modelName == "" {
 			continue
 		}
+		if strings.EqualFold(modelName, "ORIGIN") || strings.EqualFold(modelName, sourceModelName) {
+			continue
+		}
 
 		// Ensure model_run exists
 		run, _ := s.store.GetModelRun(req.TaskID, modelName)
 		if run == nil {
 			// Derive path from ORIGIN sibling
 			var derivedPath *string
-			if originRun.LocalPath != nil {
-				lp := *originRun.LocalPath
-				if idx := strings.LastIndex(lp, "/"); idx >= 0 {
-					p := lp[:idx+1] + modelName
-					derivedPath = &p
-				}
+			if sourceRun.LocalPath != nil {
+				lp := *sourceRun.LocalPath
+				p := filepath.Join(filepath.Dir(lp), modelName)
+				derivedPath = &p
 			}
 			newRun := store.ModelRun{
 				ID:        fmt.Sprintf("%s-%s-%d", req.TaskID, modelName, time.Now().UnixNano()),

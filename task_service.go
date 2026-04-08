@@ -3,6 +3,8 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/blueship581/pinru/internal/store"
 	"github.com/blueship581/pinru/internal/util"
@@ -16,7 +18,10 @@ type TaskService struct {
 type CreateTaskRequest struct {
 	GitLabProjectID int64    `json:"gitlabProjectId"`
 	ProjectName     string   `json:"projectName"`
+	TaskType        string   `json:"taskType"`
 	LocalPath       *string  `json:"localPath"`
+	SourceModelName *string  `json:"sourceModelName"`
+	SourceLocalPath *string  `json:"sourceLocalPath"`
 	Models          []string `json:"models"`
 	ProjectConfigID *string  `json:"projectConfigId"`
 }
@@ -38,6 +43,11 @@ type UpdateModelRunSessionRequest struct {
 	ConversationDate   *int64  `json:"conversationDate"`
 }
 
+type UpdateTaskSessionListRequest struct {
+	ID          string              `json:"id"`
+	SessionList []store.TaskSession `json:"sessionList"`
+}
+
 func (s *TaskService) ListTasks(projectConfigID *string) ([]store.Task, error) {
 	return s.store.ListTasks(projectConfigID)
 }
@@ -52,6 +62,7 @@ func (s *TaskService) CreateTask(req CreateTaskRequest) (*store.Task, error) {
 		ID:              taskID,
 		GitLabProjectID: req.GitLabProjectID,
 		ProjectName:     req.ProjectName,
+		TaskType:        req.TaskType,
 		LocalPath:       req.LocalPath,
 		ProjectConfigID: req.ProjectConfigID,
 	}
@@ -60,16 +71,11 @@ func (s *TaskService) CreateTask(req CreateTaskRequest) (*store.Task, error) {
 	}
 
 	for _, model := range req.Models {
-		var localPath *string
-		if req.LocalPath != nil {
-			p := *req.LocalPath + "/" + model
-			localPath = &p
-		}
 		run := store.ModelRun{
 			ID:        uuid.New().String(),
 			TaskID:    taskID,
 			ModelName: model,
-			LocalPath: localPath,
+			LocalPath: buildModelRunLocalPath(req, model),
 		}
 		if err := s.store.CreateModelRun(run); err != nil {
 			return nil, err
@@ -81,6 +87,14 @@ func (s *TaskService) CreateTask(req CreateTaskRequest) (*store.Task, error) {
 
 func (s *TaskService) UpdateTaskStatus(id, status string) error {
 	return s.store.UpdateTaskStatus(id, status)
+}
+
+func (s *TaskService) UpdateTaskType(id, taskType string) error {
+	return s.store.UpdateTaskType(id, taskType)
+}
+
+func (s *TaskService) UpdateTaskSessionList(req UpdateTaskSessionListRequest) error {
+	return s.store.UpdateTaskSessionList(req.ID, req.SessionList)
 }
 
 func (s *TaskService) ListModelRuns(taskID string) ([]store.ModelRun, error) {
@@ -135,4 +149,20 @@ func (s *TaskService) DeleteTask(id string) error {
 		os.RemoveAll(util.ExpandTilde(*task.LocalPath))
 	}
 	return s.store.DeleteTask(id)
+}
+
+func buildModelRunLocalPath(req CreateTaskRequest, model string) *string {
+	sourceModelName := "ORIGIN"
+	if req.SourceModelName != nil && strings.TrimSpace(*req.SourceModelName) != "" {
+		sourceModelName = strings.TrimSpace(*req.SourceModelName)
+	}
+	if req.SourceLocalPath != nil && strings.TrimSpace(*req.SourceLocalPath) != "" && strings.EqualFold(strings.TrimSpace(model), sourceModelName) {
+		path := strings.TrimSpace(*req.SourceLocalPath)
+		return &path
+	}
+	if req.LocalPath == nil || strings.TrimSpace(*req.LocalPath) == "" {
+		return nil
+	}
+	path := filepath.Join(strings.TrimSpace(*req.LocalPath), model)
+	return &path
 }

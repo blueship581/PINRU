@@ -24,12 +24,17 @@ type ModelRun struct {
 }
 
 func (s *Store) ListModelRuns(taskID string) ([]ModelRun, error) {
-	rows, err := s.DB.Query(
+	query := fmt.Sprintf(
 		`SELECT id, task_id, model_name, branch_name, local_path, pr_url, origin_url, gsb_score,
-		        status, started_at, finished_at, session_id, conversation_rounds, conversation_date,
-		        submit_error
+		        status, %s, %s, session_id, conversation_rounds, %s, submit_error
 		 FROM model_runs WHERE task_id = ?
-		 ORDER BY CASE WHEN UPPER(model_name) = 'ORIGIN' THEN 0 ELSE 1 END, model_name`, taskID)
+		 ORDER BY CASE WHEN UPPER(model_name) = 'ORIGIN' THEN 0 ELSE 1 END, model_name`,
+		nullableUnixTimestampExpr("started_at"),
+		nullableUnixTimestampExpr("finished_at"),
+		nullableUnixTimestampExpr("conversation_date"),
+	)
+	rows, err := s.DB.Query(
+		query, taskID)
 	if err != nil {
 		return nil, err
 	}
@@ -65,11 +70,15 @@ func (s *Store) UpdateModelRun(taskID, modelName, status string, branchName, prU
 
 func (s *Store) GetModelRun(taskID, modelName string) (*ModelRun, error) {
 	var r ModelRun
-	err := s.DB.QueryRow(
+	query := fmt.Sprintf(
 		`SELECT id, task_id, model_name, branch_name, local_path, pr_url, origin_url, gsb_score,
-		        status, started_at, finished_at, session_id, conversation_rounds, conversation_date,
-		        submit_error
-		 FROM model_runs WHERE task_id = ? AND model_name = ?`, taskID, modelName).
+		        status, %s, %s, session_id, conversation_rounds, %s, submit_error
+		 FROM model_runs WHERE task_id = ? AND model_name = ?`,
+		nullableUnixTimestampExpr("started_at"),
+		nullableUnixTimestampExpr("finished_at"),
+		nullableUnixTimestampExpr("conversation_date"),
+	)
+	err := s.DB.QueryRow(query, taskID, modelName).
 		Scan(&r.ID, &r.TaskID, &r.ModelName, &r.BranchName, &r.LocalPath,
 			&r.PrURL, &r.OriginURL, &r.GsbScore, &r.Status, &r.StartedAt, &r.FinishedAt,
 			&r.SessionID, &r.ConversationRounds, &r.ConversationDate, &r.SubmitError)
@@ -95,6 +104,21 @@ func (s *Store) SetModelRunOriginURL(taskID, modelName, url string) error {
 func (s *Store) SetModelRunError(taskID, modelName, errMsg string) error {
 	_, err := s.DB.Exec("UPDATE model_runs SET submit_error=? WHERE task_id=? AND model_name=?", errMsg, taskID, modelName)
 	return err
+}
+
+func (s *Store) UpdateModelRunLocalPath(taskID, modelName string, localPath *string) error {
+	res, err := s.DB.Exec("UPDATE model_runs SET local_path=? WHERE task_id=? AND model_name=?", localPath, taskID, modelName)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return fmt.Errorf("model run %q/%q not found", taskID, modelName)
+	}
+	return nil
 }
 
 func (s *Store) UpdateModelRunSession(id string, sessionID *string, rounds int, date *int64) error {

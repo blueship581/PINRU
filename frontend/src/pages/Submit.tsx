@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { Loader2, Rocket, ExternalLink, Check, X, Github, AlertCircle } from 'lucide-react';
 import {
   getGitHubAccounts,
@@ -9,12 +9,14 @@ import {
 import { listModelRuns, type ModelRunFromDB } from '../services/task';
 import { submitAll } from '../services/submit';
 import { useAppStore } from '../store';
+import { getPathBase } from '../lib/sourceFolders';
 
 const selectCls =
   'w-full bg-stone-50 dark:bg-[#171B22] border border-stone-200 dark:border-[#232834] rounded-2xl px-4 py-2.5 text-sm font-medium focus:outline-none focus:ring-2 focus:ring-slate-400/30 transition-shadow';
 
 export default function Submit() {
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const tasks = useAppStore((s) => s.tasks);
   const loadTasks = useAppStore((s) => s.loadTasks);
   const activeProject = useAppStore((s) => s.activeProject);
@@ -28,28 +30,45 @@ export default function Submit() {
   const [error, setError] = useState('');
   const [selectedModels, setSelectedModels] = useState<Set<string>>(new Set());
 
+  const requestedTaskId = searchParams.get('taskId') ?? '';
   const task = tasks.find((t) => t.id === taskId) ?? null;
   const account = accounts.find((a) => a.id === accountId) ?? null;
+  const sourceModelName = useMemo(
+    () => activeProject?.sourceModelFolder?.trim() || 'ORIGIN',
+    [activeProject],
+  );
 
   const projectPrModelNames = useMemo(() => {
     if (!activeProject?.models) return [];
     return normalizeProjectModels(activeProject.models).filter(
-      (m) => m.trim().toUpperCase() !== 'ORIGIN',
+      (m) => {
+        const upper = m.trim().toUpperCase();
+        return upper !== 'ORIGIN' && upper !== sourceModelName.toUpperCase();
+      },
     );
-  }, [activeProject]);
+  }, [activeProject, sourceModelName]);
 
-  const srcRun = useMemo(
-    () => modelRuns.find((r) => r.modelName.trim().toUpperCase() === 'ORIGIN') ?? null,
-    [modelRuns],
+  const sourceRun = useMemo(
+    () =>
+      modelRuns.find((r) => r.modelName.trim().toUpperCase() === sourceModelName.toUpperCase()) ?? null,
+    [modelRuns, sourceModelName],
+  );
+  const sourceDirectoryName = useMemo(
+    () => getPathBase(sourceRun?.localPath) || sourceRun?.modelName || '',
+    [sourceRun],
   );
 
   const repo = useMemo(() => {
-    if (!account || !task) return '';
+    if (!task) return '';
+    if (activeProject?.defaultSubmitRepo?.trim()) {
+      return activeProject.defaultSubmitRepo.trim();
+    }
+    if (!account) return '';
     const projectName = activeProject?.name ?? task.projectName;
     return `${account.username}/${slugify(projectName)}-${taskId}`;
   }, [account, task, taskId, activeProject]);
 
-  // Results stored in DB: origin_url from srcRun, pr_url / submit_error from other runs
+  // Results stored in DB: origin_url from sourceRun, pr_url / submit_error from other runs
   const hasResults = useMemo(() =>
     modelRuns.some((r) => r.status === 'done' || r.status === 'error'),
   [modelRuns]);
@@ -64,9 +83,27 @@ export default function Submit() {
   }, [loadTasks, loadActiveProject]);
 
   useEffect(() => {
-    if (!tasks.length) { setTaskId(''); return; }
-    if (!tasks.some((t) => t.id === taskId)) setTaskId(tasks[0].id);
-  }, [tasks, taskId]);
+    if (!tasks.length) {
+      setTaskId('');
+      return;
+    }
+    if (requestedTaskId && tasks.some((t) => t.id === requestedTaskId)) {
+      if (taskId !== requestedTaskId) {
+        setTaskId(requestedTaskId);
+      }
+      return;
+    }
+    if (!tasks.some((t) => t.id === taskId)) {
+      setTaskId(tasks[0].id);
+    }
+  }, [requestedTaskId, taskId, tasks]);
+
+  useEffect(() => {
+    if (!taskId || requestedTaskId === taskId) return;
+    const next = new URLSearchParams(searchParams);
+    next.set('taskId', taskId);
+    setSearchParams(next, { replace: true });
+  }, [requestedTaskId, searchParams, setSearchParams, taskId]);
 
   useEffect(() => {
     if (!accounts.length) { setAccountId(''); return; }
@@ -87,7 +124,7 @@ export default function Submit() {
   }, [projectPrModelNames]);
 
   const handleSubmit = async () => {
-    if (!task || !account || !repo || !srcRun) return;
+    if (!task || !account || !repo || !sourceRun) return;
     setBusy(true);
     setError('');
     try {
@@ -95,6 +132,7 @@ export default function Submit() {
         taskId,
         models: [...selectedModels],
         targetRepo: repo,
+        sourceModelName,
         githubUsername: account.username,
         githubToken: account.token,
       });
@@ -109,7 +147,7 @@ export default function Submit() {
     }
   };
 
-  const ready = !!task && !!account && !!repo && !!srcRun && !busy;
+  const ready = !!task && !!account && !!repo && !!sourceRun && !busy;
 
   return (
     <div className="h-full flex flex-col p-8 bg-stone-50 dark:bg-[#161615]">
@@ -128,7 +166,12 @@ export default function Submit() {
                 暂无任务，去领题 &rarr;
               </button>
             ) : (
-              <select value={taskId} onChange={(e) => setTaskId(e.target.value)} disabled={busy} className={selectCls}>
+              <select
+                value={taskId}
+                onChange={(e) => setTaskId(e.target.value)}
+                disabled={busy}
+                className={selectCls}
+              >
                 {tasks.map((t) => (
                   <option key={t.id} value={t.id}>{t.projectName} &middot; {t.id}</option>
                 ))}
@@ -138,22 +181,30 @@ export default function Submit() {
 
           {/* 已有提交结果 */}
           {taskId && hasResults && (
-            <ResultsPanel modelRuns={modelRuns} projectPrModelNames={projectPrModelNames} />
+            <ResultsPanel
+              modelRuns={modelRuns}
+              projectPrModelNames={projectPrModelNames}
+              sourceModelName={sourceModelName}
+            />
           )}
 
           {/* 原始代码 */}
           {taskId && (
             <div>
-              <span className="block text-sm font-medium text-stone-500 dark:text-stone-400 mb-1.5">原始代码</span>
-              {srcRun ? (
+              <span className="block text-sm font-medium text-stone-500 dark:text-stone-400 mb-1.5">源码目录</span>
+              {sourceRun ? (
                 <div className="flex items-center gap-2 bg-stone-100 dark:bg-[#1E2128] border border-stone-200/60 dark:border-[#2A2F3A] rounded-2xl px-4 py-2.5">
                   <span className="flex-1 font-mono text-sm text-stone-800 dark:text-stone-200 truncate">
-                    {srcRun.modelName}
+                    {sourceDirectoryName}
                   </span>
-                  <span className="text-xs bg-stone-200 dark:bg-stone-700 text-stone-500 dark:text-stone-400 px-2 py-0.5 rounded-lg">必选</span>
+                  <span className="text-xs bg-stone-200 dark:bg-stone-700 text-stone-500 dark:text-stone-400 px-2 py-0.5 rounded-lg">
+                    模型 {sourceRun.modelName}
+                  </span>
                 </div>
               ) : (
-                <p className="text-sm text-amber-600 dark:text-amber-400">缺少 origin 文件夹，请先在领题页下载项目</p>
+                <p className="text-sm text-amber-600 dark:text-amber-400">
+                  缺少源码目录（模型 {sourceModelName}），请先在领题页下载项目
+                </p>
               )}
             </div>
           )}
@@ -242,33 +293,41 @@ export default function Submit() {
 }
 
 // ── 提交结果面板（从 DB 读取，持久显示）──
-function ResultsPanel({ modelRuns, projectPrModelNames }: {
+function ResultsPanel({ modelRuns, projectPrModelNames, sourceModelName }: {
   modelRuns: ModelRunFromDB[];
   projectPrModelNames: string[];
+  sourceModelName: string;
 }) {
-  const originRun = modelRuns.find((r) => r.modelName.trim().toUpperCase() === 'ORIGIN');
+  const sourceRun = modelRuns.find(
+    (r) => r.modelName.trim().toUpperCase() === sourceModelName.trim().toUpperCase(),
+  );
   // Show results for project models + any extras already in DB
   const prRunNames = new Set([
     ...projectPrModelNames,
-    ...modelRuns.filter((r) => r.modelName.trim().toUpperCase() !== 'ORIGIN').map((r) => r.modelName),
+    ...modelRuns
+      .filter((r) => {
+        const upper = r.modelName.trim().toUpperCase();
+        return upper !== 'ORIGIN' && upper !== sourceModelName.trim().toUpperCase();
+      })
+      .map((r) => r.modelName),
   ]);
   const prResults = [...prRunNames].map((name) =>
     modelRuns.find((r) => r.modelName === name) ?? { modelName: name, status: 'pending', prUrl: null, submitError: null } as ModelRunFromDB
   );
 
-  if (!originRun && prResults.length === 0) return null;
+  if (!sourceRun && prResults.length === 0) return null;
 
   return (
     <div>
       <span className="block text-sm font-medium text-stone-500 dark:text-stone-400 mb-1.5">提交结果</span>
       <div className="rounded-2xl border border-stone-200 dark:border-stone-800 overflow-hidden divide-y divide-stone-100 dark:divide-stone-800">
-        {/* Origin row */}
-        {originRun && (
+        {/* Source row */}
+        {sourceRun && (
           <ResultRow
-            label={`源码 · ${originRun.modelName}`}
-            status={originRun.status}
-            link={originRun.originUrl ?? undefined}
-            errMsg={originRun.submitError ?? undefined}
+            label={`源码 · ${getPathBase(sourceRun.localPath) || sourceRun.modelName}`}
+            status={sourceRun.status}
+            link={sourceRun.originUrl ?? undefined}
+            errMsg={sourceRun.submitError ?? undefined}
           />
         )}
         {/* Model rows */}
