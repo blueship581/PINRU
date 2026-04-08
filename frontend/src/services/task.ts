@@ -86,3 +86,17 @@ export interface UpdateModelRunSessionRequest {
 export async function updateModelRunSessionInfo(req: UpdateModelRunSessionRequest): Promise<void> {
   return callService('TaskService', 'UpdateModelRunSessionInfo', req);
 }
+
+export interface AddModelRunRequest {
+  taskId: string;
+  modelName: string;
+  localPath?: string | null;
+}
+
+export async function addModelRun(req: AddModelRunRequest): Promise<void> {
+  return callService('TaskService', 'AddModelRun', req);
+}
+
+export async function deleteModelRun(taskId: string, modelName: string): Promise<void> {
+  return callService('TaskService', 'DeleteModelRun', taskId, modelName);
+}

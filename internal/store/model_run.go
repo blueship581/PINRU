@@ -79,6 +79,11 @@ func (s *Store) GetModelRun(taskID, modelName string) (*ModelRun, error) {
 	return &r, nil
 }
 
+func (s *Store) DeleteModelRun(taskID, modelName string) error {
+	_, err := s.DB.Exec("DELETE FROM model_runs WHERE task_id=? AND model_name=?", taskID, modelName)
+	return err
+}
+
 func (s *Store) UpdateModelRunSession(id string, sessionID *string, rounds int, date *int64) error {
 	res, err := s.DB.Exec(
 		"UPDATE model_runs SET session_id=?, conversation_rounds=?, conversation_date=? WHERE id=?",

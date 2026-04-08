@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Loader2, Rocket, ExternalLink, Check, X, Github } from 'lucide-react';
+import { Loader2, Rocket, ExternalLink, Check, X, Github, Plus, Trash2 } from 'lucide-react';
 import {
   getGitHubAccounts,
   type GitHubAccountConfig,
@@ -8,6 +8,8 @@ import {
 import {
   listModelRuns,
   updateTaskStatus,
+  addModelRun,
+  deleteModelRun,
   type ModelRunFromDB,
 } from '../services/task';
 import { publishSourceRepo, submitModelRun } from '../services/submit';
@@ -31,6 +33,15 @@ export default function Submit() {
   const [sourceState, setSourceState] = useState({ status: 'idle' as 'idle' | 'pub' | 'ok' | 'err', url: '', msg: '' });
   const [modelState, setModelState] = useState<Record<string, { status: 'wait' | 'run' | 'ok' | 'err'; prUrl: string; msg: string }>>({});
   const [selectedModels, setSelectedModels] = useState<Set<string>>(new Set());
+  const [addingModel, setAddingModel] = useState(false);
+  const [newModelName, setNewModelName] = useState('');
+  const [newModelPath, setNewModelPath] = useState('');
+  const [addError, setAddError] = useState('');
+
+  const refreshModelRuns = () => {
+    if (!taskId) return;
+    listModelRuns(taskId).then(setModelRuns);
+  };
 
   const task = tasks.find((t) => t.id === taskId) ?? null;
   const account = accounts.find((a) => a.id === accountId) ?? null;
@@ -220,33 +231,53 @@ export default function Submit() {
             )}
           </label>
 
-          {prRuns.length > 0 && (
+          {taskId && (
             <div>
               <div className="flex items-center justify-between mb-1.5">
                 <span className="text-sm font-medium text-stone-500 dark:text-stone-400">模型 PR</span>
-                <div className="flex gap-2 text-xs text-stone-400 dark:text-stone-500">
+                <div className="flex items-center gap-2 text-xs text-stone-400 dark:text-stone-500">
+                  {prRuns.length > 0 && (
+                    <>
+                      <button
+                        type="button"
+                        onClick={() => setSelectedModels(new Set(prRuns.map((r) => r.modelName)))}
+                        className="hover:text-stone-700 dark:hover:text-stone-300 transition-colors cursor-default"
+                      >
+                        全选
+                      </button>
+                      <span>/</span>
+                      <button
+                        type="button"
+                        onClick={() => setSelectedModels(new Set())}
+                        className="hover:text-stone-700 dark:hover:text-stone-300 transition-colors cursor-default"
+                      >
+                        取消
+                      </button>
+                      <span className="text-stone-200 dark:text-stone-700">|</span>
+                    </>
+                  )}
                   <button
                     type="button"
-                    onClick={() => setSelectedModels(new Set(prRuns.map((r) => r.modelName)))}
-                    className="hover:text-stone-700 dark:hover:text-stone-300 transition-colors cursor-default"
+                    onClick={() => { setAddingModel(true); setAddError(''); }}
+                    disabled={busy}
+                    className="flex items-center gap-1 hover:text-stone-700 dark:hover:text-stone-300 transition-colors cursor-default disabled:opacity-40"
                   >
-                    全选
-                  </button>
-                  <span>/</span>
-                  <button
-                    type="button"
-                    onClick={() => setSelectedModels(new Set())}
-                    className="hover:text-stone-700 dark:hover:text-stone-300 transition-colors cursor-default"
-                  >
-                    取消
+                    <Plus className="w-3 h-3" /> 添加
                   </button>
                 </div>
               </div>
+
               <div className="rounded-2xl border border-stone-200 dark:border-[#232834] overflow-hidden divide-y divide-stone-100 dark:divide-stone-800">
+                {prRuns.length === 0 && !addingModel && (
+                  <div className="px-4 py-3 bg-stone-50 dark:bg-[#171B22] text-sm text-stone-400 dark:text-stone-500">
+                    暂无模型文件夹，点击右上角"添加"
+                  </div>
+                )}
+
                 {prRuns.map((r) => (
-                  <label
+                  <div
                     key={r.modelName}
-                    className="flex items-center gap-3 px-4 py-2.5 bg-stone-50 dark:bg-[#171B22] hover:bg-stone-100 dark:hover:bg-[#1E2128] transition-colors cursor-default"
+                    className="flex items-center gap-3 px-4 py-2.5 bg-stone-50 dark:bg-[#171B22] hover:bg-stone-100 dark:hover:bg-[#1E2128] transition-colors"
                   >
                     <input
                       type="checkbox"
@@ -264,8 +295,69 @@ export default function Submit() {
                     <span className="flex-1 font-mono text-sm text-stone-700 dark:text-stone-300 truncate">
                       {r.modelName}
                     </span>
-                  </label>
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={async () => {
+                        await deleteModelRun(taskId, r.modelName);
+                        refreshModelRuns();
+                      }}
+                      className="text-stone-300 dark:text-stone-600 hover:text-red-400 dark:hover:text-red-400 transition-colors cursor-default disabled:opacity-40"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
                 ))}
+
+                {addingModel && (
+                  <div className="px-4 py-3 bg-stone-50 dark:bg-[#171B22] space-y-2">
+                    <div className="flex gap-2">
+                      <input
+                        autoFocus
+                        value={newModelName}
+                        onChange={(e) => setNewModelName(e.target.value)}
+                        placeholder="模型名称"
+                        className="w-28 px-3 py-1.5 rounded-xl bg-white dark:bg-stone-800 border border-stone-200 dark:border-stone-700 text-xs font-mono focus:outline-none focus:ring-2 focus:ring-slate-400/30"
+                      />
+                      <input
+                        value={newModelPath}
+                        onChange={(e) => setNewModelPath(e.target.value)}
+                        placeholder="本地路径（可选）"
+                        className="flex-1 px-3 py-1.5 rounded-xl bg-white dark:bg-stone-800 border border-stone-200 dark:border-stone-700 text-xs font-mono focus:outline-none focus:ring-2 focus:ring-slate-400/30"
+                      />
+                    </div>
+                    {addError && <p className="text-xs text-red-500">{addError}</p>}
+                    <div className="flex gap-2">
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          const name = newModelName.trim();
+                          if (!name) { setAddError('请输入模型名称'); return; }
+                          try {
+                            await addModelRun({ taskId, modelName: name, localPath: newModelPath.trim() || null });
+                            setAddingModel(false);
+                            setNewModelName('');
+                            setNewModelPath('');
+                            setAddError('');
+                            refreshModelRuns();
+                          } catch (e) {
+                            setAddError(errStr(e));
+                          }
+                        }}
+                        className="px-3 py-1.5 bg-[#111827] dark:bg-[#E5EAF2] text-white dark:text-[#0D1117] rounded-xl text-xs font-semibold cursor-default"
+                      >
+                        确认
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => { setAddingModel(false); setNewModelName(''); setNewModelPath(''); setAddError(''); }}
+                        className="px-3 py-1.5 bg-stone-100 dark:bg-stone-800 text-stone-600 dark:text-stone-300 rounded-xl text-xs font-semibold cursor-default"
+                      >
+                        取消
+                      </button>
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
           )}

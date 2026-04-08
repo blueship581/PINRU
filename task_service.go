@@ -96,6 +96,36 @@ func (s *TaskService) UpdateModelRunSessionInfo(req UpdateModelRunSessionRequest
 	return s.store.UpdateModelRunSession(req.ID, req.SessionID, req.ConversationRounds, req.ConversationDate)
 }
 
+type AddModelRunRequest struct {
+	TaskID    string  `json:"taskId"`
+	ModelName string  `json:"modelName"`
+	LocalPath *string `json:"localPath"`
+}
+
+func (s *TaskService) AddModelRun(req AddModelRunRequest) error {
+	if req.TaskID == "" || req.ModelName == "" {
+		return fmt.Errorf("taskId 和 modelName 不能为空")
+	}
+	existing, err := s.store.GetModelRun(req.TaskID, req.ModelName)
+	if err != nil {
+		return err
+	}
+	if existing != nil {
+		return fmt.Errorf("模型 %q 已存在", req.ModelName)
+	}
+	run := store.ModelRun{
+		ID:        uuid.New().String(),
+		TaskID:    req.TaskID,
+		ModelName: req.ModelName,
+		LocalPath: req.LocalPath,
+	}
+	return s.store.CreateModelRun(run)
+}
+
+func (s *TaskService) DeleteModelRun(taskID, modelName string) error {
+	return s.store.DeleteModelRun(taskID, modelName)
+}
+
 func (s *TaskService) DeleteTask(id string) error {
 	task, err := s.store.GetTask(id)
 	if err != nil {
