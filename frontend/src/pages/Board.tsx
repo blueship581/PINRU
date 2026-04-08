@@ -836,6 +836,8 @@ function ProjectPanel({
   const [showToken, setShowToken] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
+  const [addingModel, setAddingModel] = useState(false);
+  const [newModelInput, setNewModelInput] = useState('');
 
   const setField = <K extends keyof Pick<ProjectConfig, 'name' | 'gitlabUrl' | 'gitlabToken' | 'cloneBasePath' | 'models'>>(key: K, value: string) =>
     setForm((prev) => ({ ...prev, [key]: value }));
@@ -851,6 +853,28 @@ function ProjectPanel({
     } finally {
       setSaving(false);
     }
+  };
+
+  const modelTags = form.models
+    ? form.models.split(',').map((m) => m.trim()).filter(Boolean)
+    : ['ORIGIN'];
+
+  const removeModel = (name: string) => {
+    const next = modelTags.filter((m) => m.toUpperCase() !== 'ORIGIN' && m.toLowerCase() !== name.toLowerCase());
+    setField('models', ['ORIGIN', ...next].join(', '));
+  };
+
+  const addModel = () => {
+    const name = newModelInput.trim();
+    if (!name || modelTags.some((m) => m.toLowerCase() === name.toLowerCase())) {
+      setAddingModel(false);
+      setNewModelInput('');
+      return;
+    }
+    const nonOrigin = modelTags.filter((m) => m.toUpperCase() !== 'ORIGIN');
+    setField('models', ['ORIGIN', ...nonOrigin, name].join(', '));
+    setNewModelInput('');
+    setAddingModel(false);
   };
 
   return (
@@ -925,16 +949,55 @@ function ProjectPanel({
           />
         </label>
 
-        <label className="block">
-          <span className="block text-xs font-bold uppercase tracking-wider text-stone-400 dark:text-stone-500 mb-2">模型列表（逗号分隔）</span>
-          <textarea
-            value={form.models}
-            onChange={(e) => setField('models', e.target.value)}
-            rows={3}
-            placeholder="ORIGIN, cotv21-pro, cotv21.2-pro"
-            className="w-full px-4 py-2.5 rounded-2xl bg-stone-50 dark:bg-stone-800 border border-stone-200 dark:border-stone-700 text-sm font-mono resize-none focus:outline-none focus:ring-2 focus:ring-slate-400/30"
-          />
-        </label>
+        <div>
+          <span className="block text-xs font-bold uppercase tracking-wider text-stone-400 dark:text-stone-500 mb-2">模型列表</span>
+          <div className="flex flex-wrap gap-2 p-3 rounded-2xl bg-stone-50 dark:bg-stone-800 border border-stone-200 dark:border-stone-700 min-h-[48px]">
+            {/* ORIGIN chip — 固定不可删 */}
+            <span className="inline-flex items-center px-3 py-1 rounded-xl bg-[#111827] dark:bg-[#E5EAF2] text-white dark:text-[#0D1117] text-xs font-mono font-semibold">
+              ORIGIN
+            </span>
+            {/* 其他模型 chip */}
+            {modelTags.filter((m) => m.toUpperCase() !== 'ORIGIN').map((name) => (
+              <span
+                key={name}
+                className="inline-flex items-center gap-1 px-3 py-1 rounded-xl bg-stone-100 dark:bg-stone-700 border border-stone-200 dark:border-stone-600 text-xs font-mono text-stone-700 dark:text-stone-300"
+              >
+                {name}
+                <button
+                  type="button"
+                  onClick={() => removeModel(name)}
+                  className="ml-0.5 text-stone-400 hover:text-stone-700 dark:hover:text-stone-100 transition-colors cursor-default"
+                >
+                  <X className="w-3 h-3" />
+                </button>
+              </span>
+            ))}
+            {/* 添加按钮 / 输入框 */}
+            {addingModel ? (
+              <input
+                autoFocus
+                value={newModelInput}
+                onChange={(e) => setNewModelInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') { e.preventDefault(); addModel(); }
+                  if (e.key === 'Escape') { setAddingModel(false); setNewModelInput(''); }
+                }}
+                onBlur={addModel}
+                placeholder="模型名称"
+                className="w-28 px-2 py-1 rounded-xl bg-white dark:bg-stone-600 border border-stone-300 dark:border-stone-500 text-xs font-mono focus:outline-none focus:ring-2 focus:ring-slate-400/30"
+              />
+            ) : (
+              <button
+                type="button"
+                onClick={() => setAddingModel(true)}
+                className="inline-flex items-center gap-1 px-3 py-1 rounded-xl border border-dashed border-stone-300 dark:border-stone-600 text-xs text-stone-400 hover:text-stone-600 dark:hover:text-stone-200 hover:border-stone-400 transition-colors cursor-default"
+              >
+                <Plus className="w-3 h-3" />
+                添加
+              </button>
+            )}
+          </div>
+        </div>
 
         {error && (
           <p className="text-sm text-red-500">{error}</p>
