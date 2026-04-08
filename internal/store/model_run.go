@@ -20,12 +20,14 @@ type ModelRun struct {
 	SessionID          *string `json:"sessionId"`
 	ConversationRounds int     `json:"conversationRounds"`
 	ConversationDate   *int64  `json:"conversationDate"`
+	SubmitError        *string `json:"submitError"`
 }
 
 func (s *Store) ListModelRuns(taskID string) ([]ModelRun, error) {
 	rows, err := s.DB.Query(
 		`SELECT id, task_id, model_name, branch_name, local_path, pr_url, origin_url, gsb_score,
-		        status, started_at, finished_at, session_id, conversation_rounds, conversation_date
+		        status, started_at, finished_at, session_id, conversation_rounds, conversation_date,
+		        submit_error
 		 FROM model_runs WHERE task_id = ?
 		 ORDER BY CASE WHEN UPPER(model_name) = 'ORIGIN' THEN 0 ELSE 1 END, model_name`, taskID)
 	if err != nil {
@@ -38,7 +40,7 @@ func (s *Store) ListModelRuns(taskID string) ([]ModelRun, error) {
 		if err := rows.Scan(
 			&r.ID, &r.TaskID, &r.ModelName, &r.BranchName, &r.LocalPath,
 			&r.PrURL, &r.OriginURL, &r.GsbScore, &r.Status, &r.StartedAt, &r.FinishedAt,
-			&r.SessionID, &r.ConversationRounds, &r.ConversationDate,
+			&r.SessionID, &r.ConversationRounds, &r.ConversationDate, &r.SubmitError,
 		); err != nil {
 			return nil, err
 		}
@@ -65,11 +67,12 @@ func (s *Store) GetModelRun(taskID, modelName string) (*ModelRun, error) {
 	var r ModelRun
 	err := s.DB.QueryRow(
 		`SELECT id, task_id, model_name, branch_name, local_path, pr_url, origin_url, gsb_score,
-		        status, started_at, finished_at, session_id, conversation_rounds, conversation_date
+		        status, started_at, finished_at, session_id, conversation_rounds, conversation_date,
+		        submit_error
 		 FROM model_runs WHERE task_id = ? AND model_name = ?`, taskID, modelName).
 		Scan(&r.ID, &r.TaskID, &r.ModelName, &r.BranchName, &r.LocalPath,
 			&r.PrURL, &r.OriginURL, &r.GsbScore, &r.Status, &r.StartedAt, &r.FinishedAt,
-			&r.SessionID, &r.ConversationRounds, &r.ConversationDate)
+			&r.SessionID, &r.ConversationRounds, &r.ConversationDate, &r.SubmitError)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -81,6 +84,16 @@ func (s *Store) GetModelRun(taskID, modelName string) (*ModelRun, error) {
 
 func (s *Store) DeleteModelRun(taskID, modelName string) error {
 	_, err := s.DB.Exec("DELETE FROM model_runs WHERE task_id=? AND model_name=?", taskID, modelName)
+	return err
+}
+
+func (s *Store) SetModelRunOriginURL(taskID, modelName, url string) error {
+	_, err := s.DB.Exec("UPDATE model_runs SET origin_url=? WHERE task_id=? AND model_name=?", url, taskID, modelName)
+	return err
+}
+
+func (s *Store) SetModelRunError(taskID, modelName, errMsg string) error {
+	_, err := s.DB.Exec("UPDATE model_runs SET submit_error=? WHERE task_id=? AND model_name=?", errMsg, taskID, modelName)
 	return err
 }
 

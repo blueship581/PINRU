@@ -19,11 +19,14 @@ var migration001 string
 //go:embed migrations/002_model_runs_extend.sql
 var migration002 string
 
+//go:embed migrations/003_submit_results.sql
+var migration003 string
+
 func main() {
 	home, _ := os.UserHomeDir()
 	dbPath := filepath.Join(home, ".pinru", "pinru.db")
 
-	db, err := store.Open(dbPath, migration001+"\n"+migration002)
+	db, err := store.Open(dbPath, migration001+"\n"+migration002+"\n"+migration003)
 	if err != nil {
 		log.Fatalf("Failed to open database: %v", err)
 	}

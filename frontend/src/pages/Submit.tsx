@@ -1,18 +1,13 @@
-import { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Loader2, Rocket, ExternalLink, Check, X, Github } from 'lucide-react';
+import { Loader2, Rocket, ExternalLink, Check, X, Github, AlertCircle } from 'lucide-react';
 import {
   getGitHubAccounts,
   normalizeProjectModels,
   type GitHubAccountConfig,
 } from '../services/config';
-import {
-  listModelRuns,
-  updateTaskStatus,
-  addModelRun,
-  type ModelRunFromDB,
-} from '../services/task';
-import { publishSourceRepo, submitModelRun } from '../services/submit';
+import { listModelRuns, type ModelRunFromDB } from '../services/task';
+import { submitAll } from '../services/submit';
 import { useAppStore } from '../store';
 
 const selectCls =
@@ -31,15 +26,11 @@ export default function Submit() {
   const [modelRuns, setModelRuns] = useState<ModelRunFromDB[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
-  const [phase, setPhase] = useState<'idle' | 'running' | 'done'>('idle');
-  const [sourceState, setSourceState] = useState({ status: 'idle' as 'idle' | 'pub' | 'ok' | 'err', url: '', msg: '' });
-  const [modelState, setModelState] = useState<Record<string, { status: 'wait' | 'run' | 'ok' | 'err'; prUrl: string; msg: string }>>({});
   const [selectedModels, setSelectedModels] = useState<Set<string>>(new Set());
 
   const task = tasks.find((t) => t.id === taskId) ?? null;
   const account = accounts.find((a) => a.id === accountId) ?? null;
 
-  // Non-ORIGIN models from the project configuration
   const projectPrModelNames = useMemo(() => {
     if (!activeProject?.models) return [];
     return normalizeProjectModels(activeProject.models).filter(
@@ -51,19 +42,17 @@ export default function Submit() {
     () => modelRuns.find((r) => r.modelName.trim().toUpperCase() === 'ORIGIN') ?? null,
     [modelRuns],
   );
-  const srcName = srcRun?.modelName ?? 'ORIGIN';
-
-  // prRuns still used for progress display (existing DB runs)
-  const prRuns = useMemo(
-    () => modelRuns.filter((r) => r.modelName.trim().toUpperCase() !== 'ORIGIN'),
-    [modelRuns],
-  );
 
   const repo = useMemo(() => {
     if (!account || !task) return '';
     const projectName = activeProject?.name ?? task.projectName;
     return `${account.username}/${slugify(projectName)}-${taskId}`;
   }, [account, task, taskId, activeProject]);
+
+  // Results stored in DB: origin_url from srcRun, pr_url / submit_error from other runs
+  const hasResults = useMemo(() =>
+    modelRuns.some((r) => r.status === 'done' || r.status === 'error'),
+  [modelRuns]);
 
   useEffect(() => {
     (async () => {
@@ -93,100 +82,28 @@ export default function Submit() {
     return () => { off = true; };
   }, [taskId]);
 
-  // Default: select all project PR models
   useEffect(() => {
     setSelectedModels(new Set(projectPrModelNames));
   }, [projectPrModelNames]);
 
-  useEffect(() => {
-    if (busy) return;
-    setPhase('idle');
-    setSourceState({ status: 'idle', url: '', msg: '' });
-    setModelState({});
-    setError('');
-  }, [taskId, busy]);
-
-  // Derive a model's local path from the ORIGIN path (sibling folder)
-  const deriveModelPath = (modelName: string): string | null => {
-    if (!srcRun?.localPath) return null;
-    const lastSlash = srcRun.localPath.lastIndexOf('/');
-    if (lastSlash < 0) return null;
-    return srcRun.localPath.substring(0, lastSlash) + '/' + modelName;
-  };
-
   const handleSubmit = async () => {
     if (!task || !account || !repo || !srcRun) return;
-    const selectedList = [...selectedModels];
-
     setBusy(true);
     setError('');
-    setPhase('running');
-    setSourceState({ status: 'idle', url: '', msg: '' });
-    setModelState(Object.fromEntries(selectedList.map((m) => [m, { status: 'wait' as const, prUrl: '', msg: '' }])));
-
     try {
-      // Ensure model_run records exist for all selected models
-      for (const modelName of selectedList) {
-        const exists = modelRuns.some((r) => r.modelName === modelName);
-        if (!exists) {
-          await addModelRun({ taskId, modelName, localPath: deriveModelPath(modelName) });
-        }
-      }
-      const freshRuns = await listModelRuns(taskId);
-      setModelRuns(freshRuns);
-
-      setSourceState({ status: 'pub', url: '', msg: '' });
-      try {
-        const res = await publishSourceRepo({
-          taskId,
-          modelName: srcRun.modelName,
-          targetRepo: repo,
-          githubUsername: account.username,
-          githubToken: account.token,
-        });
-        setSourceState({ status: 'ok', url: res.repoUrl, msg: '' });
-      } catch (e) {
-        setSourceState({ status: 'err', url: '', msg: errStr(e) });
-        setError(`源码上传失败: ${errStr(e)}`);
-        await updateTaskStatus(taskId, task.status);
-        await loadTasks();
-        setPhase('done');
-        return;
-      }
-
-      if (selectedList.length) {
-        let ok = 0;
-        const fails: string[] = [];
-        for (const modelName of selectedList) {
-          setModelState((p) => ({ ...p, [modelName]: { status: 'run', prUrl: '', msg: '' } }));
-          try {
-            const res = await submitModelRun({
-              taskId,
-              modelName,
-              targetRepo: repo,
-              githubUsername: account.username,
-              githubToken: account.token,
-            });
-            ok++;
-            setModelState((p) => ({ ...p, [modelName]: { status: 'ok', prUrl: res.prUrl, msg: '' } }));
-          } catch (e) {
-            fails.push(`${modelName}: ${errStr(e)}`);
-            setModelState((p) => ({ ...p, [modelName]: { status: 'err', prUrl: '', msg: errStr(e) } }));
-          }
-        }
-
-        await updateTaskStatus(taskId, ok === selectedList.length ? 'Submitted' : 'Error');
-        setModelRuns(await listModelRuns(taskId));
-        await loadTasks();
-        if (fails.length) setError(fails.join('\n'));
-      } else {
-        await updateTaskStatus(taskId, 'Submitted');
-        await loadTasks();
-      }
-      setPhase('done');
+      await submitAll({
+        taskId,
+        models: [...selectedModels],
+        targetRepo: repo,
+        githubUsername: account.username,
+        githubToken: account.token,
+      });
+      // Reload results from DB
+      const fresh = await listModelRuns(taskId);
+      setModelRuns(fresh);
+      await loadTasks();
     } catch (e) {
       setError(errStr(e));
-      setPhase('done');
     } finally {
       setBusy(false);
     }
@@ -202,6 +119,8 @@ export default function Submit() {
 
       <div className="flex-1 overflow-y-auto">
         <div className="max-w-lg mx-auto space-y-5">
+
+          {/* 任务选择 */}
           <label className="block">
             <span className="block text-sm font-medium text-stone-500 dark:text-stone-400 mb-1.5">任务</span>
             {!tasks.length ? (
@@ -217,6 +136,12 @@ export default function Submit() {
             )}
           </label>
 
+          {/* 已有提交结果 */}
+          {taskId && hasResults && (
+            <ResultsPanel modelRuns={modelRuns} projectPrModelNames={projectPrModelNames} />
+          )}
+
+          {/* 原始代码 */}
           {taskId && (
             <div>
               <span className="block text-sm font-medium text-stone-500 dark:text-stone-400 mb-1.5">原始代码</span>
@@ -225,18 +150,15 @@ export default function Submit() {
                   <span className="flex-1 font-mono text-sm text-stone-800 dark:text-stone-200 truncate">
                     {srcRun.modelName}
                   </span>
-                  <span className="text-xs bg-stone-200 dark:bg-stone-700 text-stone-500 dark:text-stone-400 px-2 py-0.5 rounded-lg">
-                    必选
-                  </span>
+                  <span className="text-xs bg-stone-200 dark:bg-stone-700 text-stone-500 dark:text-stone-400 px-2 py-0.5 rounded-lg">必选</span>
                 </div>
               ) : (
-                <p className="text-sm text-amber-600 dark:text-amber-400">
-                  缺少 origin 文件夹，请先在领题页下载项目
-                </p>
+                <p className="text-sm text-amber-600 dark:text-amber-400">缺少 origin 文件夹，请先在领题页下载项目</p>
               )}
             </div>
           )}
 
+          {/* GitHub 账号 */}
           <label className="block">
             <span className="block text-sm font-medium text-stone-500 dark:text-stone-400 mb-1.5">GitHub 账号</span>
             {!accounts.length ? (
@@ -252,34 +174,20 @@ export default function Submit() {
             )}
           </label>
 
+          {/* 模型 PR 多选 */}
           {taskId && projectPrModelNames.length > 0 && (
             <div>
               <div className="flex items-center justify-between mb-1.5">
                 <span className="text-sm font-medium text-stone-500 dark:text-stone-400">模型 PR</span>
                 <div className="flex gap-2 text-xs text-stone-400 dark:text-stone-500">
-                  <button
-                    type="button"
-                    onClick={() => setSelectedModels(new Set(projectPrModelNames))}
-                    className="hover:text-stone-700 dark:hover:text-stone-300 transition-colors cursor-default"
-                  >
-                    全选
-                  </button>
+                  <button type="button" onClick={() => setSelectedModels(new Set(projectPrModelNames))} className="hover:text-stone-700 dark:hover:text-stone-300 transition-colors cursor-default">全选</button>
                   <span>/</span>
-                  <button
-                    type="button"
-                    onClick={() => setSelectedModels(new Set())}
-                    className="hover:text-stone-700 dark:hover:text-stone-300 transition-colors cursor-default"
-                  >
-                    取消
-                  </button>
+                  <button type="button" onClick={() => setSelectedModels(new Set())} className="hover:text-stone-700 dark:hover:text-stone-300 transition-colors cursor-default">取消</button>
                 </div>
               </div>
               <div className="rounded-2xl border border-stone-200 dark:border-[#232834] overflow-hidden divide-y divide-stone-100 dark:divide-stone-800">
                 {projectPrModelNames.map((modelName) => (
-                  <label
-                    key={modelName}
-                    className="flex items-center gap-3 px-4 py-2.5 bg-stone-50 dark:bg-[#171B22] hover:bg-stone-100 dark:hover:bg-[#1E2128] transition-colors cursor-default"
-                  >
+                  <label key={modelName} className="flex items-center gap-3 px-4 py-2.5 bg-stone-50 dark:bg-[#171B22] hover:bg-stone-100 dark:hover:bg-[#1E2128] transition-colors cursor-default">
                     <input
                       type="checkbox"
                       checked={selectedModels.has(modelName)}
@@ -293,15 +201,14 @@ export default function Submit() {
                       disabled={busy}
                       className="w-4 h-4 rounded accent-slate-700 dark:accent-slate-300 cursor-default"
                     />
-                    <span className="flex-1 font-mono text-sm text-stone-700 dark:text-stone-300 truncate">
-                      {modelName}
-                    </span>
+                    <span className="flex-1 font-mono text-sm text-stone-700 dark:text-stone-300 truncate">{modelName}</span>
                   </label>
                 ))}
               </div>
             </div>
           )}
 
+          {/* 目标仓库 */}
           {repo && (
             <div>
               <span className="block text-sm font-medium text-stone-500 dark:text-stone-400 mb-1.5">目标仓库</span>
@@ -309,15 +216,12 @@ export default function Submit() {
                 {repo}
               </p>
               <p className="text-xs text-stone-400 mt-1.5">
-                自动创建{selectedModels.size > 0 ? (
-                  <> &middot; 源码 &rarr; main &middot; {selectedModels.size} 个模型 &rarr; PR</>
-                ) : (
-                  <> &middot; 仅上传源码到 main</>
-                )}
+                自动创建{selectedModels.size > 0 ? <> &middot; 源码 &rarr; main &middot; {selectedModels.size} 个模型 &rarr; PR</> : <> &middot; 仅上传源码到 main</>}
               </p>
             </div>
           )}
 
+          {/* 提交按钮 */}
           <button
             onClick={handleSubmit}
             disabled={!ready}
@@ -331,56 +235,81 @@ export default function Submit() {
               {error}
             </pre>
           )}
-
-          {phase !== 'idle' && (
-            <div className="rounded-2xl border border-stone-200 dark:border-stone-800 divide-y divide-stone-100 dark:divide-stone-800 overflow-hidden">
-              <ProgressRow
-                label={`源码 · ${srcName}`}
-                status={sourceState.status === 'pub' ? 'run' : sourceState.status === 'ok' ? 'ok' : sourceState.status === 'err' ? 'err' : 'wait'}
-                link={sourceState.url}
-                msg={sourceState.msg}
-              />
-              {[...selectedModels].map((modelName) => {
-                const s = modelState[modelName];
-                return (
-                  <ProgressRow
-                    key={modelName}
-                    label={modelName}
-                    status={s?.status ?? 'wait'}
-                    link={s?.prUrl}
-                    msg={s?.msg}
-                  />
-                );
-              })}
-            </div>
-          )}
         </div>
       </div>
     </div>
   );
 }
 
-function ProgressRow({ label, status, link, msg }: { key?: string; label: string; status: 'wait' | 'run' | 'ok' | 'err'; link?: string; msg?: string }) {
+// ── 提交结果面板（从 DB 读取，持久显示）──
+function ResultsPanel({ modelRuns, projectPrModelNames }: {
+  modelRuns: ModelRunFromDB[];
+  projectPrModelNames: string[];
+}) {
+  const originRun = modelRuns.find((r) => r.modelName.trim().toUpperCase() === 'ORIGIN');
+  // Show results for project models + any extras already in DB
+  const prRunNames = new Set([
+    ...projectPrModelNames,
+    ...modelRuns.filter((r) => r.modelName.trim().toUpperCase() !== 'ORIGIN').map((r) => r.modelName),
+  ]);
+  const prResults = [...prRunNames].map((name) =>
+    modelRuns.find((r) => r.modelName === name) ?? { modelName: name, status: 'pending', prUrl: null, submitError: null } as ModelRunFromDB
+  );
+
+  if (!originRun && prResults.length === 0) return null;
+
   return (
-    <div className="flex items-center gap-3 px-4 py-3 bg-white dark:bg-stone-900">
-      <StatusIcon status={status} />
-      <span className="flex-1 text-sm font-mono text-stone-700 dark:text-stone-300 truncate">{label}</span>
-      {status === 'ok' && link && (
-        <a href={link} target="_blank" rel="noreferrer" className="text-stone-400 hover:text-stone-600 dark:hover:text-stone-200 transition-colors">
-          <ExternalLink className="w-3.5 h-3.5" />
-        </a>
-      )}
-      {status === 'err' && msg && (
-        <span className="text-xs text-red-500 truncate max-w-[200px]" title={msg}>{msg}</span>
-      )}
+    <div>
+      <span className="block text-sm font-medium text-stone-500 dark:text-stone-400 mb-1.5">提交结果</span>
+      <div className="rounded-2xl border border-stone-200 dark:border-stone-800 overflow-hidden divide-y divide-stone-100 dark:divide-stone-800">
+        {/* Origin row */}
+        {originRun && (
+          <ResultRow
+            label={`源码 · ${originRun.modelName}`}
+            status={originRun.status}
+            link={originRun.originUrl ?? undefined}
+            errMsg={originRun.submitError ?? undefined}
+          />
+        )}
+        {/* Model rows */}
+        {prResults.map((r) => (
+          <ResultRow
+            key={r.modelName}
+            label={r.modelName}
+            status={r.status}
+            link={r.prUrl ?? undefined}
+            errMsg={r.submitError ?? undefined}
+          />
+        ))}
+      </div>
     </div>
   );
 }
 
-function StatusIcon({ status }: { status: 'wait' | 'run' | 'ok' | 'err' }) {
-  if (status === 'ok') return <Check className="w-4 h-4 text-emerald-500 flex-shrink-0" />;
-  if (status === 'err') return <X className="w-4 h-4 text-red-400 flex-shrink-0" />;
-  if (status === 'run') return <Loader2 className="w-4 h-4 text-stone-400 animate-spin flex-shrink-0" />;
+const ResultRow: React.FC<{
+  label: string;
+  status: string;
+  link?: string;
+  errMsg?: string;
+}> = ({ label, status, link, errMsg }) => (
+  <div className="flex items-center gap-3 px-4 py-3 bg-white dark:bg-stone-900">
+    <ResultIcon status={status} />
+    <span className="flex-1 text-sm font-mono text-stone-700 dark:text-stone-300 truncate">{label}</span>
+    {status === 'done' && link && (
+      <a href={link} target="_blank" rel="noreferrer" className="text-stone-400 hover:text-stone-600 dark:hover:text-stone-200 transition-colors">
+        <ExternalLink className="w-3.5 h-3.5" />
+      </a>
+    )}
+    {status === 'error' && errMsg && (
+      <span className="text-xs text-red-500 truncate max-w-[220px]" title={errMsg}>{errMsg}</span>
+    )}
+  </div>
+);
+
+function ResultIcon({ status }: { status: string }) {
+  if (status === 'done') return <Check className="w-4 h-4 text-emerald-500 flex-shrink-0" />;
+  if (status === 'error') return <AlertCircle className="w-4 h-4 text-red-400 flex-shrink-0" />;
+  if (status === 'running') return <Loader2 className="w-4 h-4 text-stone-400 animate-spin flex-shrink-0" />;
   return <div className="w-4 h-4 flex items-center justify-center flex-shrink-0"><div className="w-1.5 h-1.5 rounded-full bg-stone-300 dark:bg-stone-600" /></div>;
 }
 
@@ -391,7 +320,12 @@ function normalizeAccounts(accs: GitHubAccountConfig[]) {
 }
 
 function slugify(name: string) {
-  return name.trim().replace(/\s+/g, '-').replace(/[^a-zA-Z0-9\u4e00-\u9fff._-]/g, '').replace(/-{2,}/g, '-').replace(/^[-.]|[-.]$/g, '') || 'repo';
+  return name.trim()
+    .replace(/[^\x00-\x7F]+/g, '')     // remove non-ASCII (中文等)
+    .replace(/[^a-zA-Z0-9._-]/g, '-')  // replace remaining non-allowed with -
+    .replace(/-{2,}/g, '-')
+    .replace(/^[-.]|[-.]$/g, '')
+    || 'project';
 }
 
 function errStr(e: unknown): string {

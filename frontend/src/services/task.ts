@@ -28,6 +28,7 @@ export interface ModelRunFromDB {
   sessionId: string | null;
   conversationRounds: number;
   conversationDate: number | null;
+  submitError: string | null;
 }
 
 export interface CreateTaskRequest {
