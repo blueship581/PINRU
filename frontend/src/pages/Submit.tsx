@@ -1,15 +1,15 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Loader2, Rocket, ExternalLink, Check, X, Github, Plus, Trash2 } from 'lucide-react';
+import { Loader2, Rocket, ExternalLink, Check, X, Github } from 'lucide-react';
 import {
   getGitHubAccounts,
+  normalizeProjectModels,
   type GitHubAccountConfig,
 } from '../services/config';
 import {
   listModelRuns,
   updateTaskStatus,
   addModelRun,
-  deleteModelRun,
   type ModelRunFromDB,
 } from '../services/task';
 import { publishSourceRepo, submitModelRun } from '../services/submit';
@@ -22,6 +22,8 @@ export default function Submit() {
   const navigate = useNavigate();
   const tasks = useAppStore((s) => s.tasks);
   const loadTasks = useAppStore((s) => s.loadTasks);
+  const activeProject = useAppStore((s) => s.activeProject);
+  const loadActiveProject = useAppStore((s) => s.loadActiveProject);
 
   const [accounts, setAccounts] = useState<GitHubAccountConfig[]>([]);
   const [taskId, setTaskId] = useState('');
@@ -33,32 +35,29 @@ export default function Submit() {
   const [sourceState, setSourceState] = useState({ status: 'idle' as 'idle' | 'pub' | 'ok' | 'err', url: '', msg: '' });
   const [modelState, setModelState] = useState<Record<string, { status: 'wait' | 'run' | 'ok' | 'err'; prUrl: string; msg: string }>>({});
   const [selectedModels, setSelectedModels] = useState<Set<string>>(new Set());
-  const [addingModel, setAddingModel] = useState(false);
-  const [newModelName, setNewModelName] = useState('');
-  const [newModelPath, setNewModelPath] = useState('');
-  const [addError, setAddError] = useState('');
-
-  const refreshModelRuns = () => {
-    if (!taskId) return;
-    listModelRuns(taskId).then(setModelRuns);
-  };
 
   const task = tasks.find((t) => t.id === taskId) ?? null;
   const account = accounts.find((a) => a.id === accountId) ?? null;
 
+  // Non-ORIGIN models from the project configuration
+  const projectPrModelNames = useMemo(() => {
+    if (!activeProject?.models) return [];
+    return normalizeProjectModels(activeProject.models).filter(
+      (m) => m.trim().toUpperCase() !== 'ORIGIN',
+    );
+  }, [activeProject]);
+
   const srcRun = useMemo(
-    () => modelRuns.find((r) => r.modelName.trim().toUpperCase() === 'ORIGIN') ?? modelRuns[0] ?? null,
+    () => modelRuns.find((r) => r.modelName.trim().toUpperCase() === 'ORIGIN') ?? null,
     [modelRuns],
   );
   const srcName = srcRun?.modelName ?? 'ORIGIN';
 
-  const prRuns = useMemo(() => {
-    const src = srcName.trim().toUpperCase();
-    return modelRuns.filter((r) => {
-      const n = r.modelName.trim().toUpperCase();
-      return n !== 'ORIGIN' && n !== src;
-    });
-  }, [modelRuns, srcName]);
+  // prRuns still used for progress display (existing DB runs)
+  const prRuns = useMemo(
+    () => modelRuns.filter((r) => r.modelName.trim().toUpperCase() !== 'ORIGIN'),
+    [modelRuns],
+  );
 
   const repo = useMemo(() => {
     if (!account || !task) return '';
@@ -67,11 +66,12 @@ export default function Submit() {
 
   useEffect(() => {
     (async () => {
+      await loadActiveProject();
       await loadTasks();
       const accs = await getGitHubAccounts();
       setAccounts(normalizeAccounts(accs));
     })();
-  }, [loadTasks]);
+  }, [loadTasks, loadActiveProject]);
 
   useEffect(() => {
     if (!tasks.length) { setTaskId(''); return; }
@@ -92,9 +92,10 @@ export default function Submit() {
     return () => { off = true; };
   }, [taskId]);
 
+  // Default: select all project PR models
   useEffect(() => {
-    setSelectedModels(new Set(prRuns.map((r) => r.modelName)));
-  }, [prRuns]);
+    setSelectedModels(new Set(projectPrModelNames));
+  }, [projectPrModelNames]);
 
   useEffect(() => {
     if (busy) return;
@@ -104,16 +105,35 @@ export default function Submit() {
     setError('');
   }, [taskId, busy]);
 
+  // Derive a model's local path from the ORIGIN path (sibling folder)
+  const deriveModelPath = (modelName: string): string | null => {
+    if (!srcRun?.localPath) return null;
+    const lastSlash = srcRun.localPath.lastIndexOf('/');
+    if (lastSlash < 0) return null;
+    return srcRun.localPath.substring(0, lastSlash) + '/' + modelName;
+  };
+
   const handleSubmit = async () => {
     if (!task || !account || !repo || !srcRun) return;
-    const runsToSubmit = prRuns.filter((r) => selectedModels.has(r.modelName));
+    const selectedList = [...selectedModels];
+
     setBusy(true);
     setError('');
     setPhase('running');
     setSourceState({ status: 'idle', url: '', msg: '' });
-    setModelState(Object.fromEntries(runsToSubmit.map((r) => [r.modelName, { status: 'wait' as const, prUrl: '', msg: '' }])));
+    setModelState(Object.fromEntries(selectedList.map((m) => [m, { status: 'wait' as const, prUrl: '', msg: '' }])));
 
     try {
+      // Ensure model_run records exist for all selected models
+      for (const modelName of selectedList) {
+        const exists = modelRuns.some((r) => r.modelName === modelName);
+        if (!exists) {
+          await addModelRun({ taskId, modelName, localPath: deriveModelPath(modelName) });
+        }
+      }
+      const freshRuns = await listModelRuns(taskId);
+      setModelRuns(freshRuns);
+
       setSourceState({ status: 'pub', url: '', msg: '' });
       try {
         const res = await publishSourceRepo({
@@ -133,28 +153,28 @@ export default function Submit() {
         return;
       }
 
-      if (runsToSubmit.length) {
+      if (selectedList.length) {
         let ok = 0;
         const fails: string[] = [];
-        for (const run of runsToSubmit) {
-          setModelState((p) => ({ ...p, [run.modelName]: { status: 'run', prUrl: '', msg: '' } }));
+        for (const modelName of selectedList) {
+          setModelState((p) => ({ ...p, [modelName]: { status: 'run', prUrl: '', msg: '' } }));
           try {
             const res = await submitModelRun({
               taskId,
-              modelName: run.modelName,
+              modelName,
               targetRepo: repo,
               githubUsername: account.username,
               githubToken: account.token,
             });
             ok++;
-            setModelState((p) => ({ ...p, [run.modelName]: { status: 'ok', prUrl: res.prUrl, msg: '' } }));
+            setModelState((p) => ({ ...p, [modelName]: { status: 'ok', prUrl: res.prUrl, msg: '' } }));
           } catch (e) {
-            fails.push(`${run.modelName}: ${errStr(e)}`);
-            setModelState((p) => ({ ...p, [run.modelName]: { status: 'err', prUrl: '', msg: errStr(e) } }));
+            fails.push(`${modelName}: ${errStr(e)}`);
+            setModelState((p) => ({ ...p, [modelName]: { status: 'err', prUrl: '', msg: errStr(e) } }));
           }
         }
 
-        await updateTaskStatus(taskId, ok === runsToSubmit.length ? 'Submitted' : 'Error');
+        await updateTaskStatus(taskId, ok === selectedList.length ? 'Submitted' : 'Error');
         setModelRuns(await listModelRuns(taskId));
         await loadTasks();
         if (fails.length) setError(fails.join('\n'));
@@ -231,61 +251,41 @@ export default function Submit() {
             )}
           </label>
 
-          {taskId && (
+          {taskId && projectPrModelNames.length > 0 && (
             <div>
               <div className="flex items-center justify-between mb-1.5">
                 <span className="text-sm font-medium text-stone-500 dark:text-stone-400">模型 PR</span>
-                <div className="flex items-center gap-2 text-xs text-stone-400 dark:text-stone-500">
-                  {prRuns.length > 0 && (
-                    <>
-                      <button
-                        type="button"
-                        onClick={() => setSelectedModels(new Set(prRuns.map((r) => r.modelName)))}
-                        className="hover:text-stone-700 dark:hover:text-stone-300 transition-colors cursor-default"
-                      >
-                        全选
-                      </button>
-                      <span>/</span>
-                      <button
-                        type="button"
-                        onClick={() => setSelectedModels(new Set())}
-                        className="hover:text-stone-700 dark:hover:text-stone-300 transition-colors cursor-default"
-                      >
-                        取消
-                      </button>
-                      <span className="text-stone-200 dark:text-stone-700">|</span>
-                    </>
-                  )}
+                <div className="flex gap-2 text-xs text-stone-400 dark:text-stone-500">
                   <button
                     type="button"
-                    onClick={() => { setAddingModel(true); setAddError(''); }}
-                    disabled={busy}
-                    className="flex items-center gap-1 hover:text-stone-700 dark:hover:text-stone-300 transition-colors cursor-default disabled:opacity-40"
+                    onClick={() => setSelectedModels(new Set(projectPrModelNames))}
+                    className="hover:text-stone-700 dark:hover:text-stone-300 transition-colors cursor-default"
                   >
-                    <Plus className="w-3 h-3" /> 添加
+                    全选
+                  </button>
+                  <span>/</span>
+                  <button
+                    type="button"
+                    onClick={() => setSelectedModels(new Set())}
+                    className="hover:text-stone-700 dark:hover:text-stone-300 transition-colors cursor-default"
+                  >
+                    取消
                   </button>
                 </div>
               </div>
-
               <div className="rounded-2xl border border-stone-200 dark:border-[#232834] overflow-hidden divide-y divide-stone-100 dark:divide-stone-800">
-                {prRuns.length === 0 && !addingModel && (
-                  <div className="px-4 py-3 bg-stone-50 dark:bg-[#171B22] text-sm text-stone-400 dark:text-stone-500">
-                    暂无模型文件夹，点击右上角"添加"
-                  </div>
-                )}
-
-                {prRuns.map((r) => (
-                  <div
-                    key={r.modelName}
-                    className="flex items-center gap-3 px-4 py-2.5 bg-stone-50 dark:bg-[#171B22] hover:bg-stone-100 dark:hover:bg-[#1E2128] transition-colors"
+                {projectPrModelNames.map((modelName) => (
+                  <label
+                    key={modelName}
+                    className="flex items-center gap-3 px-4 py-2.5 bg-stone-50 dark:bg-[#171B22] hover:bg-stone-100 dark:hover:bg-[#1E2128] transition-colors cursor-default"
                   >
                     <input
                       type="checkbox"
-                      checked={selectedModels.has(r.modelName)}
+                      checked={selectedModels.has(modelName)}
                       onChange={(e) =>
                         setSelectedModels((prev) => {
                           const next = new Set(prev);
-                          e.target.checked ? next.add(r.modelName) : next.delete(r.modelName);
+                          e.target.checked ? next.add(modelName) : next.delete(modelName);
                           return next;
                         })
                       }
@@ -293,71 +293,10 @@ export default function Submit() {
                       className="w-4 h-4 rounded accent-slate-700 dark:accent-slate-300 cursor-default"
                     />
                     <span className="flex-1 font-mono text-sm text-stone-700 dark:text-stone-300 truncate">
-                      {r.modelName}
+                      {modelName}
                     </span>
-                    <button
-                      type="button"
-                      disabled={busy}
-                      onClick={async () => {
-                        await deleteModelRun(taskId, r.modelName);
-                        refreshModelRuns();
-                      }}
-                      className="text-stone-300 dark:text-stone-600 hover:text-red-400 dark:hover:text-red-400 transition-colors cursor-default disabled:opacity-40"
-                    >
-                      <Trash2 className="w-3.5 h-3.5" />
-                    </button>
-                  </div>
+                  </label>
                 ))}
-
-                {addingModel && (
-                  <div className="px-4 py-3 bg-stone-50 dark:bg-[#171B22] space-y-2">
-                    <div className="flex gap-2">
-                      <input
-                        autoFocus
-                        value={newModelName}
-                        onChange={(e) => setNewModelName(e.target.value)}
-                        placeholder="模型名称"
-                        className="w-28 px-3 py-1.5 rounded-xl bg-white dark:bg-stone-800 border border-stone-200 dark:border-stone-700 text-xs font-mono focus:outline-none focus:ring-2 focus:ring-slate-400/30"
-                      />
-                      <input
-                        value={newModelPath}
-                        onChange={(e) => setNewModelPath(e.target.value)}
-                        placeholder="本地路径（可选）"
-                        className="flex-1 px-3 py-1.5 rounded-xl bg-white dark:bg-stone-800 border border-stone-200 dark:border-stone-700 text-xs font-mono focus:outline-none focus:ring-2 focus:ring-slate-400/30"
-                      />
-                    </div>
-                    {addError && <p className="text-xs text-red-500">{addError}</p>}
-                    <div className="flex gap-2">
-                      <button
-                        type="button"
-                        onClick={async () => {
-                          const name = newModelName.trim();
-                          if (!name) { setAddError('请输入模型名称'); return; }
-                          try {
-                            await addModelRun({ taskId, modelName: name, localPath: newModelPath.trim() || null });
-                            setAddingModel(false);
-                            setNewModelName('');
-                            setNewModelPath('');
-                            setAddError('');
-                            refreshModelRuns();
-                          } catch (e) {
-                            setAddError(errStr(e));
-                          }
-                        }}
-                        className="px-3 py-1.5 bg-[#111827] dark:bg-[#E5EAF2] text-white dark:text-[#0D1117] rounded-xl text-xs font-semibold cursor-default"
-                      >
-                        确认
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => { setAddingModel(false); setNewModelName(''); setNewModelPath(''); setAddError(''); }}
-                        className="px-3 py-1.5 bg-stone-100 dark:bg-stone-800 text-stone-600 dark:text-stone-300 rounded-xl text-xs font-semibold cursor-default"
-                      >
-                        取消
-                      </button>
-                    </div>
-                  </div>
-                )}
               </div>
             </div>
           )}
@@ -400,12 +339,12 @@ export default function Submit() {
                 link={sourceState.url}
                 msg={sourceState.msg}
               />
-              {prRuns.filter((r) => selectedModels.has(r.modelName)).map((r) => {
-                const s = modelState[r.modelName];
+              {[...selectedModels].map((modelName) => {
+                const s = modelState[modelName];
                 return (
                   <ProgressRow
-                    key={r.modelName}
-                    label={r.modelName}
+                    key={modelName}
+                    label={modelName}
                     status={s?.status ?? 'wait'}
                     link={s?.prUrl}
                     msg={s?.msg}
