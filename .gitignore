@@ -1,21 +1,21 @@
-node_modules/
-dist/
-.DS_Store
-.idea/
-.claude/
-docs/
-scripts/
-ui稿/
+# Build artifacts
+build/bin/
+frontend/dist/
+frontend/bindings/
+frontend/node_modules/
+
+# Database
+*.db
 
 # Vite / frontend
 *.local
 vite.config.ts.timestamp-*
 vite.config.js.timestamp-*
 
-# Tauri / Rust build artifacts
-src-tauri/target/
-src-tauri/gen/
-src-tauri/.cargo/
+# Go
+*.exe
+*.test
+*.out
 
 # Logs
 *.log
@@ -26,9 +26,19 @@ pnpm-debug.log*
 
 # Editor / OS
 .vscode/
+.idea/
+.DS_Store
 Thumbs.db
 
 # Misc
 coverage/
 tmp/
 temp/
+
+# Old code (remove after migration verified)
+old_code/
+
+# Claude / docs
+.claude/
+.superpowers/
+docs/

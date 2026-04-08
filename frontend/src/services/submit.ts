@@ -42,6 +42,7 @@ export interface SubmitAllRequest {
   taskId: string;
   models: string[];
   targetRepo: string;
+  sourceModelName?: string;
   githubUsername: string;
   githubToken: string;
 }

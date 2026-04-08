@@ -1,0 +1,24 @@
+version: '3'
+
+tasks:
+  dev:
+    desc: Run development mode
+    cmds:
+      - wails3 dev
+
+  build:
+    desc: Build production binary
+    cmds:
+      - cd frontend && npm run build
+      - go build -o build/bin/pinru .
+
+  generate:
+    desc: Generate Wails bindings
+    cmds:
+      - wails3 generate bindings -d frontend/bindings
+
+  clean:
+    desc: Clean build artifacts
+    cmds:
+      - rm -rf build/bin
+      - rm -rf frontend/dist

@@ -1,9 +1,14 @@
 import { callService } from './wails';
 
+export type PromptGenerationStatus = 'idle' | 'running' | 'done' | 'error';
+
 export interface TaskSession {
   sessionId: string;
   taskType: string;
   consumeQuota: boolean;
+  isCompleted?: boolean | null;
+  isSatisfied?: boolean | null;
+  evaluation?: string;
 }
 
 export interface TaskFromDB {
@@ -15,6 +20,10 @@ export interface TaskFromDB {
   sessionList: TaskSession[];
   localPath: string | null;
   promptText: string | null;
+  promptGenerationStatus: PromptGenerationStatus;
+  promptGenerationError: string | null;
+  promptGenerationStartedAt: number | null;
+  promptGenerationFinishedAt: number | null;
   createdAt: number;
   updatedAt: number;
   notes: string | null;

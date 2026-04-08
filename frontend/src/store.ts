@@ -1,6 +1,23 @@
 import { create } from 'zustand';
-import { listModelRuns, listTasks, TaskFromDB, type ModelRunFromDB } from './services/task';
-import { getActiveProjectId, getConfig, getProjects, normalizeProjectModels, type ProjectConfig } from './services/config';
+import {
+  listModelRuns,
+  listTasks,
+  TaskFromDB,
+  type ModelRunFromDB,
+  type PromptGenerationStatus,
+} from './services/task';
+import {
+  DEFAULT_TASK_TYPES,
+  getActiveProjectId,
+  getConfig,
+  getProjects,
+  normalizeProjectModels,
+  normalizeTaskTypeName,
+  type ProjectConfig,
+  type TaskType,
+} from './services/config';
+
+export type { TaskType } from './services/config';
 
 export type TaskStatus = 'Claimed' | 'Downloading' | 'Downloaded' | 'PromptReady' | 'Submitted' | 'Error';
 
@@ -9,7 +26,11 @@ export interface Task {
   projectId: string;
   projectName: string;
   status: TaskStatus;
+  taskType: TaskType;
+  promptGenerationStatus: PromptGenerationStatus;
+  promptGenerationError: string | null;
   createdAt: number;
+  executionRounds: number;
   progress: number;
   totalModels: number;
   runningModels: number;
@@ -21,13 +42,21 @@ export interface CloneModel {
   isDefault: boolean;
 }
 
+function getExecutionRounds(dbTask: TaskFromDB): number {
+  return Math.max(dbTask.sessionList?.length ?? 0, 1);
+}
+
 function mapDbTaskToTask(dbTask: TaskFromDB): Task {
   return {
     id: dbTask.id,
     projectId: String(dbTask.gitlabProjectId),
     projectName: dbTask.projectName,
     status: dbTask.status as TaskStatus,
+    taskType: normalizeTaskTypeName(dbTask.taskType) || DEFAULT_TASK_TYPES[0],
+    promptGenerationStatus: dbTask.promptGenerationStatus,
+    promptGenerationError: dbTask.promptGenerationError,
     createdAt: dbTask.createdAt,
+    executionRounds: getExecutionRounds(dbTask),
     progress: 0,
     totalModels: 0,
     runningModels: 0,
@@ -38,6 +67,14 @@ function isOriginModel(name: string) {
   return name.trim().toUpperCase() === 'ORIGIN';
 }
 
+function isSourceModel(name: string, sourceModelName: string) {
+  return name.trim().toUpperCase() === sourceModelName.trim().toUpperCase();
+}
+
+function isNonExecutionModel(name: string, sourceModelName: string) {
+  return isOriginModel(name) || isSourceModel(name, sourceModelName);
+}
+
 interface AppState {
   theme: 'dark' | 'light';
   setTheme: (theme: 'dark' | 'light') => void;
@@ -46,6 +83,7 @@ interface AppState {
   addTask: (task: Task) => void;
   removeTask: (id: string) => void;
   updateTaskStatus: (id: string, status: TaskStatus) => void;
+  updateTaskType: (id: string, taskType: TaskType) => void;
   cloneModels: CloneModel[];
   loadCloneModels: () => Promise<void>;
   addCloneModel: (model: CloneModel) => void;
@@ -63,7 +101,12 @@ export const useAppStore = create<AppState>((set) => ({
   tasks: [],
   loadTasks: async () => {
     try {
-      const activeProjectId = await getActiveProjectId();
+      const [activeProjectId, projects] = await Promise.all([
+        getActiveProjectId(),
+        getProjects(),
+      ]);
+      const activeProject = projects.find((project) => project.id === activeProjectId) ?? projects[0] ?? null;
+      const sourceModelName = activeProject?.sourceModelFolder?.trim() || 'ORIGIN';
       const dbTasks = await listTasks(activeProjectId || undefined);
       const runsByTask = await Promise.all(
         dbTasks.map(async (task) => {
@@ -80,7 +123,9 @@ export const useAppStore = create<AppState>((set) => ({
       const runMap = new Map(runsByTask);
       set({
         tasks: dbTasks.map((dbTask) => {
-          const runs = (runMap.get(dbTask.id) ?? []).filter((run) => !isOriginModel(run.modelName));
+          const runs = (runMap.get(dbTask.id) ?? []).filter(
+            (run) => !isNonExecutionModel(run.modelName, sourceModelName),
+          );
           const progress = runs.filter((run) => run.status === 'done').length;
           const runningModels = runs.filter((run) => run.status === 'running').length;
 
@@ -100,6 +145,9 @@ export const useAppStore = create<AppState>((set) => ({
   removeTask: (id) => set((state) => ({ tasks: state.tasks.filter((task) => task.id !== id) })),
   updateTaskStatus: (id, status) => set((state) => ({
     tasks: state.tasks.map((t) => t.id === id ? { ...t, status } : t)
+  })),
+  updateTaskType: (id, taskType) => set((state) => ({
+    tasks: state.tasks.map((t) => t.id === id ? { ...t, taskType } : t)
   })),
   cloneModels: [
     { id: 'ORIGIN', name: 'ORIGIN', isDefault: true },

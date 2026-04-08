@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import {
   Search, Clock, GitBranch, CheckCircle2, CircleDashed, PlayCircle, Copy, Check,
-  X, ExternalLink, Plus, Trash2, Settings, AlignJustify, Grid2X2, LayoutGrid, RefreshCw,
+  X, ExternalLink, Plus, Trash2, Settings, AlignJustify, Grid2X2, LayoutGrid, RefreshCw, Eye, EyeOff, ChevronDown,
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { useAppStore, TaskStatus, TaskType, Task } from '../store';
@@ -26,7 +26,9 @@ import {
   deleteTask,
   getTask,
   listModelRuns,
+  type PromptGenerationStatus,
   updateTaskStatus,
+  updateTaskType,
   updateTaskSessionList,
   type ModelRunFromDB,
   type TaskSession as TaskSessionRecord,
@@ -53,7 +55,42 @@ const STATUS: Record<TaskStatus, {
 
 const COLUMNS: TaskStatus[] = ['Claimed', 'Downloading', 'Downloaded', 'PromptReady', 'Submitted', 'Error'];
 
+const PROMPT_GENERATION_STATUS: Record<PromptGenerationStatus, {
+  label: string;
+  badgeCls: string;
+  panelCls: string;
+}> = {
+  idle: {
+    label: '未生成',
+    badgeCls: 'bg-stone-100 dark:bg-stone-800 text-stone-500 dark:text-stone-400',
+    panelCls: 'bg-stone-50 dark:bg-stone-900/40 border-stone-200 dark:border-stone-700 text-stone-500 dark:text-stone-400',
+  },
+  running: {
+    label: '正在生成',
+    badgeCls: 'bg-amber-50 dark:bg-amber-500/10 text-amber-700 dark:text-amber-400',
+    panelCls: 'bg-amber-50 dark:bg-amber-900/10 border-amber-100 dark:border-amber-900/40 text-amber-700 dark:text-amber-400',
+  },
+  done: {
+    label: '已写入任务',
+    badgeCls: 'bg-emerald-50 dark:bg-emerald-500/10 text-emerald-700 dark:text-emerald-400',
+    panelCls: 'bg-emerald-50 dark:bg-emerald-900/10 border-emerald-100 dark:border-emerald-900/40 text-emerald-700 dark:text-emerald-400',
+  },
+  error: {
+    label: '生成失败',
+    badgeCls: 'bg-red-50 dark:bg-red-900/20 text-red-600 dark:text-red-400',
+    panelCls: 'bg-red-50 dark:bg-red-900/10 border-red-100 dark:border-red-900/40 text-red-600 dark:text-red-400',
+  },
+};
+
+function normalizePromptGenerationStatus(status?: string | null): PromptGenerationStatus {
+  if (status === 'running' || status === 'done' || status === 'error') {
+    return status;
+  }
+  return 'idle';
+}
+
 type CardSize = 'sm' | 'md' | 'lg';
+type TaskSortOption = 'created-desc' | 'created-asc' | 'round-desc' | 'round-asc';
 
 type EditableTaskSession = TaskSessionRecord & {
   localId: string;
@@ -73,6 +110,9 @@ function createSessionDraft(
     sessionId: session?.sessionId ?? '',
     taskType: normalizedTaskType,
     consumeQuota: session?.consumeQuota ?? false,
+    isCompleted: session?.isCompleted ?? null,
+    isSatisfied: session?.isSatisfied ?? null,
+    evaluation: session?.evaluation ?? '',
   };
 }
 
@@ -83,7 +123,14 @@ function hydrateSessionDrafts(
   const source =
     sessionList && sessionList.length > 0
       ? sessionList
-      : [{ sessionId: '', taskType: fallbackTaskType, consumeQuota: true }];
+      : [{
+          sessionId: '',
+          taskType: fallbackTaskType,
+          consumeQuota: true,
+          isCompleted: null,
+          isSatisfied: null,
+          evaluation: '',
+        }];
 
   return source.map((session, index) =>
     createSessionDraft(fallbackTaskType, {
@@ -91,6 +138,73 @@ function hydrateSessionDrafts(
       consumeQuota: index === 0 || session.consumeQuota,
     }),
   );
+}
+
+function buildSessionEditorOpenSet(sessions: EditableTaskSession[]): Set<string> {
+  return new Set(
+    sessions
+      .filter((session) => !session.sessionId.trim())
+      .map((session) => session.localId),
+  );
+}
+
+function summarizeCountedRounds(sessions: EditableTaskSession[]): string {
+  const counted = sessions
+    .map((session, index) => (index === 0 || session.consumeQuota ? `第${index + 1}轮` : null))
+    .filter((value): value is string => Boolean(value));
+
+  if (counted.length === 0) {
+    return '当前没有计数轮次';
+  }
+
+  return `计数轮次：${counted.join('、')}`;
+}
+
+function maskSessionId(sessionId: string): string {
+  const trimmed = sessionId.trim();
+  if (!trimmed) {
+    return '未填写';
+  }
+  if (trimmed.length <= 10) {
+    return trimmed;
+  }
+  return `${trimmed.slice(0, 4)}...${trimmed.slice(-4)}`;
+}
+
+function formatBooleanSelection(value: boolean | null | undefined): string {
+  if (value === true) {
+    return 'true';
+  }
+  if (value === false) {
+    return 'false';
+  }
+  return '';
+}
+
+function parseBooleanSelection(value: string): boolean | null {
+  if (value === 'true') {
+    return true;
+  }
+  if (value === 'false') {
+    return false;
+  }
+  return null;
+}
+
+function getSessionDecisionBadge(value: boolean | null | undefined, trueLabel: string, falseLabel: string) {
+  if (value === true) {
+    return {
+      label: trueLabel,
+      className: 'bg-emerald-50 dark:bg-emerald-500/10 text-emerald-700 dark:text-emerald-400',
+    };
+  }
+  if (value === false) {
+    return {
+      label: falseLabel,
+      className: 'bg-rose-50 dark:bg-rose-500/10 text-rose-700 dark:text-rose-400',
+    };
+  }
+  return null;
 }
 
 export default function Board() {
@@ -118,7 +232,9 @@ export default function Board() {
   const [search, setSearch]           = useState('');
   const [activeTypes, setActiveTypes]   = useState<Set<TaskType>>(new Set());
   const [activeStages, setActiveStages] = useState<Set<TaskStatus>>(new Set());
+  const [activeRounds, setActiveRounds] = useState<Set<number>>(new Set());
   const [cardSize, setCardSize]         = useState<CardSize>('md');
+  const [sortBy, setSortBy] = useState<TaskSortOption>('created-desc');
   const [selected, setSelected]       = useState<Task | null>(null);
   const [pendingDelete, setPendingDelete]     = useState<Task | null>(null);
   const [deleting, setDeleting]   = useState(false);
@@ -135,6 +251,9 @@ export default function Board() {
   const [sessionListDraft, setSessionListDraft] = useState<EditableTaskSession[]>([]);
   const [sessionListSaving, setSessionListSaving] = useState(false);
   const [sessionSaveState, setSessionSaveState] = useState<'idle' | 'saved'>('idle');
+  const [openSessionEditors, setOpenSessionEditors] = useState<Set<string>>(new Set());
+  const [copiedSessionId, setCopiedSessionId] = useState<string | null>(null);
+  const [taskTypeChanging, setTaskTypeChanging] = useState(false);
 
   const sessionTaskTypeOptions = useMemo(
     () =>
@@ -144,6 +263,24 @@ export default function Board() {
       ]),
     [activeProject, sessionListDraft, tasks],
   );
+  const selectedPromptGenerationStatus = normalizePromptGenerationStatus(
+    selectedTaskDetail?.promptGenerationStatus ?? selected?.promptGenerationStatus,
+  );
+  const selectedPromptGenerationMeta = PROMPT_GENERATION_STATUS[selectedPromptGenerationStatus];
+  const selectedPromptGenerationError =
+    selectedTaskDetail?.promptGenerationError ??
+    selected?.promptGenerationError ??
+    null;
+  const primaryTaskType =
+    normalizeTaskTypeName(
+      sessionListDraft[0]?.taskType ??
+      selectedTaskDetail?.sessionList?.[0]?.taskType ??
+      selectedTaskDetail?.taskType ??
+      selected?.taskType ??
+      availableTaskTypes[0] ??
+      'Feature迭代',
+    ) || 'Feature迭代';
+  const primaryTaskTypePresentation = getTaskTypePresentation(primaryTaskType);
 
   const toggleType = (id: TaskType) =>
     setActiveTypes(prev => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n; });
@@ -151,8 +288,25 @@ export default function Board() {
   const toggleStage = (id: TaskStatus) =>
     setActiveStages(prev => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n; });
 
-  const hasFilters = activeTypes.size > 0 || activeStages.size > 0 || search.length > 0;
-  const clearFilters = () => { setActiveTypes(new Set()); setActiveStages(new Set()); setSearch(''); };
+  const toggleRound = (round: number) =>
+    setActiveRounds(prev => { const n = new Set(prev); n.has(round) ? n.delete(round) : n.add(round); return n; });
+
+  const availableExecutionRounds = useMemo(
+    () => Array.from(new Set(tasks.map((task) => task.executionRounds))).sort((left, right) => left - right),
+    [tasks],
+  );
+
+  const hasFilters =
+    activeTypes.size > 0 ||
+    activeStages.size > 0 ||
+    activeRounds.size > 0 ||
+    search.length > 0;
+  const clearFilters = () => {
+    setActiveTypes(new Set());
+    setActiveStages(new Set());
+    setActiveRounds(new Set());
+    setSearch('');
+  };
 
   useEffect(() => { loadTasks(); }, [loadTasks]);
   useEffect(() => { loadActiveProject(); }, [loadActiveProject]);
@@ -164,6 +318,8 @@ export default function Board() {
       setDrawerError('');
       setPromptDraft('');
       setSessionListDraft([]);
+      setOpenSessionEditors(new Set());
+      setCopiedSessionId(null);
       setSessionSaveState('idle');
       setPromptSaveState('idle');
       return;
@@ -176,9 +332,13 @@ export default function Board() {
       if (cancelled) return;
       setSelectedTaskDetail(taskDetail);
       setPromptDraft(taskDetail?.promptText ?? '');
-      setSessionListDraft(
-        hydrateSessionDrafts(taskDetail?.sessionList, taskDetail?.taskType ?? selected.taskType),
+      const hydratedSessions = hydrateSessionDrafts(
+        taskDetail?.sessionList,
+        taskDetail?.taskType ?? selected.taskType,
       );
+      setSessionListDraft(hydratedSessions);
+      setOpenSessionEditors(buildSessionEditorOpenSet(hydratedSessions));
+      setCopiedSessionId(null);
       setSessionSaveState('idle');
       setPromptSaveState('idle');
       setPromptCopied(false);
@@ -203,6 +363,17 @@ export default function Board() {
     });
   }, [availableTaskTypes]);
 
+  useEffect(() => {
+    const allowedRounds = new Set(availableExecutionRounds);
+    setActiveRounds((prev) => {
+      const next = new Set([...prev].filter((round) => allowedRounds.has(round)));
+      if (next.size === prev.size && [...next].every((round) => prev.has(round))) {
+        return prev;
+      }
+      return next;
+    });
+  }, [availableExecutionRounds]);
+
   const filtered = useMemo(() => tasks.filter(t => {
     const matchSearch = !search ||
       t.projectName.toLowerCase().includes(search.toLowerCase()) ||
@@ -210,8 +381,30 @@ export default function Board() {
       t.id.toLowerCase().includes(search.toLowerCase());
     const matchType  = activeTypes.size === 0 || activeTypes.has(t.taskType);
     const matchStage = activeStages.size === 0 || activeStages.has(t.status);
-    return matchSearch && matchType && matchStage;
-  }), [tasks, search, activeTypes, activeStages]);
+    const matchRound = activeRounds.size === 0 || activeRounds.has(t.executionRounds);
+    return matchSearch && matchType && matchStage && matchRound;
+  }), [tasks, search, activeTypes, activeStages, activeRounds]);
+
+  const sortedTasks = useMemo(() => {
+    const next = [...filtered];
+    const compareByName = (left: Task, right: Task) =>
+      left.projectName.localeCompare(right.projectName, 'zh-CN', { numeric: true, sensitivity: 'base' });
+
+    next.sort((left, right) => {
+      if (sortBy === 'created-asc') {
+        return left.createdAt - right.createdAt || right.executionRounds - left.executionRounds || compareByName(left, right);
+      }
+      if (sortBy === 'round-desc') {
+        return right.executionRounds - left.executionRounds || right.createdAt - left.createdAt || compareByName(left, right);
+      }
+      if (sortBy === 'round-asc') {
+        return left.executionRounds - right.executionRounds || right.createdAt - left.createdAt || compareByName(left, right);
+      }
+      return right.createdAt - left.createdAt || right.executionRounds - left.executionRounds || compareByName(left, right);
+    });
+
+    return next;
+  }, [filtered, sortBy]);
 
   const projectTaskSummaries = useMemo(
     () =>
@@ -282,6 +475,59 @@ export default function Board() {
     }
   };
 
+  const handlePrimaryTaskTypeChange = async (nextTaskType: string) => {
+    if (!selected?.id) return;
+
+    const normalizedTaskType = normalizeTaskTypeName(nextTaskType);
+    if (!normalizedTaskType || normalizedTaskType === primaryTaskType) {
+      return;
+    }
+
+    const previousTaskType = primaryTaskType;
+    const previousTaskDetail = selectedTaskDetail;
+    const previousSessionListDraft = sessionListDraft;
+
+    updateTaskTypeInStore(selected.id, normalizedTaskType);
+    setSelected((prev) => (prev ? { ...prev, taskType: normalizedTaskType } : prev));
+    setSelectedTaskDetail((prev) => {
+      if (!prev) return prev;
+
+      const nextSessionList =
+        prev.sessionList.length > 0
+          ? prev.sessionList.map((session, index) =>
+              index === 0 ? { ...session, taskType: normalizedTaskType } : session,
+            )
+          : prev.sessionList;
+
+      return {
+        ...prev,
+        taskType: normalizedTaskType,
+        sessionList: nextSessionList,
+      };
+    });
+    setSessionListDraft((prev) =>
+      prev.map((session, index) =>
+        index === 0 ? { ...session, taskType: normalizedTaskType } : session,
+      ),
+    );
+    setSessionSaveState('idle');
+
+    setTaskTypeChanging(true);
+    setDrawerError('');
+    try {
+      await updateTaskType(selected.id, normalizedTaskType);
+      await loadActiveProject();
+    } catch (error) {
+      updateTaskTypeInStore(selected.id, previousTaskType);
+      setSelected((prev) => (prev ? { ...prev, taskType: previousTaskType } : prev));
+      setSelectedTaskDetail(previousTaskDetail);
+      setSessionListDraft(previousSessionListDraft);
+      setDrawerError(error instanceof Error ? error.message : '任务类型更新失败');
+    } finally {
+      setTaskTypeChanging(false);
+    }
+  };
+
   const handlePromptSave = async () => {
     if (!selected?.id) return;
     if (!promptDraft.trim()) {
@@ -293,8 +539,22 @@ export default function Board() {
     setDrawerError('');
     try {
       await saveTaskPrompt(selected.id, promptDraft);
-      setSelectedTaskDetail((prev) => prev ? { ...prev, promptText: promptDraft, status: 'PromptReady' } : prev);
-      setSelected((prev) => prev ? { ...prev, status: 'PromptReady' } : prev);
+      const now = Math.floor(Date.now() / 1000);
+      setSelectedTaskDetail((prev) => prev ? {
+        ...prev,
+        promptText: promptDraft,
+        status: 'PromptReady',
+        promptGenerationStatus: 'done',
+        promptGenerationError: null,
+        promptGenerationStartedAt: prev.promptGenerationStartedAt ?? now,
+        promptGenerationFinishedAt: now,
+      } : prev);
+      setSelected((prev) => prev ? {
+        ...prev,
+        status: 'PromptReady',
+        promptGenerationStatus: 'done',
+        promptGenerationError: null,
+      } : prev);
       updateTaskStatusInStore(selected.id, 'PromptReady');
       setPromptSaveState('saved');
       await loadTasks();
@@ -321,19 +581,21 @@ export default function Board() {
       availableTaskTypes[0] ||
       'Feature迭代';
 
-    setSessionListDraft((prev) => [
-      ...prev,
-      createSessionDraft(fallbackTaskType, {
-        taskType: fallbackTaskType,
-        consumeQuota: false,
-      }),
-    ]);
+    const nextSession = createSessionDraft(fallbackTaskType, {
+      taskType: fallbackTaskType,
+      consumeQuota: false,
+      isCompleted: null,
+      isSatisfied: null,
+      evaluation: '',
+    });
+    setSessionListDraft((prev) => [...prev, nextSession]);
+    setOpenSessionEditors((prev) => new Set(prev).add(nextSession.localId));
     setSessionSaveState('idle');
   };
 
   const handleSessionChange = (
     localId: string,
-    patch: Partial<Pick<EditableTaskSession, 'sessionId' | 'taskType' | 'consumeQuota'>>,
+    patch: Partial<Pick<EditableTaskSession, 'sessionId' | 'taskType' | 'consumeQuota' | 'isCompleted' | 'isSatisfied' | 'evaluation'>>,
   ) => {
     setSessionListDraft((prev) =>
       prev.map((session, index) => {
@@ -354,13 +616,43 @@ export default function Board() {
         .filter((session) => session.localId !== localId)
         .map((session, index) => (index === 0 ? { ...session, consumeQuota: true } : session)),
     );
+    setOpenSessionEditors((prev) => {
+      const next = new Set(prev);
+      next.delete(localId);
+      return next;
+    });
+    setCopiedSessionId((prev) => (prev === localId ? null : prev));
     setSessionSaveState('idle');
   };
 
   const handleResetSessions = () => {
     const fallbackTaskType = selectedTaskDetail?.taskType ?? selected?.taskType ?? availableTaskTypes[0] ?? 'Feature迭代';
-    setSessionListDraft(hydrateSessionDrafts(selectedTaskDetail?.sessionList, fallbackTaskType));
+    const hydratedSessions = hydrateSessionDrafts(selectedTaskDetail?.sessionList, fallbackTaskType);
+    setSessionListDraft(hydratedSessions);
+    setOpenSessionEditors(buildSessionEditorOpenSet(hydratedSessions));
+    setCopiedSessionId(null);
     setSessionSaveState('idle');
+  };
+
+  const toggleSessionEditor = (localId: string) => {
+    setOpenSessionEditors((prev) => {
+      const next = new Set(prev);
+      if (next.has(localId)) {
+        next.delete(localId);
+      } else {
+        next.add(localId);
+      }
+      return next;
+    });
+  };
+
+  const handleCopySessionId = async (localId: string, sessionId: string) => {
+    if (!sessionId.trim()) return;
+    await navigator.clipboard.writeText(sessionId.trim());
+    setCopiedSessionId(localId);
+    window.setTimeout(() => {
+      setCopiedSessionId((current) => (current === localId ? null : current));
+    }, 1500);
   };
 
   const handleSessionListSave = async () => {
@@ -370,10 +662,25 @@ export default function Board() {
       return;
     }
 
+    for (let index = 0; index < sessionListDraft.length; index += 1) {
+      const session = sessionListDraft[index];
+      if (session.isCompleted === null || session.isCompleted === undefined) {
+        setDrawerError(`第 ${index + 1} 轮请选择是否完成`);
+        return;
+      }
+      if (session.isSatisfied === null || session.isSatisfied === undefined) {
+        setDrawerError(`第 ${index + 1} 轮请选择是否满意`);
+        return;
+      }
+    }
+
     const nextSessionList: TaskSessionRecord[] = sessionListDraft.map((session, index) => ({
       sessionId: session.sessionId.trim(),
       taskType: normalizeTaskTypeName(session.taskType) || selected.taskType,
       consumeQuota: index === 0 || session.consumeQuota,
+      isCompleted: session.isCompleted,
+      isSatisfied: session.isSatisfied,
+      evaluation: session.evaluation?.trim() ?? '',
     }));
 
     setSessionListSaving(true);
@@ -386,11 +693,22 @@ export default function Board() {
 
       const nextTaskType = nextSessionList[0]?.taskType ?? selected.taskType;
       updateTaskTypeInStore(selected.id, nextTaskType);
-      setSelected((prev) => (prev ? { ...prev, taskType: nextTaskType } : prev));
+      setSelected((prev) =>
+        prev
+          ? {
+              ...prev,
+              taskType: nextTaskType,
+              executionRounds: Math.max(nextSessionList.length, 1),
+            }
+          : prev,
+      );
       setSelectedTaskDetail((prev) =>
         prev ? { ...prev, taskType: nextTaskType, sessionList: nextSessionList } : prev,
       );
-      setSessionListDraft(hydrateSessionDrafts(nextSessionList, nextTaskType));
+      const hydratedSessions = hydrateSessionDrafts(nextSessionList, nextTaskType);
+      setSessionListDraft(hydratedSessions);
+      setOpenSessionEditors(buildSessionEditorOpenSet(hydratedSessions));
+      setCopiedSessionId(null);
       setSessionSaveState('saved');
       await Promise.all([loadTasks(), loadActiveProject()]);
       window.setTimeout(() => setSessionSaveState('idle'), 1600);
@@ -425,8 +743,22 @@ export default function Board() {
             )}
           </div>
 
-          <span className="text-sm text-stone-400 dark:text-stone-500 font-medium tabular-nums ml-auto">
-            {filtered.length} / {tasks.length}
+          <div className="ml-auto flex items-center gap-2 rounded-2xl bg-white dark:bg-stone-900 border border-stone-200 dark:border-stone-700 px-3">
+            <span className="text-[11px] font-bold uppercase tracking-widest text-stone-400">排序</span>
+            <select
+              value={sortBy}
+              onChange={(event) => setSortBy(event.target.value as TaskSortOption)}
+              className="bg-transparent py-2 text-sm font-medium text-stone-600 dark:text-stone-300 outline-none cursor-default"
+            >
+              <option value="created-desc">最新创建</option>
+              <option value="created-asc">最早创建</option>
+              <option value="round-desc">轮次从高到低</option>
+              <option value="round-asc">轮次从低到高</option>
+            </select>
+          </div>
+
+          <span className="text-sm text-stone-400 dark:text-stone-500 font-medium tabular-nums">
+            {sortedTasks.length} / {tasks.length}
           </span>
 
           {/* Card size toggle */}
@@ -524,11 +856,38 @@ export default function Board() {
             </button>
           )}
         </div>
+
+        {availableExecutionRounds.length > 0 && (
+          <div className="flex items-center gap-2 flex-wrap mt-2">
+            <span className="text-[11px] font-bold uppercase tracking-widest text-stone-400 w-14 flex-shrink-0">轮次</span>
+            {availableExecutionRounds.map((round) => {
+              const count = tasks.filter((task) => task.executionRounds === round).length;
+              const active = activeRounds.has(round);
+
+              return (
+                <button
+                  key={round}
+                  onClick={() => toggleRound(round)}
+                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold border transition-all cursor-default ${
+                    active
+                      ? 'bg-sky-50 dark:bg-sky-500/10 text-sky-700 dark:text-sky-300 border-sky-200 dark:border-sky-500/20 shadow-sm scale-[1.02]'
+                      : 'bg-white dark:bg-stone-900 text-stone-500 dark:text-stone-400 border-stone-200 dark:border-stone-700 hover:border-stone-300 dark:hover:border-stone-600'
+                  }`}
+                >
+                  第 {round} 轮
+                  <span className={`tabular-nums font-bold ${active ? 'opacity-75' : 'text-stone-400 dark:text-stone-500'}`}>
+                    {count}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        )}
       </div>
 
       {/* ── Card grid ─────────────────────────────────── */}
       <div className="flex-1 overflow-y-auto px-8 py-5">
-        {filtered.length === 0 ? (
+        {sortedTasks.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-24 text-center">
             <div className="w-12 h-12 rounded-2xl bg-stone-100 dark:bg-stone-800 border border-stone-200 dark:border-stone-700 flex items-center justify-center mb-4">
               <Search className="w-5 h-5 text-stone-300 dark:text-stone-600" />
@@ -547,7 +906,7 @@ export default function Board() {
         ) : (
           <motion.div layout className={`grid gap-3 ${gridClass[cardSize]}`}>
             <AnimatePresence mode="popLayout">
-              {filtered.map(task => (
+              {sortedTasks.map(task => (
                 <motion.div
                   key={task.id}
                   layout
@@ -668,11 +1027,32 @@ export default function Board() {
                     >
                       {COLUMNS.map(s => <option key={s} value={s}>{STATUS[s].label}</option>)}
                     </select>
-                    <span className={`text-xs font-semibold px-2.5 py-1 rounded-full border ${getTaskTypePresentation(selected.taskType).badge}`}>
-                      {getTaskTypePresentation(selected.taskType).label}
-                    </span>
+                    <label className={`relative inline-flex items-center rounded-full border ${primaryTaskTypePresentation.badge} ${taskTypeChanging ? 'opacity-70' : ''}`}>
+                      <select
+                        value={primaryTaskType}
+                        disabled={drawerLoading || sessionListSaving || taskTypeChanging}
+                        onChange={(event) => void handlePrimaryTaskTypeChange(event.target.value)}
+                        className="appearance-none bg-transparent pl-3 pr-7 py-1 text-xs font-semibold outline-none cursor-pointer disabled:cursor-default"
+                        title="修改主任务类型"
+                      >
+                        {sessionTaskTypeOptions.map((taskType) => {
+                          const presentation = getTaskTypePresentation(taskType);
+                          const remainingQuota = getTaskTypeQuotaValue(projectQuotas, presentation.value);
+                          return (
+                            <option key={presentation.value} value={presentation.value}>
+                              {presentation.label}
+                              {remainingQuota !== null ? ` · 剩余 ${remainingQuota}` : ''}
+                            </option>
+                          );
+                        })}
+                      </select>
+                      <ChevronDown className="pointer-events-none absolute right-2.5 h-3.5 w-3.5 opacity-70" />
+                    </label>
                     <span className="text-[10px] font-medium text-stone-400 dark:text-stone-500">
                       {sessionListDraft.length || 1} 个 session
+                    </span>
+                    <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full ${selectedPromptGenerationMeta.badgeCls}`}>
+                      提示词 {selectedPromptGenerationMeta.label}
                     </span>
                   </div>
                   <h2 className="text-lg font-bold text-stone-900 dark:text-stone-50 tracking-tight truncate">{selected.projectName}</h2>
@@ -702,9 +1082,14 @@ export default function Board() {
                       <div className="px-4 py-2.5 bg-stone-50 dark:bg-stone-800/50 border-b border-stone-200 dark:border-stone-700 flex items-center justify-between gap-3">
                         <div>
                           <span className="text-xs font-bold uppercase tracking-wider text-stone-400 dark:text-stone-500">Session 列表</span>
-                          <p className="mt-1 text-[11px] text-stone-400 dark:text-stone-500">第一个 session 固定扣减任务总数，后续按需勾选。</p>
+                          <p className="mt-1 text-[11px] text-stone-400 dark:text-stone-500">
+                            {summarizeCountedRounds(sessionListDraft)}
+                          </p>
                         </div>
                         <div className="flex items-center gap-2">
+                          <span className="rounded-full bg-white dark:bg-stone-900 px-2.5 py-1 text-[10px] font-semibold text-stone-500 dark:text-stone-400 border border-stone-200 dark:border-stone-700">
+                            共 {sessionListDraft.length || 1} 轮
+                          </span>
                           {sessionSaveState === 'saved' && (
                             <span className="text-[10px] font-medium text-emerald-600 dark:text-emerald-400">已保存</span>
                           )}
@@ -722,42 +1107,106 @@ export default function Board() {
                           {sessionListDraft.map((session, index) => {
                             const presentation = getTaskTypePresentation(session.taskType);
                             const remainingQuota = getTaskTypeQuotaValue(projectQuotas, session.taskType);
+                            const isCounted = index === 0 || session.consumeQuota;
+                            const isSessionEditorOpen = openSessionEditors.has(session.localId) || !session.sessionId.trim();
+                            const completionBadge = getSessionDecisionBadge(session.isCompleted, '已完成', '未完成');
+                            const satisfactionBadge = getSessionDecisionBadge(session.isSatisfied, '满意', '不满意');
+                            const hasDecisionGap = session.isCompleted === null || session.isSatisfied === null;
                             return (
                               <div
                                 key={session.localId}
                                 className="rounded-2xl border border-stone-200 dark:border-stone-700 bg-stone-50 dark:bg-stone-800/50 px-4 py-4"
                               >
                                 <div className="flex items-center justify-between gap-3 mb-3">
-                                  <div className="flex items-center gap-2">
+                                  <div className="flex items-center gap-2 flex-wrap">
                                     <span className="text-[11px] font-bold uppercase tracking-wider text-stone-400 dark:text-stone-500">
-                                      Session {index + 1}
+                                      第 {index + 1} 轮
                                     </span>
                                     {index === 0 && (
                                       <span className="px-2 py-0.5 rounded-full bg-stone-200 dark:bg-stone-700 text-[10px] font-semibold text-stone-600 dark:text-stone-300">
                                         主 session
                                       </span>
                                     )}
+                                    <span className={`px-2 py-0.5 rounded-full text-[10px] font-semibold ${
+                                      isCounted
+                                        ? 'bg-emerald-50 dark:bg-emerald-500/10 text-emerald-700 dark:text-emerald-400'
+                                        : 'bg-stone-200 dark:bg-stone-700 text-stone-600 dark:text-stone-300'
+                                    }`}>
+                                      {isCounted ? '计数' : '不计数'}
+                                    </span>
+                                    <span className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-semibold ${presentation.badge}`}>
+                                      <span className={`h-1.5 w-1.5 rounded-full ${presentation.dot}`} />
+                                      {presentation.label}
+                                    </span>
+                                    {completionBadge && (
+                                      <span className={`px-2 py-0.5 rounded-full text-[10px] font-semibold ${completionBadge.className}`}>
+                                        {completionBadge.label}
+                                      </span>
+                                    )}
+                                    {satisfactionBadge && (
+                                      <span className={`px-2 py-0.5 rounded-full text-[10px] font-semibold ${satisfactionBadge.className}`}>
+                                        {satisfactionBadge.label}
+                                      </span>
+                                    )}
                                   </div>
-                                  {index > 0 && (
+                                  <div className="flex items-center gap-1.5">
+                                    {session.sessionId.trim() && (
+                                      <button
+                                        onClick={() => void handleCopySessionId(session.localId, session.sessionId)}
+                                        className="p-1.5 rounded-lg text-stone-400 hover:text-stone-700 dark:hover:text-stone-200 hover:bg-stone-100 dark:hover:bg-stone-700 transition-colors cursor-default"
+                                        title="复制 sessionId"
+                                      >
+                                        {copiedSessionId === session.localId ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+                                      </button>
+                                    )}
                                     <button
-                                      onClick={() => handleRemoveSession(session.localId)}
-                                      className="p-1.5 rounded-lg text-stone-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-500/10 transition-colors cursor-default"
-                                      title="删除 session"
+                                      onClick={() => toggleSessionEditor(session.localId)}
+                                      className="p-1.5 rounded-lg text-stone-400 hover:text-stone-700 dark:hover:text-stone-200 hover:bg-stone-100 dark:hover:bg-stone-700 transition-colors cursor-default"
+                                      title={isSessionEditorOpen ? '隐藏 sessionId' : '显示 sessionId'}
                                     >
-                                      <Trash2 className="w-3.5 h-3.5" />
+                                      {isSessionEditorOpen ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
                                     </button>
+                                    {index > 0 && (
+                                      <button
+                                        onClick={() => handleRemoveSession(session.localId)}
+                                        className="p-1.5 rounded-lg text-stone-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-500/10 transition-colors cursor-default"
+                                        title="删除 session"
+                                      >
+                                        <Trash2 className="w-3.5 h-3.5" />
+                                      </button>
+                                    )}
+                                  </div>
+                                </div>
+
+                                <div className="mb-3 rounded-2xl border border-dashed border-stone-200 dark:border-stone-700 px-3 py-2.5 bg-white/70 dark:bg-stone-900/60">
+                                  <div className="flex items-center justify-between gap-3">
+                                    <span className="text-[11px] font-medium text-stone-500 dark:text-stone-400">sessionId</span>
+                                    <span className="font-mono text-xs text-stone-500 dark:text-stone-400">
+                                      {isSessionEditorOpen ? (session.sessionId.trim() || '未填写') : maskSessionId(session.sessionId)}
+                                    </span>
+                                  </div>
+                                  {copiedSessionId === session.localId && (
+                                    <p className="mt-1 text-[10px] text-emerald-600 dark:text-emerald-400">sessionId 已复制</p>
                                   )}
                                 </div>
 
-                                <label className="block mb-3">
-                                  <span className="block text-[11px] font-medium text-stone-500 dark:text-stone-400 mb-1.5">sessionId</span>
-                                  <input
-                                    value={session.sessionId}
-                                    onChange={(event) => handleSessionChange(session.localId, { sessionId: event.target.value })}
-                                    placeholder="记录实际 sessionId"
-                                    className="w-full rounded-2xl border border-stone-200 dark:border-stone-700 bg-white dark:bg-stone-900 px-4 py-2.5 text-sm font-mono text-stone-700 dark:text-stone-300 placeholder:text-stone-300 dark:placeholder:text-stone-600 focus:outline-none focus:ring-2 focus:ring-slate-400/30"
-                                  />
-                                </label>
+                                {isSessionEditorOpen && (
+                                  <label className="block mb-3">
+                                    <span className="block text-[11px] font-medium text-stone-500 dark:text-stone-400 mb-1.5">编辑 sessionId</span>
+                                    <input
+                                      value={session.sessionId}
+                                      onChange={(event) => handleSessionChange(session.localId, { sessionId: event.target.value })}
+                                      placeholder="记录实际 sessionId"
+                                      className="w-full rounded-2xl border border-stone-200 dark:border-stone-700 bg-white dark:bg-stone-900 px-4 py-2.5 text-sm font-mono text-stone-700 dark:text-stone-300 placeholder:text-stone-300 dark:placeholder:text-stone-600 focus:outline-none focus:ring-2 focus:ring-slate-400/30"
+                                    />
+                                  </label>
+                                )}
+
+                                {hasDecisionGap && (
+                                  <p className="mb-3 text-[11px] font-medium text-amber-600 dark:text-amber-400">
+                                    请补充是否完成和是否满意，这两项为必选。
+                                  </p>
+                                )}
 
                                 <div className="grid grid-cols-[minmax(0,1fr)_auto] gap-3 items-end">
                                   <label className="block min-w-0">
@@ -781,13 +1230,13 @@ export default function Board() {
                                   </label>
 
                                   <label className={`flex items-center gap-2 rounded-2xl border px-3 py-2.5 ${
-                                    session.consumeQuota
+                                    isCounted
                                       ? 'border-stone-300 dark:border-stone-600 bg-stone-100 dark:bg-stone-800'
                                       : 'border-stone-200 dark:border-stone-700 bg-white dark:bg-stone-900'
                                   }`}>
                                     <input
                                       type="checkbox"
-                                      checked={index === 0 ? true : session.consumeQuota}
+                                      checked={isCounted}
                                       disabled={index === 0}
                                       onChange={(event) => handleSessionChange(session.localId, { consumeQuota: event.target.checked })}
                                       className="w-4 h-4 rounded accent-slate-700 dark:accent-slate-300 cursor-default disabled:opacity-60"
@@ -804,6 +1253,62 @@ export default function Board() {
                                     </div>
                                   </label>
                                 </div>
+
+                                <div className="mt-3 grid grid-cols-2 gap-3">
+                                  <label className="block">
+                                    <span className="block text-[11px] font-medium text-stone-500 dark:text-stone-400 mb-1.5">
+                                      是否完成
+                                      <span className="ml-1 text-red-500">*</span>
+                                    </span>
+                                    <select
+                                      value={formatBooleanSelection(session.isCompleted)}
+                                      onChange={(event) => handleSessionChange(session.localId, { isCompleted: parseBooleanSelection(event.target.value) })}
+                                      className={`w-full rounded-2xl border px-4 py-2.5 text-sm font-medium outline-none appearance-none cursor-default bg-white dark:bg-stone-900 ${
+                                        session.isCompleted === null
+                                          ? 'border-amber-300 dark:border-amber-500/50 text-stone-500 dark:text-stone-300'
+                                          : 'border-stone-200 dark:border-stone-700 text-stone-700 dark:text-stone-300'
+                                      }`}
+                                    >
+                                      <option value="">请选择</option>
+                                      <option value="true">是</option>
+                                      <option value="false">否</option>
+                                    </select>
+                                  </label>
+
+                                  <label className="block">
+                                    <span className="block text-[11px] font-medium text-stone-500 dark:text-stone-400 mb-1.5">
+                                      是否满意
+                                      <span className="ml-1 text-red-500">*</span>
+                                    </span>
+                                    <select
+                                      value={formatBooleanSelection(session.isSatisfied)}
+                                      onChange={(event) => handleSessionChange(session.localId, { isSatisfied: parseBooleanSelection(event.target.value) })}
+                                      className={`w-full rounded-2xl border px-4 py-2.5 text-sm font-medium outline-none appearance-none cursor-default bg-white dark:bg-stone-900 ${
+                                        session.isSatisfied === null
+                                          ? 'border-amber-300 dark:border-amber-500/50 text-stone-500 dark:text-stone-300'
+                                          : 'border-stone-200 dark:border-stone-700 text-stone-700 dark:text-stone-300'
+                                      }`}
+                                    >
+                                      <option value="">请选择</option>
+                                      <option value="true">是</option>
+                                      <option value="false">否</option>
+                                    </select>
+                                  </label>
+                                </div>
+
+                                <label className="block mt-3">
+                                  <span className="block text-[11px] font-medium text-stone-500 dark:text-stone-400 mb-1.5">
+                                    评价
+                                    <span className="ml-1 text-stone-400 dark:text-stone-500">可选</span>
+                                  </span>
+                                  <textarea
+                                    value={session.evaluation ?? ''}
+                                    onChange={(event) => handleSessionChange(session.localId, { evaluation: event.target.value })}
+                                    placeholder="补充本轮 session 的结果、问题或主观评价"
+                                    rows={3}
+                                    className="w-full rounded-2xl border border-stone-200 dark:border-stone-700 bg-white dark:bg-stone-900 px-4 py-3 text-sm text-stone-700 dark:text-stone-300 placeholder:text-stone-300 dark:placeholder:text-stone-600 focus:outline-none focus:ring-2 focus:ring-slate-400/30 resize-y"
+                                  />
+                                </label>
                               </div>
                             );
                           })}
@@ -849,6 +1354,9 @@ export default function Board() {
                           {promptSaveState === 'saved' && (
                             <span className="text-[10px] font-medium text-emerald-600 dark:text-emerald-400">已保存</span>
                           )}
+                          <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full ${selectedPromptGenerationMeta.badgeCls}`}>
+                            后台 {selectedPromptGenerationMeta.label}
+                          </span>
                           <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full ${
                             selectedTaskDetail?.promptText
                               ? 'bg-violet-50 dark:bg-violet-500/10 text-violet-600 dark:text-violet-400'
@@ -859,6 +1367,16 @@ export default function Board() {
                         </div>
                       </div>
                       <div className="px-4 py-3 bg-white dark:bg-stone-900">
+                        {selectedPromptGenerationStatus === 'running' && (
+                          <div className={`mb-3 rounded-2xl border px-3 py-2 text-xs ${selectedPromptGenerationMeta.panelCls}`}>
+                            提示词正在后台生成，完成后会自动写入当前任务。
+                          </div>
+                        )}
+                        {selectedPromptGenerationStatus === 'error' && selectedPromptGenerationError && (
+                          <div className={`mb-3 rounded-2xl border px-3 py-2 text-xs ${selectedPromptGenerationMeta.panelCls}`}>
+                            最近一次后台生成失败：{selectedPromptGenerationError}
+                          </div>
+                        )}
                         <textarea
                           value={promptDraft}
                           onChange={(event) => {
@@ -991,9 +1509,24 @@ export default function Board() {
 }
 
 /* ── TaskCard ──────────────────────────────────────── */
+function TaskRoundBadge({ rounds, compact = false }: { rounds: number; compact?: boolean }) {
+  return (
+    <span
+      className={`inline-flex items-center rounded-full border border-sky-200 bg-sky-50 font-semibold text-sky-700 dark:border-sky-500/20 dark:bg-sky-500/10 dark:text-sky-300 ${
+        compact ? 'px-2 py-0.5 text-[10px]' : 'px-2.5 py-1 text-[11px]'
+      }`}
+    >
+      第 {rounds} 轮
+    </span>
+  );
+}
+
 function TaskCard({ task, size, onClick, onDelete }: { task: Task; size: CardSize; onClick: () => void; onDelete: () => void }) {
   const cfg = STATUS[task.status];
   const typePresentation = getTaskTypePresentation(task.taskType);
+  const promptGenerationStatus = normalizePromptGenerationStatus(task.promptGenerationStatus);
+  const promptGenerationMeta = PROMPT_GENERATION_STATUS[promptGenerationStatus];
+  const showPromptBadge = promptGenerationStatus === 'running' || promptGenerationStatus === 'error';
 
   if (size === 'sm') {
     return (
@@ -1003,6 +1536,11 @@ function TaskCard({ task, size, onClick, onDelete }: { task: Task; size: CardSiz
         <div className="flex items-start justify-between gap-2 mb-2.5">
           <div className={`w-1.5 h-1.5 rounded-full flex-shrink-0 mt-1 ${cfg.dotCls}`} />
           <div className="flex items-center gap-1.5 ml-auto">
+            {showPromptBadge && (
+              <span className={`text-[10px] px-2 py-0.5 rounded-lg font-bold ${promptGenerationMeta.badgeCls}`}>
+                {promptGenerationStatus === 'running' ? '出题中' : '出题失败'}
+              </span>
+            )}
             <span className={`text-[10px] px-2 py-0.5 rounded-lg font-bold border ${cfg.badgeCls}`}>{cfg.label}</span>
             <button onClick={e => { e.stopPropagation(); onDelete(); }} className="opacity-0 group-hover:opacity-100 transition-opacity p-1 rounded-lg text-stone-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-500/10 cursor-default">
               <Trash2 className="w-3 h-3" />
@@ -1011,10 +1549,13 @@ function TaskCard({ task, size, onClick, onDelete }: { task: Task; size: CardSiz
         </div>
         <p className="text-sm font-semibold text-stone-900 dark:text-stone-50 leading-snug line-clamp-1 mb-0.5">{task.projectName}</p>
         <p className="font-mono text-[11px] text-stone-400 dark:text-stone-500 mb-1.5">#{task.projectId}</p>
-        <span className={`inline-flex items-center gap-1 rounded-lg border px-2 py-0.5 text-[10px] font-semibold ${typePresentation.badge}`}>
-          <span className={`h-1.5 w-1.5 rounded-full ${typePresentation.dot}`} />
-          {typePresentation.label}
-        </span>
+        <div className="flex flex-wrap items-center gap-1.5">
+          <span className={`inline-flex items-center gap-1 rounded-lg border px-2 py-0.5 text-[10px] font-semibold ${typePresentation.badge}`}>
+            <span className={`h-1.5 w-1.5 rounded-full ${typePresentation.dot}`} />
+            {typePresentation.label}
+          </span>
+          <TaskRoundBadge rounds={task.executionRounds} compact />
+        </div>
         {task.totalModels > 0 && (
           <div className="mt-2.5 flex items-center gap-1.5">
             <div className="flex-1 h-1 bg-stone-100 dark:bg-stone-800 rounded-full overflow-hidden">
@@ -1036,10 +1577,16 @@ function TaskCard({ task, size, onClick, onDelete }: { task: Task; size: CardSiz
           <div className="flex items-center gap-2 flex-wrap">
             <div className={`w-2 h-2 rounded-full ${cfg.dotCls}`} />
             <span className={`text-xs px-2.5 py-1 rounded-full font-bold border ${cfg.badgeCls}`}>{cfg.label}</span>
+            {showPromptBadge && (
+              <span className={`text-xs px-2.5 py-1 rounded-full font-bold ${promptGenerationMeta.badgeCls}`}>
+                提示词{promptGenerationStatus === 'running' ? '生成中' : '失败'}
+              </span>
+            )}
             <span className={`inline-flex items-center gap-1 rounded-full border px-2.5 py-1 text-[11px] font-semibold ${typePresentation.badge}`}>
               <span className={`h-1.5 w-1.5 rounded-full ${typePresentation.dot}`} />
               {typePresentation.label}
             </span>
+            <TaskRoundBadge rounds={task.executionRounds} />
           </div>
           <button onClick={e => { e.stopPropagation(); onDelete(); }} className="opacity-0 group-hover:opacity-100 transition-opacity p-1.5 rounded-lg text-stone-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-500/10 cursor-default">
             <Trash2 className="w-3.5 h-3.5" />
@@ -1087,21 +1634,31 @@ function TaskCard({ task, size, onClick, onDelete }: { task: Task; size: CardSiz
       </div>
       <p className="font-semibold text-sm text-stone-900 dark:text-stone-50 mb-1 leading-snug line-clamp-2">{task.projectName}</p>
       <p className="font-mono text-xs text-stone-400 dark:text-stone-500 mb-2">#{task.projectId}</p>
-      <span className={`mb-4 inline-flex items-center gap-1 rounded-full border px-2.5 py-1 text-[11px] font-semibold ${typePresentation.badge}`}>
-        <span className={`h-1.5 w-1.5 rounded-full ${typePresentation.dot}`} />
-        {typePresentation.label}
-      </span>
+      <div className="mb-4 flex flex-wrap items-center gap-2">
+        <span className={`inline-flex items-center gap-1 rounded-full border px-2.5 py-1 text-[11px] font-semibold ${typePresentation.badge}`}>
+          <span className={`h-1.5 w-1.5 rounded-full ${typePresentation.dot}`} />
+          {typePresentation.label}
+        </span>
+        <TaskRoundBadge rounds={task.executionRounds} />
+      </div>
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-1.5 text-xs text-stone-500 dark:text-stone-400">
           <GitBranch className="w-3.5 h-3.5" />
           <span className="font-mono truncate max-w-[120px]">{task.id}</span>
         </div>
-        {task.totalModels > 0 && (
-          <div className="flex items-center gap-1 text-xs font-semibold text-stone-500 dark:text-stone-400">
-            {task.progress === task.totalModels ? <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500" /> : task.runningModels > 0 ? <PlayCircle className="w-3.5 h-3.5 text-slate-500" /> : <CircleDashed className="w-3.5 h-3.5" />}
-            {task.progress}/{task.totalModels}
-          </div>
-        )}
+        <div className="flex items-center gap-2">
+          {showPromptBadge && (
+            <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full ${promptGenerationMeta.badgeCls}`}>
+              {promptGenerationStatus === 'running' ? '出题中' : '出题失败'}
+            </span>
+          )}
+          {task.totalModels > 0 && (
+            <div className="flex items-center gap-1 text-xs font-semibold text-stone-500 dark:text-stone-400">
+              {task.progress === task.totalModels ? <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500" /> : task.runningModels > 0 ? <PlayCircle className="w-3.5 h-3.5 text-slate-500" /> : <CircleDashed className="w-3.5 h-3.5" />}
+              {task.progress}/{task.totalModels}
+            </div>
+          )}
+        </div>
       </div>
       {task.status === 'Downloading' && task.totalModels > 0 && (
         <div className="mt-3 h-1 w-full bg-stone-200 dark:bg-stone-700 rounded-full overflow-hidden">

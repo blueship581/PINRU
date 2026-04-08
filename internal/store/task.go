@@ -9,24 +9,40 @@ import (
 )
 
 type Task struct {
-	ID              string        `json:"id"`
-	GitLabProjectID int64         `json:"gitlabProjectId"`
-	ProjectName     string        `json:"projectName"`
-	Status          string        `json:"status"`
-	TaskType        string        `json:"taskType"`
-	SessionList     []TaskSession `json:"sessionList"`
-	LocalPath       *string       `json:"localPath"`
-	PromptText      *string       `json:"promptText"`
-	Notes           *string       `json:"notes"`
-	ProjectConfigID *string       `json:"projectConfigId"`
-	CreatedAt       int64         `json:"createdAt"`
-	UpdatedAt       int64         `json:"updatedAt"`
+	ID                         string        `json:"id"`
+	GitLabProjectID            int64         `json:"gitlabProjectId"`
+	ProjectName                string        `json:"projectName"`
+	Status                     string        `json:"status"`
+	TaskType                   string        `json:"taskType"`
+	SessionList                []TaskSession `json:"sessionList"`
+	LocalPath                  *string       `json:"localPath"`
+	PromptText                 *string       `json:"promptText"`
+	PromptGenerationStatus     string        `json:"promptGenerationStatus"`
+	PromptGenerationError      *string       `json:"promptGenerationError"`
+	PromptGenerationStartedAt  *int64        `json:"promptGenerationStartedAt"`
+	PromptGenerationFinishedAt *int64        `json:"promptGenerationFinishedAt"`
+	Notes                      *string       `json:"notes"`
+	ProjectConfigID            *string       `json:"projectConfigId"`
+	CreatedAt                  int64         `json:"createdAt"`
+	UpdatedAt                  int64         `json:"updatedAt"`
 }
 
 type TaskSession struct {
 	SessionID    string `json:"sessionId"`
 	TaskType     string `json:"taskType"`
 	ConsumeQuota bool   `json:"consumeQuota"`
+	IsCompleted  *bool  `json:"isCompleted"`
+	IsSatisfied  *bool  `json:"isSatisfied"`
+	Evaluation   string `json:"evaluation"`
+}
+
+func cloneBoolPtr(value *bool) *bool {
+	if value == nil {
+		return nil
+	}
+
+	next := *value
+	return &next
 }
 
 func defaultTaskSessionList(taskType string) []TaskSession {
@@ -69,6 +85,9 @@ func normalizeTaskSessionList(taskType string, sessions []TaskSession) ([]TaskSe
 			SessionID:    strings.TrimSpace(session.SessionID),
 			TaskType:     nextTaskType,
 			ConsumeQuota: index == 0 || session.ConsumeQuota,
+			IsCompleted:  cloneBoolPtr(session.IsCompleted),
+			IsSatisfied:  cloneBoolPtr(session.IsSatisfied),
+			Evaluation:   strings.TrimSpace(session.Evaluation),
 		})
 	}
 
@@ -102,6 +121,19 @@ func marshalTaskSessionList(taskType string, sessions []TaskSession) (string, []
 	}
 
 	return string(payload), normalized, nil
+}
+
+func validateTaskSessionReviewFields(sessions []TaskSession) error {
+	for index, session := range sessions {
+		if session.IsCompleted == nil {
+			return fmt.Errorf("第 %d 个 session 的是否完成不能为空", index+1)
+		}
+		if session.IsSatisfied == nil {
+			return fmt.Errorf("第 %d 个 session 的是否满意不能为空", index+1)
+		}
+	}
+
+	return nil
 }
 
 func countedTaskTypeSessions(sessions []TaskSession) map[string]int {
@@ -154,7 +186,11 @@ func applyTaskSessionQuotaDelta(quotas map[string]int, previousSessions, nextSes
 
 func (s *Store) ListTasks(projectConfigID *string) ([]Task, error) {
 	selectSQL := fmt.Sprintf(
-		`SELECT id, gitlab_project_id, project_name, status, task_type, session_list, local_path, prompt_text, notes, project_config_id, %s, %s FROM tasks`,
+		`SELECT id, gitlab_project_id, project_name, status, task_type, session_list, local_path, prompt_text,
+		        prompt_generation_status, prompt_generation_error, %s, %s,
+		        notes, project_config_id, %s, %s FROM tasks`,
+		nullableUnixTimestampExpr("prompt_generation_started_at"),
+		nullableUnixTimestampExpr("prompt_generation_finished_at"),
 		unixTimestampExpr("created_at"),
 		unixTimestampExpr("updated_at"),
 	)
@@ -177,7 +213,11 @@ func (s *Store) ListTasks(projectConfigID *string) ([]Task, error) {
 	for rows.Next() {
 		var t Task
 		var rawSessionList string
-		if err := rows.Scan(&t.ID, &t.GitLabProjectID, &t.ProjectName, &t.Status, &t.TaskType, &rawSessionList, &t.LocalPath, &t.PromptText, &t.Notes, &t.ProjectConfigID, &t.CreatedAt, &t.UpdatedAt); err != nil {
+		if err := rows.Scan(
+			&t.ID, &t.GitLabProjectID, &t.ProjectName, &t.Status, &t.TaskType, &rawSessionList, &t.LocalPath, &t.PromptText,
+			&t.PromptGenerationStatus, &t.PromptGenerationError, &t.PromptGenerationStartedAt, &t.PromptGenerationFinishedAt,
+			&t.Notes, &t.ProjectConfigID, &t.CreatedAt, &t.UpdatedAt,
+		); err != nil {
 			return nil, err
 		}
 		t.SessionList, err = parseTaskSessionList(rawSessionList, t.TaskType)
@@ -192,13 +232,21 @@ func (s *Store) ListTasks(projectConfigID *string) ([]Task, error) {
 func (s *Store) GetTask(id string) (*Task, error) {
 	var t Task
 	query := fmt.Sprintf(
-		`SELECT id, gitlab_project_id, project_name, status, task_type, session_list, local_path, prompt_text, notes, project_config_id, %s, %s FROM tasks WHERE id = ?`,
+		`SELECT id, gitlab_project_id, project_name, status, task_type, session_list, local_path, prompt_text,
+		        prompt_generation_status, prompt_generation_error, %s, %s,
+		        notes, project_config_id, %s, %s FROM tasks WHERE id = ?`,
+		nullableUnixTimestampExpr("prompt_generation_started_at"),
+		nullableUnixTimestampExpr("prompt_generation_finished_at"),
 		unixTimestampExpr("created_at"),
 		unixTimestampExpr("updated_at"),
 	)
 	var rawSessionList string
 	err := s.DB.QueryRow(query, id).
-		Scan(&t.ID, &t.GitLabProjectID, &t.ProjectName, &t.Status, &t.TaskType, &rawSessionList, &t.LocalPath, &t.PromptText, &t.Notes, &t.ProjectConfigID, &t.CreatedAt, &t.UpdatedAt)
+		Scan(
+			&t.ID, &t.GitLabProjectID, &t.ProjectName, &t.Status, &t.TaskType, &rawSessionList, &t.LocalPath, &t.PromptText,
+			&t.PromptGenerationStatus, &t.PromptGenerationError, &t.PromptGenerationStartedAt, &t.PromptGenerationFinishedAt,
+			&t.Notes, &t.ProjectConfigID, &t.CreatedAt, &t.UpdatedAt,
+		)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -389,6 +437,9 @@ func (s *Store) UpdateTaskSessionList(id string, sessionList []TaskSession) erro
 	if marshalErr != nil {
 		return marshalErr
 	}
+	if validateErr := validateTaskSessionReviewFields(normalizedSessions); validateErr != nil {
+		return validateErr
+	}
 
 	nextTaskType := normalizedSessions[0].TaskType
 	now := time.Now().Unix()
@@ -451,8 +502,84 @@ func (s *Store) UpdateTaskSessionList(id string, sessionList []TaskSession) erro
 
 func (s *Store) UpdateTaskPrompt(id, promptText string) error {
 	now := time.Now().Unix()
-	_, err := s.DB.Exec("UPDATE tasks SET prompt_text=?, status='PromptReady', updated_at=? WHERE id=?", promptText, now, id)
-	return err
+	return s.CompleteTaskPromptGeneration(id, promptText, now)
+}
+
+func (s *Store) StartTaskPromptGeneration(id string, startedAt int64) error {
+	now := time.Now().Unix()
+	res, err := s.DB.Exec(
+		`UPDATE tasks
+		 SET prompt_generation_status='running',
+		     prompt_generation_error=NULL,
+		     prompt_generation_started_at=?,
+		     prompt_generation_finished_at=NULL,
+		     updated_at=?
+		 WHERE id=?`,
+		startedAt, now, id,
+	)
+	if err != nil {
+		return err
+	}
+	rowsAffected, rowsErr := res.RowsAffected()
+	if rowsErr != nil {
+		return rowsErr
+	}
+	if rowsAffected == 0 {
+		return fmt.Errorf("task not found: %s", id)
+	}
+	return nil
+}
+
+func (s *Store) CompleteTaskPromptGeneration(id, promptText string, startedAt int64) error {
+	now := time.Now().Unix()
+	res, err := s.DB.Exec(
+		`UPDATE tasks
+		 SET prompt_text=?,
+		     status='PromptReady',
+		     prompt_generation_status='done',
+		     prompt_generation_error=NULL,
+		     prompt_generation_started_at=?,
+		     prompt_generation_finished_at=?,
+		     updated_at=?
+		 WHERE id=?`,
+		promptText, startedAt, now, now, id,
+	)
+	if err != nil {
+		return err
+	}
+	rowsAffected, rowsErr := res.RowsAffected()
+	if rowsErr != nil {
+		return rowsErr
+	}
+	if rowsAffected == 0 {
+		return fmt.Errorf("task not found: %s", id)
+	}
+	return nil
+}
+
+func (s *Store) FailTaskPromptGeneration(id, errMsg string, startedAt int64) error {
+	now := time.Now().Unix()
+	res, err := s.DB.Exec(
+		`UPDATE tasks
+		 SET prompt_generation_status='error',
+		     prompt_generation_error=?,
+		     prompt_generation_started_at=?,
+		     prompt_generation_finished_at=?,
+		     updated_at=?
+		 WHERE id=?`,
+		errMsg, startedAt, now, now, id,
+	)
+	if err != nil {
+		return err
+	}
+	rowsAffected, rowsErr := res.RowsAffected()
+	if rowsErr != nil {
+		return rowsErr
+	}
+	if rowsAffected == 0 {
+		return fmt.Errorf("task not found: %s", id)
+	}
+	return nil
 }
 
 func (s *Store) UpdateTaskLocalPath(id string, localPath *string) error {
