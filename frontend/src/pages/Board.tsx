@@ -1,12 +1,16 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import {
   Search, Clock, GitBranch, CheckCircle2, CircleDashed, PlayCircle, Copy, Check,
-  X, ExternalLink, Plus, Trash2, Settings, AlignJustify, Grid2X2, LayoutGrid, RefreshCw, Eye, EyeOff, ChevronDown,
+  X, ExternalLink, Plus, Trash2, Settings, AlignJustify, Grid2X2, LayoutGrid, RefreshCw,
+  ChevronRight, ArrowLeft,
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { useAppStore, TaskStatus, TaskType, Task } from '../store';
 import { motion, AnimatePresence } from 'motion/react';
 import TaskTypeQuotaEditor from '../components/TaskTypeQuotaEditor';
+import TaskGroupSection from '../components/TaskGroupSection';
+import TaskTypeOverviewBar, { type TaskTypeOverviewSummary } from '../components/TaskTypeOverviewBar';
+import TaskDetailDrawer, { type TaskDetailDrawerTab } from '../components/TaskDetailDrawer';
 import {
   buildProjectTaskTypes,
   getTaskTypePresentation,
@@ -24,8 +28,10 @@ import {
 import { saveTaskPrompt } from '../services/llm';
 import {
   deleteTask,
+  extractTaskSessions,
   getTask,
   listModelRuns,
+  type ExtractTaskSessionCandidate,
   type PromptGenerationStatus,
   updateTaskStatus,
   updateTaskType,
@@ -38,6 +44,17 @@ import {
   normalizeManagedSourceFolders,
   type NormalizeManagedSourceFoldersResult,
 } from '../services/git';
+import {
+  buildDraftsFromExtractedCandidate,
+  buildSessionEditorOpenSet,
+  countCountedSessionsByTaskType,
+  createSessionDraft,
+  hasCountedSessionForTaskType,
+  hydrateSessionDrafts,
+  isSessionCounted,
+  mapSessionDraftsToSessionList,
+  type EditableTaskSession,
+} from '../lib/sessionUtils';
 
 /* ── Status config ── */
 const STATUS: Record<TaskStatus, {
@@ -91,121 +108,13 @@ function normalizePromptGenerationStatus(status?: string | null): PromptGenerati
 
 type CardSize = 'sm' | 'md' | 'lg';
 type TaskSortOption = 'created-desc' | 'created-asc' | 'round-desc' | 'round-asc';
-
-type EditableTaskSession = TaskSessionRecord & {
-  localId: string;
-};
-
-function createSessionDraft(
-  fallbackTaskType: string,
-  session?: Partial<TaskSessionRecord>,
-): EditableTaskSession {
-  const normalizedTaskType =
-    normalizeTaskTypeName(session?.taskType ?? '') ||
-    normalizeTaskTypeName(fallbackTaskType) ||
-    'Feature迭代';
-
-  return {
-    localId: globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`,
-    sessionId: session?.sessionId ?? '',
-    taskType: normalizedTaskType,
-    consumeQuota: session?.consumeQuota ?? false,
-    isCompleted: session?.isCompleted ?? null,
-    isSatisfied: session?.isSatisfied ?? null,
-    evaluation: session?.evaluation ?? '',
+type TaskCardContextMenuState = {
+  task: Task;
+  position: {
+    x: number;
+    y: number;
   };
-}
-
-function hydrateSessionDrafts(
-  sessionList: TaskSessionRecord[] | null | undefined,
-  fallbackTaskType: string,
-): EditableTaskSession[] {
-  const source =
-    sessionList && sessionList.length > 0
-      ? sessionList
-      : [{
-          sessionId: '',
-          taskType: fallbackTaskType,
-          consumeQuota: true,
-          isCompleted: null,
-          isSatisfied: null,
-          evaluation: '',
-        }];
-
-  return source.map((session, index) =>
-    createSessionDraft(fallbackTaskType, {
-      ...session,
-      consumeQuota: index === 0 || session.consumeQuota,
-    }),
-  );
-}
-
-function buildSessionEditorOpenSet(sessions: EditableTaskSession[]): Set<string> {
-  return new Set(
-    sessions
-      .filter((session) => !session.sessionId.trim())
-      .map((session) => session.localId),
-  );
-}
-
-function summarizeCountedRounds(sessions: EditableTaskSession[]): string {
-  const counted = sessions
-    .map((session, index) => (index === 0 || session.consumeQuota ? `第${index + 1}轮` : null))
-    .filter((value): value is string => Boolean(value));
-
-  if (counted.length === 0) {
-    return '当前没有计数轮次';
-  }
-
-  return `计数轮次：${counted.join('、')}`;
-}
-
-function maskSessionId(sessionId: string): string {
-  const trimmed = sessionId.trim();
-  if (!trimmed) {
-    return '未填写';
-  }
-  if (trimmed.length <= 10) {
-    return trimmed;
-  }
-  return `${trimmed.slice(0, 4)}...${trimmed.slice(-4)}`;
-}
-
-function formatBooleanSelection(value: boolean | null | undefined): string {
-  if (value === true) {
-    return 'true';
-  }
-  if (value === false) {
-    return 'false';
-  }
-  return '';
-}
-
-function parseBooleanSelection(value: string): boolean | null {
-  if (value === 'true') {
-    return true;
-  }
-  if (value === 'false') {
-    return false;
-  }
-  return null;
-}
-
-function getSessionDecisionBadge(value: boolean | null | undefined, trueLabel: string, falseLabel: string) {
-  if (value === true) {
-    return {
-      label: trueLabel,
-      className: 'bg-emerald-50 dark:bg-emerald-500/10 text-emerald-700 dark:text-emerald-400',
-    };
-  }
-  if (value === false) {
-    return {
-      label: falseLabel,
-      className: 'bg-rose-50 dark:bg-rose-500/10 text-rose-700 dark:text-rose-400',
-    };
-  }
-  return null;
-}
+};
 
 export default function Board() {
   const navigate = useNavigate();
@@ -219,7 +128,11 @@ export default function Board() {
   const updateTaskTypeInStore = useAppStore(s => s.updateTaskType);
   const sourceModelName = activeProject?.sourceModelFolder?.trim() || 'ORIGIN';
   const availableTaskTypes = useMemo(
-    () => buildProjectTaskTypes(activeProject, tasks.map((task) => task.taskType)),
+    () =>
+      buildProjectTaskTypes(activeProject, [
+        ...tasks.map((task) => task.taskType),
+        ...tasks.flatMap((task) => task.sessionList.map((session) => session.taskType)),
+      ]),
     [activeProject, tasks],
   );
   const projectQuotas = useMemo(
@@ -234,6 +147,7 @@ export default function Board() {
   const [activeStages, setActiveStages] = useState<Set<TaskStatus>>(new Set());
   const [activeRounds, setActiveRounds] = useState<Set<number>>(new Set());
   const [cardSize, setCardSize]         = useState<CardSize>('md');
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
   const [sortBy, setSortBy] = useState<TaskSortOption>('created-desc');
   const [selected, setSelected]       = useState<Task | null>(null);
   const [pendingDelete, setPendingDelete]     = useState<Task | null>(null);
@@ -251,14 +165,20 @@ export default function Board() {
   const [sessionListDraft, setSessionListDraft] = useState<EditableTaskSession[]>([]);
   const [sessionListSaving, setSessionListSaving] = useState(false);
   const [sessionSaveState, setSessionSaveState] = useState<'idle' | 'saved'>('idle');
+  const [sessionExtracting, setSessionExtracting] = useState(false);
+  const [sessionExtractCandidates, setSessionExtractCandidates] = useState<ExtractTaskSessionCandidate[]>([]);
   const [openSessionEditors, setOpenSessionEditors] = useState<Set<string>>(new Set());
   const [copiedSessionId, setCopiedSessionId] = useState<string | null>(null);
   const [taskTypeChanging, setTaskTypeChanging] = useState(false);
+  const [activeDrawerTab, setActiveDrawerTab] = useState<TaskDetailDrawerTab>('sessions');
+  const [taskCardContextMenu, setTaskCardContextMenu] = useState<TaskCardContextMenuState | null>(null);
+  const taskCardContextMenuRef = useRef<HTMLDivElement | null>(null);
 
   const sessionTaskTypeOptions = useMemo(
     () =>
       buildProjectTaskTypes(activeProject, [
         ...tasks.map((task) => task.taskType),
+        ...tasks.flatMap((task) => task.sessionList.map((session) => session.taskType)),
         ...sessionListDraft.map((session) => session.taskType),
       ]),
     [activeProject, sessionListDraft, tasks],
@@ -280,7 +200,6 @@ export default function Board() {
       availableTaskTypes[0] ??
       'Feature迭代',
     ) || 'Feature迭代';
-  const primaryTaskTypePresentation = getTaskTypePresentation(primaryTaskType);
 
   const toggleType = (id: TaskType) =>
     setActiveTypes(prev => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n; });
@@ -290,6 +209,17 @@ export default function Board() {
 
   const toggleRound = (round: number) =>
     setActiveRounds(prev => { const n = new Set(prev); n.has(round) ? n.delete(round) : n.add(round); return n; });
+
+  const toggleGroupCollapse = (taskType: string) =>
+    setCollapsedGroups((prev) => {
+      const next = new Set(prev);
+      if (next.has(taskType)) {
+        next.delete(taskType);
+      } else {
+        next.add(taskType);
+      }
+      return next;
+    });
 
   const availableExecutionRounds = useMemo(
     () => Array.from(new Set(tasks.map((task) => task.executionRounds))).sort((left, right) => left - right),
@@ -308,8 +238,62 @@ export default function Board() {
     setSearch('');
   };
 
+  const closeTaskCardContextMenu = () => {
+    setTaskCardContextMenu(null);
+  };
+
+  const openTaskCardContextMenu = (event: React.MouseEvent, task: Task) => {
+    event.preventDefault();
+    event.stopPropagation();
+
+    const padding = 12;
+    const menuWidth = 296;
+    const estimatedHeight = 460;
+
+    setTaskCardContextMenu({
+      task,
+      position: {
+        x: Math.max(padding, Math.min(event.clientX, window.innerWidth - menuWidth - padding)),
+        y: Math.max(padding, Math.min(event.clientY, window.innerHeight - estimatedHeight - padding)),
+      },
+    });
+  };
+
   useEffect(() => { loadTasks(); }, [loadTasks]);
   useEffect(() => { loadActiveProject(); }, [loadActiveProject]);
+
+  useEffect(() => {
+    if (!taskCardContextMenu) {
+      return undefined;
+    }
+
+    const handlePointerDown = (event: PointerEvent) => {
+      if (taskCardContextMenuRef.current?.contains(event.target as Node)) {
+        return;
+      }
+      setTaskCardContextMenu(null);
+    };
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setTaskCardContextMenu(null);
+      }
+    };
+
+    const handleViewportChange = () => {
+      setTaskCardContextMenu(null);
+    };
+
+    window.addEventListener('pointerdown', handlePointerDown);
+    window.addEventListener('keydown', handleKeyDown);
+    window.addEventListener('resize', handleViewportChange);
+
+    return () => {
+      window.removeEventListener('pointerdown', handlePointerDown);
+      window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('resize', handleViewportChange);
+    };
+  }, [taskCardContextMenu]);
 
   useEffect(() => {
     if (!selected?.id) {
@@ -318,13 +302,16 @@ export default function Board() {
       setDrawerError('');
       setPromptDraft('');
       setSessionListDraft([]);
+      setSessionExtractCandidates([]);
       setOpenSessionEditors(new Set());
       setCopiedSessionId(null);
       setSessionSaveState('idle');
       setPromptSaveState('idle');
+      setActiveDrawerTab('sessions');
       return;
     }
     let cancelled = false;
+    setActiveDrawerTab('sessions');
     setDrawerLoading(true);
     setDrawerError('');
     (async () => {
@@ -337,6 +324,7 @@ export default function Board() {
         taskDetail?.taskType ?? selected.taskType,
       );
       setSessionListDraft(hydratedSessions);
+      setSessionExtractCandidates([]);
       setOpenSessionEditors(buildSessionEditorOpenSet(hydratedSessions));
       setCopiedSessionId(null);
       setSessionSaveState('idle');
@@ -379,7 +367,7 @@ export default function Board() {
       t.projectName.toLowerCase().includes(search.toLowerCase()) ||
       t.projectId.includes(search) ||
       t.id.toLowerCase().includes(search.toLowerCase());
-    const matchType  = activeTypes.size === 0 || activeTypes.has(t.taskType);
+    const matchType  = activeTypes.size === 0 || activeTypes.has(normalizeTaskTypeName(t.taskType));
     const matchStage = activeStages.size === 0 || activeStages.has(t.status);
     const matchRound = activeRounds.size === 0 || activeRounds.has(t.executionRounds);
     return matchSearch && matchType && matchStage && matchRound;
@@ -406,25 +394,66 @@ export default function Board() {
     return next;
   }, [filtered, sortBy]);
 
-  const projectTaskSummaries = useMemo(
-    () =>
-      availableTaskTypes.map((taskType) => {
-        const matchingTasks = tasks.filter(
-          (task) => normalizeTaskTypeName(task.taskType) === taskType,
-        );
+  const groupedTasks = useMemo(() => {
+    const grouped = new Map<string, Task[]>();
 
-        return {
-          taskType,
-          remainingQuota: getTaskTypeQuotaValue(projectQuotas, taskType),
-          waitingTasks: matchingTasks.filter((task) => task.status === 'Claimed'),
-          processingTasks: matchingTasks.filter((task) =>
-            task.status === 'Downloading' || task.status === 'Downloaded' || task.status === 'PromptReady',
-          ),
-          submittedTasks: matchingTasks.filter((task) => task.status === 'Submitted'),
-          errorTasks: matchingTasks.filter((task) => task.status === 'Error'),
-        };
-      }),
-    [availableTaskTypes, projectQuotas, tasks],
+    for (const taskType of availableTaskTypes) {
+      grouped.set(taskType, []);
+    }
+
+    for (const task of sortedTasks) {
+      const normalizedTaskType = normalizeTaskTypeName(task.taskType) || task.taskType;
+      const existingTasks = grouped.get(normalizedTaskType);
+      if (existingTasks) {
+        existingTasks.push(task);
+        continue;
+      }
+      grouped.set(normalizedTaskType, [task]);
+    }
+
+    return Array.from(grouped.entries())
+      .map(([taskType, groupTasks]) => ({ taskType, tasks: groupTasks }))
+      .filter((group) => group.tasks.length > 0);
+  }, [availableTaskTypes, sortedTasks]);
+
+  const countedSessionsByTaskType = useMemo(
+    () => countCountedSessionsByTaskType(tasks),
+    [tasks],
+  );
+
+  const submittedSessionsByTaskType = useMemo(
+    () => countCountedSessionsByTaskType(tasks, { status: 'Submitted' }),
+    [tasks],
+  );
+
+  const buildTaskTypeSummary = (taskType: string, taskPool: Task[]): TaskTypeOverviewSummary => {
+    const matchingTasks = taskPool.filter(
+      (task) => normalizeTaskTypeName(task.taskType) === taskType,
+    );
+    const remainingQuota = getTaskTypeQuotaValue(projectQuotas, taskType);
+    const allocatedSessionCount = countedSessionsByTaskType[taskType] ?? 0;
+    const submittedSessionCount = submittedSessionsByTaskType[taskType] ?? 0;
+
+    return {
+      taskType,
+      remainingQuota,
+      waitingTasks: matchingTasks.filter((task) => task.status === 'Claimed'),
+      processingTasks: matchingTasks.filter((task) =>
+        task.status === 'Downloading' || task.status === 'Downloaded' || task.status === 'PromptReady',
+      ),
+      submittedTasks: taskPool.filter(
+        (task) => task.status === 'Submitted' && hasCountedSessionForTaskType(task, taskType),
+      ),
+      errorTasks: matchingTasks.filter((task) => task.status === 'Error'),
+      submittedSessionCount,
+      allocatedSessionCount,
+      totalTaskCount: remainingQuota === null ? allocatedSessionCount : allocatedSessionCount + remainingQuota,
+    };
+  };
+
+  const projectTaskSummaries = useMemo(
+    () => availableTaskTypes.map((taskType) => buildTaskTypeSummary(taskType, tasks)),
+    [availableTaskTypes, tasks, projectQuotas, countedSessionsByTaskType, submittedSessionsByTaskType],
   );
 
   const visibleProjectTaskSummaries = useMemo(
@@ -433,7 +462,7 @@ export default function Board() {
         summary.remainingQuota !== null ||
         summary.waitingTasks.length > 0 ||
         summary.processingTasks.length > 0 ||
-        summary.submittedTasks.length > 0 ||
+        summary.submittedSessionCount > 0 ||
         summary.errorTasks.length > 0,
       ),
     [projectTaskSummaries],
@@ -466,8 +495,8 @@ export default function Board() {
     try {
       await updateTaskStatus(taskId, newStatus);
       updateTaskStatusInStore(taskId, newStatus);
-      setSelected(prev => prev ? { ...prev, status: newStatus } : null);
-      setSelectedTaskDetail(prev => prev ? { ...prev, status: newStatus } : null);
+      setSelected((prev) => (prev?.id === taskId ? { ...prev, status: newStatus } : prev));
+      setSelectedTaskDetail((prev) => (prev?.id === taskId ? { ...prev, status: newStatus } : prev));
     } catch (err) {
       console.error('Failed to update task status:', err);
     } finally {
@@ -475,57 +504,75 @@ export default function Board() {
     }
   };
 
-  const handlePrimaryTaskTypeChange = async (nextTaskType: string) => {
-    if (!selected?.id) return;
-
+  const handleTaskTypeChange = async (taskId: string, nextTaskType: string) => {
     const normalizedTaskType = normalizeTaskTypeName(nextTaskType);
-    if (!normalizedTaskType || normalizedTaskType === primaryTaskType) {
+    const taskFromStore = tasks.find((task) => task.id === taskId);
+    const isSelectedTask = selected?.id === taskId;
+    const currentTaskType =
+      normalizeTaskTypeName(
+        isSelectedTask ? primaryTaskType : (taskFromStore?.taskType ?? ''),
+      ) || (isSelectedTask ? primaryTaskType : (taskFromStore?.taskType ?? ''));
+
+    if (!normalizedTaskType || !currentTaskType || normalizedTaskType === currentTaskType) {
       return;
     }
 
-    const previousTaskType = primaryTaskType;
+    const previousTaskType = taskFromStore?.taskType ?? currentTaskType;
+    const previousSelected = selected;
     const previousTaskDetail = selectedTaskDetail;
     const previousSessionListDraft = sessionListDraft;
 
-    updateTaskTypeInStore(selected.id, normalizedTaskType);
-    setSelected((prev) => (prev ? { ...prev, taskType: normalizedTaskType } : prev));
-    setSelectedTaskDetail((prev) => {
-      if (!prev) return prev;
+    updateTaskTypeInStore(taskId, normalizedTaskType);
 
-      const nextSessionList =
-        prev.sessionList.length > 0
-          ? prev.sessionList.map((session, index) =>
-              index === 0 ? { ...session, taskType: normalizedTaskType } : session,
-            )
-          : prev.sessionList;
+    if (isSelectedTask) {
+      setSelected((prev) => (prev?.id === taskId ? { ...prev, taskType: normalizedTaskType } : prev));
+      setSelectedTaskDetail((prev) => {
+        if (!prev || prev.id !== taskId) return prev;
 
-      return {
-        ...prev,
-        taskType: normalizedTaskType,
-        sessionList: nextSessionList,
-      };
-    });
-    setSessionListDraft((prev) =>
-      prev.map((session, index) =>
-        index === 0 ? { ...session, taskType: normalizedTaskType } : session,
-      ),
-    );
-    setSessionSaveState('idle');
+        const nextSessionList =
+          prev.sessionList.length > 0
+            ? prev.sessionList.map((session, index) =>
+                index === 0 ? { ...session, taskType: normalizedTaskType } : session,
+              )
+            : prev.sessionList;
+
+        return {
+          ...prev,
+          taskType: normalizedTaskType,
+          sessionList: nextSessionList,
+        };
+      });
+      setSessionListDraft((prev) =>
+        prev.map((session, index) =>
+          index === 0 ? { ...session, taskType: normalizedTaskType } : session,
+        ),
+      );
+      setSessionSaveState('idle');
+      setDrawerError('');
+    }
 
     setTaskTypeChanging(true);
-    setDrawerError('');
     try {
-      await updateTaskType(selected.id, normalizedTaskType);
+      await updateTaskType(taskId, normalizedTaskType);
       await loadActiveProject();
     } catch (error) {
-      updateTaskTypeInStore(selected.id, previousTaskType);
-      setSelected((prev) => (prev ? { ...prev, taskType: previousTaskType } : prev));
-      setSelectedTaskDetail(previousTaskDetail);
-      setSessionListDraft(previousSessionListDraft);
-      setDrawerError(error instanceof Error ? error.message : '任务类型更新失败');
+      updateTaskTypeInStore(taskId, previousTaskType);
+      if (isSelectedTask) {
+        setSelected(previousSelected);
+        setSelectedTaskDetail(previousTaskDetail);
+        setSessionListDraft(previousSessionListDraft);
+        setDrawerError(error instanceof Error ? error.message : '任务类型更新失败');
+      } else {
+        console.error('Failed to update task type:', error);
+      }
     } finally {
       setTaskTypeChanging(false);
     }
+  };
+
+  const handlePrimaryTaskTypeChange = async (nextTaskType: string) => {
+    if (!selected?.id) return;
+    await handleTaskTypeChange(selected.id, nextTaskType);
   };
 
   const handlePromptSave = async () => {
@@ -595,7 +642,7 @@ export default function Board() {
 
   const handleSessionChange = (
     localId: string,
-    patch: Partial<Pick<EditableTaskSession, 'sessionId' | 'taskType' | 'consumeQuota' | 'isCompleted' | 'isSatisfied' | 'evaluation'>>,
+    patch: Partial<Pick<EditableTaskSession, 'sessionId' | 'taskType' | 'consumeQuota' | 'isCompleted' | 'isSatisfied' | 'evaluation' | 'userConversation'>>,
   ) => {
     setSessionListDraft((prev) =>
       prev.map((session, index) => {
@@ -629,9 +676,57 @@ export default function Board() {
     const fallbackTaskType = selectedTaskDetail?.taskType ?? selected?.taskType ?? availableTaskTypes[0] ?? 'Feature迭代';
     const hydratedSessions = hydrateSessionDrafts(selectedTaskDetail?.sessionList, fallbackTaskType);
     setSessionListDraft(hydratedSessions);
+    setSessionExtractCandidates([]);
     setOpenSessionEditors(buildSessionEditorOpenSet(hydratedSessions));
     setCopiedSessionId(null);
     setSessionSaveState('idle');
+  };
+
+  const applyExtractedSessionCandidate = (candidate: ExtractTaskSessionCandidate) => {
+    const fallbackTaskType =
+      selectedTaskDetail?.taskType ??
+      selected?.taskType ??
+      availableTaskTypes[0] ??
+      'Feature迭代';
+
+    const nextDrafts = buildDraftsFromExtractedCandidate(candidate, sessionListDraft, fallbackTaskType);
+    if (nextDrafts.length === 0) {
+      setDrawerError('提取结果中没有可用的 session');
+      return;
+    }
+
+    setSessionListDraft(nextDrafts);
+    setSessionExtractCandidates([]);
+    setOpenSessionEditors(buildSessionEditorOpenSet(nextDrafts));
+    setCopiedSessionId(null);
+    setSessionSaveState('idle');
+    setDrawerError('');
+  };
+
+  const handleAutoExtractSessions = async () => {
+    if (!selected?.id) return;
+
+    setSessionExtracting(true);
+    setSessionExtractCandidates([]);
+    setDrawerError('');
+    try {
+      const result = await extractTaskSessions(selected.id);
+      if (result.candidates.length === 0) {
+        setDrawerError('未在 Trae 中找到与当前题卡匹配的对话');
+        return;
+      }
+
+      if (result.candidates.length === 1) {
+        applyExtractedSessionCandidate(result.candidates[0]);
+        return;
+      }
+
+      setSessionExtractCandidates(result.candidates);
+    } catch (error) {
+      setDrawerError(error instanceof Error ? error.message : '自动提取 session 失败');
+    } finally {
+      setSessionExtracting(false);
+    }
   };
 
   const toggleSessionEditor = (localId: string) => {
@@ -674,14 +769,7 @@ export default function Board() {
       }
     }
 
-    const nextSessionList: TaskSessionRecord[] = sessionListDraft.map((session, index) => ({
-      sessionId: session.sessionId.trim(),
-      taskType: normalizeTaskTypeName(session.taskType) || selected.taskType,
-      consumeQuota: index === 0 || session.consumeQuota,
-      isCompleted: session.isCompleted,
-      isSatisfied: session.isSatisfied,
-      evaluation: session.evaluation?.trim() ?? '',
-    }));
+    const nextSessionList: TaskSessionRecord[] = mapSessionDraftsToSessionList(sessionListDraft, selected.taskType);
 
     setSessionListSaving(true);
     setDrawerError('');
@@ -885,6 +973,10 @@ export default function Board() {
         )}
       </div>
 
+      {visibleProjectTaskSummaries.length > 0 && (
+        <TaskTypeOverviewBar summaries={visibleProjectTaskSummaries} />
+      )}
+
       {/* ── Card grid ─────────────────────────────────── */}
       <div className="flex-1 overflow-y-auto px-8 py-5">
         {sortedTasks.length === 0 ? (
@@ -904,32 +996,67 @@ export default function Board() {
             )}
           </div>
         ) : (
-          <motion.div layout className={`grid gap-3 ${gridClass[cardSize]}`}>
-            <AnimatePresence mode="popLayout">
-              {sortedTasks.map(task => (
-                <motion.div
-                  key={task.id}
-                  layout
-                  initial={{ opacity: 0, scale: 0.96 }}
-                  animate={{ opacity: 1, scale: 1 }}
-                  exit={{ opacity: 0, scale: 0.96 }}
-                  transition={{ duration: 0.15 }}
-                >
-                  <TaskCard
-                    task={task}
-                    size={cardSize}
-                    onClick={() => setSelected(task)}
-                    onDelete={() => { setDeleteError(''); setPendingDelete(task); }}
-                  />
-                </motion.div>
-              ))}
-            </AnimatePresence>
-          </motion.div>
+          <div className="space-y-6">
+            {groupedTasks.map(({ taskType, tasks: tasksInGroup }) => {
+              const hideHeader = activeTypes.size > 0 && groupedTasks.length === 1;
+
+              return (
+                <TaskGroupSection
+                  key={taskType}
+                  taskType={taskType}
+                  tasks={tasksInGroup}
+                  isCollapsed={hideHeader ? false : collapsedGroups.has(taskType)}
+                  onToggleCollapse={() => toggleGroupCollapse(taskType)}
+                  gridClass={gridClass[cardSize]}
+                  hideHeader={hideHeader}
+                  renderTaskCard={(task) => (
+                    <motion.div
+                      key={task.id}
+                      layout
+                      initial={{ opacity: 0, scale: 0.96 }}
+                      animate={{ opacity: 1, scale: 1 }}
+                      exit={{ opacity: 0, scale: 0.96 }}
+                      transition={{ duration: 0.15 }}
+                    >
+                      <TaskCard
+                        task={task}
+                        size={cardSize}
+                        onClick={() => setSelected(task)}
+                        onContextMenu={(event) => openTaskCardContextMenu(event, task)}
+                        onDelete={() => { setDeleteError(''); setPendingDelete(task); }}
+                      />
+                    </motion.div>
+                  )}
+                />
+              );
+            })}
+          </div>
         )}
       </div>
 
       {/* ── Modals + Drawers ──────────────────────────── */}
       <AnimatePresence>
+        {taskCardContextMenu && (
+          <TaskCardContextMenu
+            menuRef={taskCardContextMenuRef}
+            task={taskCardContextMenu.task}
+            position={taskCardContextMenu.position}
+            statusOptions={COLUMNS}
+            availableTaskTypes={availableTaskTypes}
+            statusMeta={STATUS}
+            statusChanging={statusChanging}
+            taskTypeChanging={taskTypeChanging}
+            onClose={closeTaskCardContextMenu}
+            onStatusChange={(status) => {
+              closeTaskCardContextMenu();
+              void handleStatusChange(taskCardContextMenu.task.id, status);
+            }}
+            onTaskTypeChange={(taskType) => {
+              closeTaskCardContextMenu();
+              void handleTaskTypeChange(taskCardContextMenu.task.id, taskType);
+            }}
+          />
+        )}
 
         {showProjectOverview && activeProject && (
           <>
@@ -1008,475 +1135,67 @@ export default function Board() {
 
         {/* Task detail drawer */}
         {selected && (
-          <>
-            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => setSelected(null)} className="fixed inset-0 bg-black/20 dark:bg-black/40 backdrop-blur-sm z-20" />
-            <motion.aside
-              initial={{ x: '100%' }} animate={{ x: 0 }} exit={{ x: '100%' }}
-              transition={{ type: 'spring', damping: 26, stiffness: 220 }}
-              className="fixed top-0 right-0 bottom-0 w-[480px] bg-white dark:bg-stone-900 border-l border-stone-200 dark:border-stone-800 shadow-2xl z-30 flex flex-col rounded-l-3xl"
-            >
-              <div className="px-7 py-6 border-b border-stone-100 dark:border-stone-800 flex items-start justify-between gap-4">
-                <div className="min-w-0">
-                  <div className="flex items-center gap-2.5 mb-1.5 flex-wrap">
-                    <div className={`w-2 h-2 rounded-full flex-shrink-0 ${STATUS[selected.status].dotCls}`} />
-                    <select
-                      value={selected.status}
-                      disabled={statusChanging}
-                      onChange={e => handleStatusChange(selected.id, e.target.value as TaskStatus)}
-                      className={`text-xs font-bold uppercase tracking-wider px-2 py-0.5 rounded-full border-0 outline-none cursor-default appearance-none ${STATUS[selected.status].badgeCls} disabled:opacity-60`}
-                    >
-                      {COLUMNS.map(s => <option key={s} value={s}>{STATUS[s].label}</option>)}
-                    </select>
-                    <label className={`relative inline-flex items-center rounded-full border ${primaryTaskTypePresentation.badge} ${taskTypeChanging ? 'opacity-70' : ''}`}>
-                      <select
-                        value={primaryTaskType}
-                        disabled={drawerLoading || sessionListSaving || taskTypeChanging}
-                        onChange={(event) => void handlePrimaryTaskTypeChange(event.target.value)}
-                        className="appearance-none bg-transparent pl-3 pr-7 py-1 text-xs font-semibold outline-none cursor-pointer disabled:cursor-default"
-                        title="修改主任务类型"
-                      >
-                        {sessionTaskTypeOptions.map((taskType) => {
-                          const presentation = getTaskTypePresentation(taskType);
-                          const remainingQuota = getTaskTypeQuotaValue(projectQuotas, presentation.value);
-                          return (
-                            <option key={presentation.value} value={presentation.value}>
-                              {presentation.label}
-                              {remainingQuota !== null ? ` · 剩余 ${remainingQuota}` : ''}
-                            </option>
-                          );
-                        })}
-                      </select>
-                      <ChevronDown className="pointer-events-none absolute right-2.5 h-3.5 w-3.5 opacity-70" />
-                    </label>
-                    <span className="text-[10px] font-medium text-stone-400 dark:text-stone-500">
-                      {sessionListDraft.length || 1} 个 session
-                    </span>
-                    <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full ${selectedPromptGenerationMeta.badgeCls}`}>
-                      提示词 {selectedPromptGenerationMeta.label}
-                    </span>
-                  </div>
-                  <h2 className="text-lg font-bold text-stone-900 dark:text-stone-50 tracking-tight truncate">{selected.projectName}</h2>
-                  <p className="text-xs font-mono text-stone-400 mt-0.5">#{selected.projectId} · {selected.id}</p>
-                </div>
-                <button onClick={() => setSelected(null)} className="p-2 rounded-xl hover:bg-stone-100 dark:hover:bg-stone-800 transition-colors text-stone-400 hover:text-stone-600 dark:hover:text-stone-300 flex-shrink-0 cursor-default">
-                  <X className="w-4 h-4" />
-                </button>
-              </div>
+          <TaskDetailDrawer
+            selected={selected}
+            selectedTaskDetail={selectedTaskDetail}
+            selectedModelRuns={selectedModelRuns}
+            drawerLoading={drawerLoading}
+            drawerError={drawerError}
+            statusChanging={statusChanging}
+            taskTypeChanging={taskTypeChanging}
+            sessionListDraft={sessionListDraft}
+            sessionListSaving={sessionListSaving}
+            sessionSaveState={sessionSaveState}
+            sessionExtracting={sessionExtracting}
+            openSessionEditors={openSessionEditors}
+            copiedSessionId={copiedSessionId}
+            promptDraft={promptDraft}
+            promptSaving={promptSaving}
+            promptSaveState={promptSaveState}
+            promptCopied={promptCopied}
+            activeDrawerTab={activeDrawerTab}
+            sessionTaskTypeOptions={sessionTaskTypeOptions}
+            projectQuotas={projectQuotas}
+            primaryTaskType={primaryTaskType}
+            sourceModelName={sourceModelName}
+            selectedPromptGenerationStatus={selectedPromptGenerationStatus}
+            selectedPromptGenerationMeta={selectedPromptGenerationMeta}
+            selectedPromptGenerationError={selectedPromptGenerationError}
+            statusMeta={STATUS}
+            statusOptions={COLUMNS}
+            onClose={() => setSelected(null)}
+            onStatusChange={handleStatusChange}
+            onPrimaryTaskTypeChange={(nextTaskType) => void handlePrimaryTaskTypeChange(nextTaskType)}
+            onTabChange={setActiveDrawerTab}
+            onAddSession={handleAddSession}
+            onAutoExtractSessions={() => void handleAutoExtractSessions()}
+            onSessionChange={handleSessionChange}
+            onToggleSessionEditor={toggleSessionEditor}
+            onCopySessionId={handleCopySessionId}
+            onRemoveSession={handleRemoveSession}
+            onResetSessions={handleResetSessions}
+            onSaveSessionList={() => void handleSessionListSave()}
+            onPromptDraftChange={(value) => {
+              setPromptDraft(value);
+              setPromptSaveState('idle');
+            }}
+            onPromptCopy={handlePromptCopy}
+            onPromptReset={() => {
+              setPromptDraft(selectedTaskDetail?.promptText ?? '');
+              setPromptSaveState('idle');
+            }}
+            onPromptSave={() => void handlePromptSave()}
+            onOpenPrompt={() => { setSelected(null); navigate(`/prompt?taskId=${selected.id}`); }}
+            onOpenSubmit={() => { setSelected(null); navigate(`/submit?taskId=${selected.id}`); }}
+          />
+        )}
 
-              <div className="flex-1 overflow-y-auto p-7">
-                {drawerLoading ? (
-                  <div className="py-20 text-center text-sm text-stone-400 dark:text-stone-500">正在加载任务详情…</div>
-                ) : (
-                  <>
-                    {drawerError && (
-                      <div className="rounded-2xl bg-red-50 dark:bg-red-900/10 border border-red-200 dark:border-red-900/30 px-4 py-3 text-sm font-medium text-red-600 dark:text-red-400 mb-6">
-                        {drawerError}
-                      </div>
-                    )}
-                    <div className="grid grid-cols-2 gap-3 mb-6">
-                      <InfoCard label="项目 ID" value={selected.projectId} mono />
-                      <InfoCard label="创建时间" value={new Date(selected.createdAt * 1000).toLocaleString('zh-CN')} />
-                    </div>
-
-                    <div className="rounded-2xl border border-stone-200 dark:border-stone-700 overflow-hidden mb-8">
-                      <div className="px-4 py-2.5 bg-stone-50 dark:bg-stone-800/50 border-b border-stone-200 dark:border-stone-700 flex items-center justify-between gap-3">
-                        <div>
-                          <span className="text-xs font-bold uppercase tracking-wider text-stone-400 dark:text-stone-500">Session 列表</span>
-                          <p className="mt-1 text-[11px] text-stone-400 dark:text-stone-500">
-                            {summarizeCountedRounds(sessionListDraft)}
-                          </p>
-                        </div>
-                        <div className="flex items-center gap-2">
-                          <span className="rounded-full bg-white dark:bg-stone-900 px-2.5 py-1 text-[10px] font-semibold text-stone-500 dark:text-stone-400 border border-stone-200 dark:border-stone-700">
-                            共 {sessionListDraft.length || 1} 轮
-                          </span>
-                          {sessionSaveState === 'saved' && (
-                            <span className="text-[10px] font-medium text-emerald-600 dark:text-emerald-400">已保存</span>
-                          )}
-                          <button
-                            onClick={handleAddSession}
-                            className="inline-flex items-center gap-1 px-2.5 py-1 rounded-xl bg-stone-100 dark:bg-stone-700 text-[11px] font-semibold text-stone-600 dark:text-stone-200 hover:bg-stone-200 dark:hover:bg-stone-600 transition-colors cursor-default"
-                          >
-                            <Plus className="w-3.5 h-3.5" />
-                            新增 session
-                          </button>
-                        </div>
-                      </div>
-                      <div className="px-4 py-4 bg-white dark:bg-stone-900">
-                        <div className="space-y-3">
-                          {sessionListDraft.map((session, index) => {
-                            const presentation = getTaskTypePresentation(session.taskType);
-                            const remainingQuota = getTaskTypeQuotaValue(projectQuotas, session.taskType);
-                            const isCounted = index === 0 || session.consumeQuota;
-                            const isSessionEditorOpen = openSessionEditors.has(session.localId) || !session.sessionId.trim();
-                            const completionBadge = getSessionDecisionBadge(session.isCompleted, '已完成', '未完成');
-                            const satisfactionBadge = getSessionDecisionBadge(session.isSatisfied, '满意', '不满意');
-                            const hasDecisionGap = session.isCompleted === null || session.isSatisfied === null;
-                            return (
-                              <div
-                                key={session.localId}
-                                className="rounded-2xl border border-stone-200 dark:border-stone-700 bg-stone-50 dark:bg-stone-800/50 px-4 py-4"
-                              >
-                                <div className="flex items-center justify-between gap-3 mb-3">
-                                  <div className="flex items-center gap-2 flex-wrap">
-                                    <span className="text-[11px] font-bold uppercase tracking-wider text-stone-400 dark:text-stone-500">
-                                      第 {index + 1} 轮
-                                    </span>
-                                    {index === 0 && (
-                                      <span className="px-2 py-0.5 rounded-full bg-stone-200 dark:bg-stone-700 text-[10px] font-semibold text-stone-600 dark:text-stone-300">
-                                        主 session
-                                      </span>
-                                    )}
-                                    <span className={`px-2 py-0.5 rounded-full text-[10px] font-semibold ${
-                                      isCounted
-                                        ? 'bg-emerald-50 dark:bg-emerald-500/10 text-emerald-700 dark:text-emerald-400'
-                                        : 'bg-stone-200 dark:bg-stone-700 text-stone-600 dark:text-stone-300'
-                                    }`}>
-                                      {isCounted ? '计数' : '不计数'}
-                                    </span>
-                                    <span className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-semibold ${presentation.badge}`}>
-                                      <span className={`h-1.5 w-1.5 rounded-full ${presentation.dot}`} />
-                                      {presentation.label}
-                                    </span>
-                                    {completionBadge && (
-                                      <span className={`px-2 py-0.5 rounded-full text-[10px] font-semibold ${completionBadge.className}`}>
-                                        {completionBadge.label}
-                                      </span>
-                                    )}
-                                    {satisfactionBadge && (
-                                      <span className={`px-2 py-0.5 rounded-full text-[10px] font-semibold ${satisfactionBadge.className}`}>
-                                        {satisfactionBadge.label}
-                                      </span>
-                                    )}
-                                  </div>
-                                  <div className="flex items-center gap-1.5">
-                                    {session.sessionId.trim() && (
-                                      <button
-                                        onClick={() => void handleCopySessionId(session.localId, session.sessionId)}
-                                        className="p-1.5 rounded-lg text-stone-400 hover:text-stone-700 dark:hover:text-stone-200 hover:bg-stone-100 dark:hover:bg-stone-700 transition-colors cursor-default"
-                                        title="复制 sessionId"
-                                      >
-                                        {copiedSessionId === session.localId ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
-                                      </button>
-                                    )}
-                                    <button
-                                      onClick={() => toggleSessionEditor(session.localId)}
-                                      className="p-1.5 rounded-lg text-stone-400 hover:text-stone-700 dark:hover:text-stone-200 hover:bg-stone-100 dark:hover:bg-stone-700 transition-colors cursor-default"
-                                      title={isSessionEditorOpen ? '隐藏 sessionId' : '显示 sessionId'}
-                                    >
-                                      {isSessionEditorOpen ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
-                                    </button>
-                                    {index > 0 && (
-                                      <button
-                                        onClick={() => handleRemoveSession(session.localId)}
-                                        className="p-1.5 rounded-lg text-stone-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-500/10 transition-colors cursor-default"
-                                        title="删除 session"
-                                      >
-                                        <Trash2 className="w-3.5 h-3.5" />
-                                      </button>
-                                    )}
-                                  </div>
-                                </div>
-
-                                <div className="mb-3 rounded-2xl border border-dashed border-stone-200 dark:border-stone-700 px-3 py-2.5 bg-white/70 dark:bg-stone-900/60">
-                                  <div className="flex items-center justify-between gap-3">
-                                    <span className="text-[11px] font-medium text-stone-500 dark:text-stone-400">sessionId</span>
-                                    <span className="font-mono text-xs text-stone-500 dark:text-stone-400">
-                                      {isSessionEditorOpen ? (session.sessionId.trim() || '未填写') : maskSessionId(session.sessionId)}
-                                    </span>
-                                  </div>
-                                  {copiedSessionId === session.localId && (
-                                    <p className="mt-1 text-[10px] text-emerald-600 dark:text-emerald-400">sessionId 已复制</p>
-                                  )}
-                                </div>
-
-                                {isSessionEditorOpen && (
-                                  <label className="block mb-3">
-                                    <span className="block text-[11px] font-medium text-stone-500 dark:text-stone-400 mb-1.5">编辑 sessionId</span>
-                                    <input
-                                      value={session.sessionId}
-                                      onChange={(event) => handleSessionChange(session.localId, { sessionId: event.target.value })}
-                                      placeholder="记录实际 sessionId"
-                                      className="w-full rounded-2xl border border-stone-200 dark:border-stone-700 bg-white dark:bg-stone-900 px-4 py-2.5 text-sm font-mono text-stone-700 dark:text-stone-300 placeholder:text-stone-300 dark:placeholder:text-stone-600 focus:outline-none focus:ring-2 focus:ring-slate-400/30"
-                                    />
-                                  </label>
-                                )}
-
-                                {hasDecisionGap && (
-                                  <p className="mb-3 text-[11px] font-medium text-amber-600 dark:text-amber-400">
-                                    请补充是否完成和是否满意，这两项为必选。
-                                  </p>
-                                )}
-
-                                <div className="grid grid-cols-[minmax(0,1fr)_auto] gap-3 items-end">
-                                  <label className="block min-w-0">
-                                    <span className="block text-[11px] font-medium text-stone-500 dark:text-stone-400 mb-1.5">任务类型</span>
-                                    <select
-                                      value={session.taskType}
-                                      onChange={(event) => handleSessionChange(session.localId, { taskType: event.target.value })}
-                                      className={`w-full rounded-2xl border px-4 py-2.5 text-sm font-semibold outline-none appearance-none cursor-default ${presentation.badge}`}
-                                    >
-                                      {sessionTaskTypeOptions.map((taskType) => {
-                                        const optionPresentation = getTaskTypePresentation(taskType);
-                                        const optionQuota = getTaskTypeQuotaValue(projectQuotas, optionPresentation.value);
-                                        return (
-                                          <option key={optionPresentation.value} value={optionPresentation.value}>
-                                            {optionPresentation.label}
-                                            {optionQuota !== null ? ` · 剩余 ${optionQuota}` : ''}
-                                          </option>
-                                        );
-                                      })}
-                                    </select>
-                                  </label>
-
-                                  <label className={`flex items-center gap-2 rounded-2xl border px-3 py-2.5 ${
-                                    isCounted
-                                      ? 'border-stone-300 dark:border-stone-600 bg-stone-100 dark:bg-stone-800'
-                                      : 'border-stone-200 dark:border-stone-700 bg-white dark:bg-stone-900'
-                                  }`}>
-                                    <input
-                                      type="checkbox"
-                                      checked={isCounted}
-                                      disabled={index === 0}
-                                      onChange={(event) => handleSessionChange(session.localId, { consumeQuota: event.target.checked })}
-                                      className="w-4 h-4 rounded accent-slate-700 dark:accent-slate-300 cursor-default disabled:opacity-60"
-                                    />
-                                    <div className="min-w-0">
-                                      <p className="text-xs font-semibold text-stone-700 dark:text-stone-200">扣任务数</p>
-                                      <p className="text-[10px] text-stone-400 dark:text-stone-500">
-                                        {index === 0
-                                          ? '首个 session 固定扣减'
-                                          : remainingQuota !== null
-                                            ? `当前剩余 ${remainingQuota}`
-                                            : '当前类型不限额'}
-                                      </p>
-                                    </div>
-                                  </label>
-                                </div>
-
-                                <div className="mt-3 grid grid-cols-2 gap-3">
-                                  <label className="block">
-                                    <span className="block text-[11px] font-medium text-stone-500 dark:text-stone-400 mb-1.5">
-                                      是否完成
-                                      <span className="ml-1 text-red-500">*</span>
-                                    </span>
-                                    <select
-                                      value={formatBooleanSelection(session.isCompleted)}
-                                      onChange={(event) => handleSessionChange(session.localId, { isCompleted: parseBooleanSelection(event.target.value) })}
-                                      className={`w-full rounded-2xl border px-4 py-2.5 text-sm font-medium outline-none appearance-none cursor-default bg-white dark:bg-stone-900 ${
-                                        session.isCompleted === null
-                                          ? 'border-amber-300 dark:border-amber-500/50 text-stone-500 dark:text-stone-300'
-                                          : 'border-stone-200 dark:border-stone-700 text-stone-700 dark:text-stone-300'
-                                      }`}
-                                    >
-                                      <option value="">请选择</option>
-                                      <option value="true">是</option>
-                                      <option value="false">否</option>
-                                    </select>
-                                  </label>
-
-                                  <label className="block">
-                                    <span className="block text-[11px] font-medium text-stone-500 dark:text-stone-400 mb-1.5">
-                                      是否满意
-                                      <span className="ml-1 text-red-500">*</span>
-                                    </span>
-                                    <select
-                                      value={formatBooleanSelection(session.isSatisfied)}
-                                      onChange={(event) => handleSessionChange(session.localId, { isSatisfied: parseBooleanSelection(event.target.value) })}
-                                      className={`w-full rounded-2xl border px-4 py-2.5 text-sm font-medium outline-none appearance-none cursor-default bg-white dark:bg-stone-900 ${
-                                        session.isSatisfied === null
-                                          ? 'border-amber-300 dark:border-amber-500/50 text-stone-500 dark:text-stone-300'
-                                          : 'border-stone-200 dark:border-stone-700 text-stone-700 dark:text-stone-300'
-                                      }`}
-                                    >
-                                      <option value="">请选择</option>
-                                      <option value="true">是</option>
-                                      <option value="false">否</option>
-                                    </select>
-                                  </label>
-                                </div>
-
-                                <label className="block mt-3">
-                                  <span className="block text-[11px] font-medium text-stone-500 dark:text-stone-400 mb-1.5">
-                                    评价
-                                    <span className="ml-1 text-stone-400 dark:text-stone-500">可选</span>
-                                  </span>
-                                  <textarea
-                                    value={session.evaluation ?? ''}
-                                    onChange={(event) => handleSessionChange(session.localId, { evaluation: event.target.value })}
-                                    placeholder="补充本轮 session 的结果、问题或主观评价"
-                                    rows={3}
-                                    className="w-full rounded-2xl border border-stone-200 dark:border-stone-700 bg-white dark:bg-stone-900 px-4 py-3 text-sm text-stone-700 dark:text-stone-300 placeholder:text-stone-300 dark:placeholder:text-stone-600 focus:outline-none focus:ring-2 focus:ring-slate-400/30 resize-y"
-                                  />
-                                </label>
-                              </div>
-                            );
-                          })}
-                        </div>
-
-                        <div className="mt-3 flex justify-end gap-3">
-                          <button
-                            onClick={handleResetSessions}
-                            disabled={sessionListSaving}
-                            className="px-3 py-2 rounded-xl bg-stone-100 dark:bg-stone-800 text-xs font-semibold text-stone-600 dark:text-stone-300 disabled:opacity-50 cursor-default"
-                          >
-                            还原
-                          </button>
-                          <button
-                            onClick={() => void handleSessionListSave()}
-                            disabled={sessionListSaving || sessionListDraft.length === 0}
-                            className="px-3 py-2 rounded-xl bg-[#111827] hover:bg-[#1F2937] dark:bg-[#E5EAF2] dark:hover:bg-[#F3F6FB] text-xs font-semibold text-white dark:text-[#0D1117] disabled:opacity-50 cursor-default"
-                          >
-                            {sessionListSaving ? '保存中…' : '保存 session 列表'}
-                          </button>
-                        </div>
-                      </div>
-                    </div>
-
-                    {/* 提示词展示区 */}
-                    <div className="rounded-2xl border border-stone-200 dark:border-stone-700 overflow-hidden mb-8">
-                      <div className="px-4 py-2.5 bg-stone-50 dark:bg-stone-800/50 border-b border-stone-200 dark:border-stone-700 flex items-center justify-between">
-                        <div className="flex items-center gap-2">
-                          <span className="text-xs font-bold uppercase tracking-wider text-stone-400 dark:text-stone-500">提示词</span>
-                          <button
-                            onClick={() => void handlePromptCopy()}
-                            disabled={!promptDraft.trim()}
-                            title="复制提示词"
-                            className="p-1 rounded-lg text-stone-400 hover:text-stone-600 dark:hover:text-stone-300 hover:bg-stone-100 dark:hover:bg-stone-700 disabled:opacity-40 cursor-default transition-colors"
-                          >
-                            {promptCopied ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
-                          </button>
-                        </div>
-                        <div className="flex items-center gap-2">
-                          {promptCopied && (
-                            <span className="text-[10px] font-medium text-emerald-600 dark:text-emerald-400">已复制</span>
-                          )}
-                          {promptSaveState === 'saved' && (
-                            <span className="text-[10px] font-medium text-emerald-600 dark:text-emerald-400">已保存</span>
-                          )}
-                          <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full ${selectedPromptGenerationMeta.badgeCls}`}>
-                            后台 {selectedPromptGenerationMeta.label}
-                          </span>
-                          <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full ${
-                            selectedTaskDetail?.promptText
-                              ? 'bg-violet-50 dark:bg-violet-500/10 text-violet-600 dark:text-violet-400'
-                              : 'bg-stone-100 dark:bg-stone-800 text-stone-400 dark:text-stone-500'
-                          }`}>
-                            {selectedTaskDetail?.promptText ? '已保存' : '未保存'}
-                          </span>
-                        </div>
-                      </div>
-                      <div className="px-4 py-3 bg-white dark:bg-stone-900">
-                        {selectedPromptGenerationStatus === 'running' && (
-                          <div className={`mb-3 rounded-2xl border px-3 py-2 text-xs ${selectedPromptGenerationMeta.panelCls}`}>
-                            提示词正在后台生成，完成后会自动写入当前任务。
-                          </div>
-                        )}
-                        {selectedPromptGenerationStatus === 'error' && selectedPromptGenerationError && (
-                          <div className={`mb-3 rounded-2xl border px-3 py-2 text-xs ${selectedPromptGenerationMeta.panelCls}`}>
-                            最近一次后台生成失败：{selectedPromptGenerationError}
-                          </div>
-                        )}
-                        <textarea
-                          value={promptDraft}
-                          onChange={(event) => {
-                            setPromptDraft(event.target.value);
-                            setPromptSaveState('idle');
-                          }}
-                          rows={5}
-                          placeholder="在这里直接新增或修改提示词"
-                          className="w-full rounded-2xl border border-stone-200 dark:border-stone-700 bg-stone-50 dark:bg-stone-800 px-4 py-3 text-xs leading-relaxed text-stone-700 dark:text-stone-300 placeholder:text-stone-300 dark:placeholder:text-stone-600 focus:outline-none focus:ring-2 focus:ring-slate-400/30 resize-y"
-                        />
-                        <div className="mt-3 flex justify-end gap-3">
-                          <button
-                            onClick={() => {
-                              setPromptDraft(selectedTaskDetail?.promptText ?? '');
-                              setPromptSaveState('idle');
-                            }}
-                            disabled={promptSaving}
-                            className="px-3 py-2 rounded-xl bg-stone-100 dark:bg-stone-800 text-xs font-semibold text-stone-600 dark:text-stone-300 disabled:opacity-50 cursor-default"
-                          >
-                            还原
-                          </button>
-                          <button
-                            onClick={() => void handlePromptSave()}
-                            disabled={promptSaving || !promptDraft.trim()}
-                            className="px-3 py-2 rounded-xl bg-[#111827] hover:bg-[#1F2937] dark:bg-[#E5EAF2] dark:hover:bg-[#F3F6FB] text-xs font-semibold text-white dark:text-[#0D1117] disabled:opacity-50 cursor-default"
-                          >
-                            {promptSaving ? '保存中…' : '保存提示词'}
-                          </button>
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="rounded-2xl bg-stone-50 dark:bg-stone-800/50 border border-stone-200 dark:border-stone-700 px-4 py-4 mb-8 space-y-2">
-                      <div className="flex items-center justify-between gap-3">
-                        <span className="text-xs font-bold uppercase tracking-wider text-stone-400 dark:text-stone-500">工作目录</span>
-                        <span className="text-xs text-stone-400 dark:text-stone-500">
-                          {selectedModelRuns.filter((run) => !isNonExecutionModel(run.modelName, sourceModelName)).length} 个模型副本
-                        </span>
-                      </div>
-                      <p className="font-mono text-xs leading-6 text-stone-600 dark:text-stone-300 break-all">{selectedTaskDetail?.localPath || '当前题卡未记录本地目录'}</p>
-                    </div>
-
-                    <div>
-                      <div className="flex items-center justify-between gap-3 mb-3">
-                        <h3 className="text-xs font-bold uppercase tracking-wider text-stone-400 dark:text-stone-500">模型执行</h3>
-                        <div className="flex items-center gap-2 text-[11px] font-semibold">
-                          <span className="px-2 py-1 rounded-full bg-stone-100 dark:bg-stone-800 text-stone-500 dark:text-stone-400">
-                            待处理 {selectedModelRuns.filter((run) => !isNonExecutionModel(run.modelName, sourceModelName) && run.status === 'pending').length}
-                          </span>
-                          <span className="px-2 py-1 rounded-full bg-amber-50 dark:bg-amber-500/10 text-amber-700 dark:text-amber-400">
-                            执行中 {selectedModelRuns.filter((run) => !isNonExecutionModel(run.modelName, sourceModelName) && run.status === 'running').length}
-                          </span>
-                          <span className="px-2 py-1 rounded-full bg-emerald-50 dark:bg-emerald-500/10 text-emerald-700 dark:text-emerald-400">
-                            已完成 {selectedModelRuns.filter((run) => !isNonExecutionModel(run.modelName, sourceModelName) && run.status === 'done').length}
-                          </span>
-                        </div>
-                      </div>
-                      {selectedModelRuns.length === 0 ? (
-                        <p className="text-sm text-stone-400 dark:text-stone-600 text-center py-6 border border-dashed border-stone-200 dark:border-stone-800 rounded-2xl">当前任务还没有模型记录</p>
-                      ) : (
-                        <div className="space-y-2">
-                          {selectedModelRuns.map(run => {
-                            const p = modelRunPresentation(run.status);
-                            return (
-                              <div key={run.id} className="px-4 py-3 bg-stone-50 dark:bg-stone-800/50 rounded-2xl border border-stone-200 dark:border-stone-700">
-                                <div className="flex items-start justify-between gap-3">
-                                  <div className="min-w-0">
-                                    <div className="flex items-center gap-2.5">
-                                      <p.icon className={`w-3.5 h-3.5 flex-shrink-0 ${p.iconCls}`} />
-                                      <span className="font-mono text-sm text-stone-700 dark:text-stone-300">{run.modelName}</span>
-                                      {isSourceModel(run.modelName, sourceModelName) && <span className="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider bg-slate-200 dark:bg-slate-800 text-slate-700 dark:text-slate-300">源码</span>}
-                                      <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider ${p.badgeCls}`}>{p.label}</span>
-                                    </div>
-                                    <div className="mt-2 space-y-1.5 text-xs text-stone-500 dark:text-stone-400">
-                                      <p className="break-all">{run.localPath || '未记录副本目录'}</p>
-                                      <p className="font-mono break-all">{run.branchName || '尚未创建分支'}</p>
-                                    </div>
-                                  </div>
-                                  {run.prUrl ? (
-                                    <a href={run.prUrl} target="_blank" rel="noreferrer" className="text-xs text-stone-400 hover:text-slate-700 dark:hover:text-slate-300 flex items-center gap-1 transition-colors cursor-default flex-shrink-0">PR <ExternalLink className="w-3 h-3" /></a>
-                                  ) : (
-                                    <span className="text-xs text-stone-400 dark:text-stone-500 flex-shrink-0">未生成 PR</span>
-                                  )}
-                                </div>
-                              </div>
-                            );
-                          })}
-                        </div>
-                      )}
-                    </div>
-                  </>
-                )}
-              </div>
-
-              <div className="px-7 py-5 border-t border-stone-100 dark:border-stone-800 flex gap-3">
-                <button onClick={() => { setSelected(null); navigate(`/prompt?taskId=${selected.id}`); }} className="flex-1 py-2.5 bg-stone-100 dark:bg-stone-800 hover:bg-stone-200 dark:hover:bg-stone-700 rounded-2xl text-sm font-semibold text-stone-700 dark:text-stone-300 transition-colors cursor-default">生成提示词</button>
-                <button onClick={() => { setSelected(null); navigate(`/submit?taskId=${selected.id}`); }} className="flex-1 py-2.5 bg-[#111827] hover:bg-[#1F2937] dark:bg-[#E5EAF2] dark:hover:bg-[#F3F6FB] text-white dark:text-[#0D1117] rounded-2xl text-sm font-semibold transition-colors shadow-sm cursor-default">提交 PR</button>
-              </div>
-            </motion.aside>
-          </>
+        {selected && sessionExtractCandidates.length > 1 && (
+          <SessionExtractCandidateModal
+            candidates={sessionExtractCandidates}
+            onClose={() => setSessionExtractCandidates([])}
+            onSelect={(candidate) => applyExtractedSessionCandidate(candidate)}
+          />
         )}
 
         {/* Project panel */}
@@ -1509,6 +1228,359 @@ export default function Board() {
 }
 
 /* ── TaskCard ──────────────────────────────────────── */
+function SessionExtractCandidateModal({
+  candidates,
+  onClose,
+  onSelect,
+}: {
+  candidates: ExtractTaskSessionCandidate[];
+  onClose: () => void;
+  onSelect: (candidate: ExtractTaskSessionCandidate) => void;
+}) {
+  return (
+    <>
+      <motion.div
+        initial={{ opacity: 0 }}
+        animate={{ opacity: 1 }}
+        exit={{ opacity: 0 }}
+        onClick={onClose}
+        className="fixed inset-0 bg-black/30 dark:bg-black/50 backdrop-blur-sm z-40"
+      />
+      <motion.div
+        initial={{ opacity: 0, y: 18, scale: 0.98 }}
+        animate={{ opacity: 1, y: 0, scale: 1 }}
+        exit={{ opacity: 0, y: 18, scale: 0.98 }}
+        className="fixed inset-0 z-50 flex items-center justify-center p-6"
+      >
+        <div className="w-full max-w-3xl rounded-3xl bg-white dark:bg-stone-900 border border-stone-200 dark:border-stone-800 shadow-2xl overflow-hidden">
+          <div className="px-6 py-5 border-b border-stone-100 dark:border-stone-800 flex items-start justify-between gap-4">
+            <div>
+              <h2 className="text-lg font-bold text-stone-900 dark:text-stone-50">检测到多个 Trae 对话</h2>
+              <p className="mt-1 text-sm text-amber-600 dark:text-amber-400">
+                当前题卡匹配到多个会话，请选择要回填到试题预览里的那一个。
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={onClose}
+              className="p-2 rounded-xl hover:bg-stone-100 dark:hover:bg-stone-800 text-stone-400 cursor-default"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+
+          <div className="max-h-[70vh] overflow-y-auto p-6 space-y-4 bg-stone-50/80 dark:bg-stone-950/20">
+            {candidates.map((candidate) => (
+              <div
+                key={candidate.id}
+                className="rounded-2xl border border-stone-200 dark:border-stone-700 bg-white dark:bg-stone-900 px-5 py-4"
+              >
+                <div className="flex items-start justify-between gap-4">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="px-2 py-0.5 rounded-full bg-amber-50 dark:bg-amber-500/10 text-[10px] font-semibold text-amber-700 dark:text-amber-300">
+                        {candidate.sessionCount} 个 session
+                      </span>
+                      <span className="px-2 py-0.5 rounded-full bg-stone-100 dark:bg-stone-800 text-[10px] font-semibold text-stone-500 dark:text-stone-400">
+                        匹配方式：{matchKindLabel(candidate.matchKind)}
+                      </span>
+                      {candidate.userId && (
+                        <span className="px-2 py-0.5 rounded-full bg-sky-50 dark:bg-sky-500/10 text-[10px] font-semibold text-sky-700 dark:text-sky-300">
+                          用户 {candidate.userId}
+                        </span>
+                      )}
+                    </div>
+                    <p className="mt-3 text-sm font-semibold text-stone-900 dark:text-stone-50 break-all">
+                      {candidate.summary || '未提取到对话摘要'}
+                    </p>
+                    <div className="mt-3 space-y-1.5 text-xs text-stone-500 dark:text-stone-400">
+                      <p className="break-all">Trae 路径：{candidate.workspacePath}</p>
+                      <p className="break-all">匹配目录：{candidate.matchedPath}</p>
+                      <p>
+                        用户输入 {candidate.userMessageCount} 条
+                        {candidate.lastActivityAt
+                          ? ` · 最近活动 ${new Date(candidate.lastActivityAt * 1000).toLocaleString('zh-CN')}`
+                          : ''}
+                      </p>
+                    </div>
+                    <div className="mt-3 space-y-2">
+                      {candidate.sessions.map((session, index) => (
+                        <div
+                          key={session.sessionId}
+                          className="rounded-xl bg-stone-50 dark:bg-stone-800/60 border border-stone-200 dark:border-stone-700 px-3 py-2"
+                        >
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="text-[11px] font-bold uppercase tracking-wider text-stone-400 dark:text-stone-500">
+                              第 {index + 1} 轮
+                            </span>
+                            {session.isCurrent && (
+                              <span className="px-2 py-0.5 rounded-full bg-emerald-50 dark:bg-emerald-500/10 text-[10px] font-semibold text-emerald-700 dark:text-emerald-300">
+                                当前会话
+                              </span>
+                            )}
+                            <span className="font-mono text-[11px] text-stone-500 dark:text-stone-400 break-all">
+                              {session.sessionId}
+                            </span>
+                          </div>
+                          <p className="mt-1 text-xs text-stone-500 dark:text-stone-400 line-clamp-2">
+                            {session.firstUserMessage || '没有提取到该轮用户输入'}
+                          </p>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => onSelect(candidate)}
+                    className="px-4 py-2 rounded-2xl bg-[#111827] hover:bg-[#1F2937] dark:bg-[#E5EAF2] dark:hover:bg-[#F3F6FB] text-sm font-semibold text-white dark:text-[#0D1117] transition-colors cursor-default flex-shrink-0"
+                  >
+                    使用这个对话
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </motion.div>
+    </>
+  );
+}
+
+function matchKindLabel(matchKind: string) {
+  if (matchKind === 'exact') return '完全匹配';
+  if (matchKind === 'child') return '项目子目录';
+  if (matchKind === 'parent') return '项目父目录';
+  return matchKind || '未知';
+}
+
+function TaskCardContextMenu({
+  menuRef,
+  task,
+  position,
+  statusOptions,
+  availableTaskTypes,
+  statusMeta,
+  statusChanging,
+  taskTypeChanging,
+  onClose,
+  onStatusChange,
+  onTaskTypeChange,
+}: {
+  menuRef: React.RefObject<HTMLDivElement | null>;
+  task: Task;
+  position: {
+    x: number;
+    y: number;
+  };
+  statusOptions: TaskStatus[];
+  availableTaskTypes: string[];
+  statusMeta: typeof STATUS;
+  statusChanging: boolean;
+  taskTypeChanging: boolean;
+  onClose: () => void;
+  onStatusChange: (status: TaskStatus) => void;
+  onTaskTypeChange: (taskType: string) => void;
+}) {
+  type ContextMenuPanel = 'root' | 'status' | 'taskType';
+
+  const [panel, setPanel] = useState<ContextMenuPanel>('root');
+  const [direction, setDirection] = useState<1 | -1>(1);
+  const currentTaskType = normalizeTaskTypeName(task.taskType) || task.taskType;
+  const currentStatusMeta = statusMeta[task.status];
+  const currentTaskTypePresentation = getTaskTypePresentation(currentTaskType);
+
+  const openPanel = (nextPanel: Exclude<ContextMenuPanel, 'root'>) => {
+    setDirection(1);
+    setPanel(nextPanel);
+  };
+
+  const returnToRoot = () => {
+    setDirection(-1);
+    setPanel('root');
+  };
+
+  const panelVariants = {
+    enter: (nextDirection: 1 | -1) => ({
+      opacity: 0,
+      x: nextDirection > 0 ? 28 : -28,
+      filter: 'blur(6px)',
+    }),
+    center: {
+      opacity: 1,
+      x: 0,
+      filter: 'blur(0px)',
+    },
+    exit: (nextDirection: 1 | -1) => ({
+      opacity: 0,
+      x: nextDirection > 0 ? -28 : 28,
+      filter: 'blur(6px)',
+    }),
+  };
+
+  return (
+    <motion.div
+      ref={menuRef}
+      initial={{ opacity: 0, scale: 0.93, y: -6 }}
+      animate={{ opacity: 1, scale: 1, y: 0 }}
+      exit={{ opacity: 0, scale: 0.96, y: -4 }}
+      transition={{ duration: 0.14, ease: [0.16, 1, 0.3, 1] }}
+      style={{ left: position.x, top: position.y }}
+      className="fixed z-40 w-[256px] overflow-hidden rounded-xl border border-stone-200/70 bg-white shadow-[0_4px_20px_-4px_rgba(15,23,42,0.14),0_1px_4px_rgba(15,23,42,0.05)] dark:border-stone-700/50 dark:bg-stone-900"
+    >
+      {/* Header */}
+      <div className="px-3.5 pt-3 pb-2.5 border-b border-stone-100 dark:border-stone-800/70">
+        <div className="flex items-start gap-2 justify-between">
+          <p className="truncate text-[13px] font-semibold leading-snug text-stone-800 dark:text-stone-100">{task.projectName}</p>
+          <span className="mt-0.5 shrink-0 rounded-md bg-stone-100 px-1.5 py-0.5 font-mono text-[10px] leading-tight text-stone-400 dark:bg-stone-800 dark:text-stone-500">#{task.projectId}</span>
+        </div>
+        <p className="mt-1 font-mono text-[10px] text-stone-300 dark:text-stone-600 truncate">{task.id}</p>
+      </div>
+
+      {/* Panel area */}
+      <div className="overflow-hidden">
+        <AnimatePresence custom={direction} mode="wait" initial={false}>
+          {panel === 'root' && (
+            <motion.div
+              key="root"
+              custom={direction}
+              variants={panelVariants}
+              initial="enter"
+              animate="center"
+              exit="exit"
+              transition={{ duration: 0.13, ease: [0.16, 1, 0.3, 1] }}
+              className="py-1"
+            >
+              <button
+                type="button"
+                onClick={() => openPanel('status')}
+                className="flex w-full items-center gap-3 px-3.5 py-2.5 text-left transition-colors hover:bg-stone-50 dark:hover:bg-stone-800/50 cursor-default"
+              >
+                <div className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-lg ${currentStatusMeta.badgeCls}`}>
+                  <span className={`h-2 w-2 rounded-full ${currentStatusMeta.dotCls}`} />
+                </div>
+                <div className="min-w-0 flex-1">
+                  <p className="text-[11px] leading-none text-stone-400 dark:text-stone-500 mb-0.5">任务状态</p>
+                  <p className="text-[13px] font-semibold leading-tight text-stone-700 dark:text-stone-200 truncate">{currentStatusMeta.label}</p>
+                </div>
+                <ChevronRight className="h-3.5 w-3.5 shrink-0 text-stone-300 dark:text-stone-600" />
+              </button>
+
+              <div className="mx-3.5 border-t border-stone-100 dark:border-stone-800/70" />
+
+              <button
+                type="button"
+                onClick={() => openPanel('taskType')}
+                className="flex w-full items-center gap-3 px-3.5 py-2.5 text-left transition-colors hover:bg-stone-50 dark:hover:bg-stone-800/50 cursor-default"
+              >
+                <div className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-lg ${currentTaskTypePresentation.badge}`}>
+                  <span className={`h-2 w-2 rounded-full ${currentTaskTypePresentation.dot}`} />
+                </div>
+                <div className="min-w-0 flex-1">
+                  <p className="text-[11px] leading-none text-stone-400 dark:text-stone-500 mb-0.5">任务类型</p>
+                  <p className="text-[13px] font-semibold leading-tight text-stone-700 dark:text-stone-200 truncate">{currentTaskTypePresentation.label}</p>
+                </div>
+                <ChevronRight className="h-3.5 w-3.5 shrink-0 text-stone-300 dark:text-stone-600" />
+              </button>
+            </motion.div>
+          )}
+
+          {panel === 'status' && (
+            <motion.div
+              key="status"
+              custom={direction}
+              variants={panelVariants}
+              initial="enter"
+              animate="center"
+              exit="exit"
+              transition={{ duration: 0.13, ease: [0.16, 1, 0.3, 1] }}
+            >
+              <div className="flex items-center gap-1.5 px-2 py-2 border-b border-stone-100 dark:border-stone-800/70">
+                <button
+                  type="button"
+                  onClick={returnToRoot}
+                  className="flex h-7 w-7 items-center justify-center rounded-lg text-stone-400 transition-colors hover:bg-stone-100 hover:text-stone-600 dark:hover:bg-stone-800 dark:hover:text-stone-300 cursor-default"
+                >
+                  <ArrowLeft className="h-3.5 w-3.5" />
+                </button>
+                <p className="text-[12px] font-semibold text-stone-600 dark:text-stone-300">切换任务状态</p>
+              </div>
+              <div className="max-h-[272px] overflow-y-auto py-1">
+                {statusOptions.map((status) => {
+                  const active = task.status === status;
+                  const meta = statusMeta[status];
+                  return (
+                    <button
+                      key={status}
+                      type="button"
+                      disabled={statusChanging}
+                      onClick={() => onStatusChange(status)}
+                      className={`flex w-full items-center gap-3 px-3.5 py-2 text-left transition-colors cursor-default ${
+                        active ? 'bg-stone-50 dark:bg-stone-800/50' : 'hover:bg-stone-50 dark:hover:bg-stone-800/50'
+                      } ${statusChanging ? 'opacity-50' : ''}`}
+                    >
+                      <span className={`h-2 w-2 shrink-0 rounded-full ${meta.dotCls}`} />
+                      <span className={`flex-1 truncate text-[13px] ${active ? 'font-semibold text-stone-800 dark:text-stone-100' : 'font-medium text-stone-600 dark:text-stone-300'}`}>
+                        {meta.label}
+                      </span>
+                      {active && <Check className="h-3.5 w-3.5 shrink-0 text-stone-400 dark:text-stone-500" />}
+                    </button>
+                  );
+                })}
+              </div>
+            </motion.div>
+          )}
+
+          {panel === 'taskType' && (
+            <motion.div
+              key="taskType"
+              custom={direction}
+              variants={panelVariants}
+              initial="enter"
+              animate="center"
+              exit="exit"
+              transition={{ duration: 0.13, ease: [0.16, 1, 0.3, 1] }}
+            >
+              <div className="flex items-center gap-1.5 px-2 py-2 border-b border-stone-100 dark:border-stone-800/70">
+                <button
+                  type="button"
+                  onClick={returnToRoot}
+                  className="flex h-7 w-7 items-center justify-center rounded-lg text-stone-400 transition-colors hover:bg-stone-100 hover:text-stone-600 dark:hover:bg-stone-800 dark:hover:text-stone-300 cursor-default"
+                >
+                  <ArrowLeft className="h-3.5 w-3.5" />
+                </button>
+                <p className="text-[12px] font-semibold text-stone-600 dark:text-stone-300">切换任务类型</p>
+              </div>
+              <div className="max-h-[272px] overflow-y-auto py-1">
+                {availableTaskTypes.map((taskType) => {
+                  const presentation = getTaskTypePresentation(taskType);
+                  const active = presentation.value === currentTaskType;
+                  return (
+                    <button
+                      key={presentation.value}
+                      type="button"
+                      disabled={taskTypeChanging}
+                      onClick={() => onTaskTypeChange(presentation.value)}
+                      className={`flex w-full items-center gap-3 px-3.5 py-2 text-left transition-colors cursor-default ${
+                        active ? 'bg-stone-50 dark:bg-stone-800/50' : 'hover:bg-stone-50 dark:hover:bg-stone-800/50'
+                      } ${taskTypeChanging ? 'opacity-50' : ''}`}
+                    >
+                      <span className={`h-2 w-2 shrink-0 rounded-full ${presentation.dot}`} />
+                      <span className={`flex-1 truncate text-[13px] ${active ? 'font-semibold text-stone-800 dark:text-stone-100' : 'font-medium text-stone-600 dark:text-stone-300'}`}>
+                        {presentation.label}
+                      </span>
+                      {active && <Check className="h-3.5 w-3.5 shrink-0 text-stone-400 dark:text-stone-500" />}
+                    </button>
+                  );
+                })}
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+      </div>
+    </motion.div>
+  );
+}
+
 function TaskRoundBadge({ rounds, compact = false }: { rounds: number; compact?: boolean }) {
   return (
     <span
@@ -1521,7 +1593,19 @@ function TaskRoundBadge({ rounds, compact = false }: { rounds: number; compact?:
   );
 }
 
-function TaskCard({ task, size, onClick, onDelete }: { task: Task; size: CardSize; onClick: () => void; onDelete: () => void }) {
+function TaskCard({
+  task,
+  size,
+  onClick,
+  onContextMenu,
+  onDelete,
+}: {
+  task: Task;
+  size: CardSize;
+  onClick: () => void;
+  onContextMenu: (event: React.MouseEvent) => void;
+  onDelete: () => void;
+}) {
   const cfg = STATUS[task.status];
   const typePresentation = getTaskTypePresentation(task.taskType);
   const promptGenerationStatus = normalizePromptGenerationStatus(task.promptGenerationStatus);
@@ -1530,7 +1614,7 @@ function TaskCard({ task, size, onClick, onDelete }: { task: Task; size: CardSiz
 
   if (size === 'sm') {
     return (
-      <motion.div layout onClick={onClick}
+      <motion.div layout onClick={onClick} onContextMenu={onContextMenu}
         className="group bg-white dark:bg-stone-900 border border-stone-200 dark:border-stone-800 rounded-2xl p-3.5 hover:border-stone-300 dark:hover:border-stone-700 hover:shadow-sm transition-all cursor-default"
       >
         <div className="flex items-start justify-between gap-2 mb-2.5">
@@ -1570,7 +1654,7 @@ function TaskCard({ task, size, onClick, onDelete }: { task: Task; size: CardSiz
 
   if (size === 'lg') {
     return (
-      <motion.div layout onClick={onClick}
+      <motion.div layout onClick={onClick} onContextMenu={onContextMenu}
         className="group bg-white dark:bg-stone-900 border border-stone-200 dark:border-stone-800 rounded-2xl p-5 hover:border-stone-300 dark:hover:border-stone-700 hover:shadow-sm transition-all cursor-default"
       >
         <div className="flex items-center justify-between mb-3">
@@ -1617,7 +1701,7 @@ function TaskCard({ task, size, onClick, onDelete }: { task: Task; size: CardSiz
 
   // md (default)
   return (
-    <motion.div layout onClick={onClick}
+    <motion.div layout onClick={onClick} onContextMenu={onContextMenu}
       className="group bg-stone-50 dark:bg-stone-800/40 border border-stone-200 dark:border-stone-700 rounded-2xl p-4 hover:bg-white dark:hover:bg-stone-800 hover:border-stone-300 dark:hover:border-stone-600 hover:shadow-sm transition-all cursor-default"
     >
       <div className="flex items-center justify-between mb-3">
@@ -1679,33 +1763,7 @@ function InfoCard({ label, value, mono }: { label: string; value: string; mono?:
   );
 }
 
-function isOriginModel(modelName: string) {
-  return modelName.trim().toUpperCase() === 'ORIGIN';
-}
-
-function isSourceModel(modelName: string, sourceModelName: string) {
-  return modelName.trim().toUpperCase() === sourceModelName.trim().toUpperCase();
-}
-
-function isNonExecutionModel(modelName: string, sourceModelName: string) {
-  return isOriginModel(modelName) || isSourceModel(modelName, sourceModelName);
-}
-
-function modelRunPresentation(status: string) {
-  if (status === 'done')    return { label: '完成',  icon: CheckCircle2, iconCls: 'text-emerald-500', badgeCls: 'bg-emerald-50 dark:bg-emerald-500/10 text-emerald-700 dark:text-emerald-400' };
-  if (status === 'running') return { label: '执行中', icon: PlayCircle,   iconCls: 'text-amber-500',  badgeCls: 'bg-amber-50 dark:bg-amber-500/10 text-amber-700 dark:text-amber-400' };
-  if (status === 'error')   return { label: '异常',   icon: X,            iconCls: 'text-red-500',    badgeCls: 'bg-red-50 dark:bg-red-900/20 text-red-600 dark:text-red-400' };
-  return { label: '待处理', icon: CircleDashed, iconCls: 'text-stone-400', badgeCls: 'bg-stone-100 dark:bg-stone-800/60 text-stone-500 dark:text-stone-400' };
-}
-
-type TaskTypeSummary = {
-  taskType: string;
-  remainingQuota: number | null;
-  waitingTasks: Task[];
-  processingTasks: Task[];
-  submittedTasks: Task[];
-  errorTasks: Task[];
-};
+type TaskTypeSummary = TaskTypeOverviewSummary;
 
 function TaskTypeOverviewCard({
   summary,
@@ -1734,7 +1792,7 @@ function TaskTypeOverviewCard({
       <div className="grid grid-cols-2 gap-2 mb-4">
         <OverviewMetric label="待处理" value={summary.waitingTasks.length} tone="stone" />
         <OverviewMetric label="处理中" value={summary.processingTasks.length} tone="amber" />
-        <OverviewMetric label="已提交" value={summary.submittedTasks.length} tone="emerald" />
+        <OverviewMetric label="已提交轮次" value={summary.submittedSessionCount} tone="emerald" />
         <OverviewMetric label="异常" value={summary.errorTasks.length} tone="red" />
       </div>
 
@@ -1892,7 +1950,7 @@ function ProjectOverviewPanel({
             type="button"
             onClick={handleNormalize}
             disabled={normalizing}
-            title="将现有源码目录归一为 GitLab 项目名"
+            title="将现有任务目录和源码目录归一为任务类型命名规则"
             className="p-2 rounded-xl hover:bg-stone-100 dark:hover:bg-stone-800 text-stone-400 disabled:opacity-50 cursor-default"
           >
             <RefreshCw className={`w-4 h-4 ${normalizing ? 'animate-spin' : ''}`} />
@@ -1909,7 +1967,7 @@ function ProjectOverviewPanel({
             <div>
               <h3 className="text-sm font-semibold text-stone-900 dark:text-stone-50">源码目录归一</h3>
               <p className="mt-1 text-xs text-stone-500 dark:text-stone-400">
-                默认把源码目录命名为对应 GitLab 项目名，例如 <code className="font-mono">label-00688</code>。
+                任务目录会归一为 <code className="font-mono">label-00947-bug修复</code>，源码目录会归一为 <code className="font-mono">01995-bug修复</code>。
               </p>
             </div>
             <button
@@ -1947,7 +2005,7 @@ function ProjectOverviewPanel({
           <InfoCard label="题卡总数" value={String(taskCount)} />
           <InfoCard label="模型数量" value={String(modelList.length)} />
           <InfoCard label="源码模型" value={project.sourceModelFolder || 'ORIGIN'} mono />
-          <InfoCard label="源码目录名" value="GitLab 项目名" />
+          <InfoCard label="源码目录名" value="项目ID-任务类型" />
           <InfoCard label="源码仓库" value={project.defaultSubmitRepo || '未配置'} mono />
         </div>
 

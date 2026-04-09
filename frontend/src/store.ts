@@ -3,6 +3,7 @@ import {
   listModelRuns,
   listTasks,
   TaskFromDB,
+  type TaskSession,
   type ModelRunFromDB,
   type PromptGenerationStatus,
 } from './services/task';
@@ -27,6 +28,7 @@ export interface Task {
   projectName: string;
   status: TaskStatus;
   taskType: TaskType;
+  sessionList: TaskSession[];
   promptGenerationStatus: PromptGenerationStatus;
   promptGenerationError: string | null;
   createdAt: number;
@@ -53,6 +55,7 @@ function mapDbTaskToTask(dbTask: TaskFromDB): Task {
     projectName: dbTask.projectName,
     status: dbTask.status as TaskStatus,
     taskType: normalizeTaskTypeName(dbTask.taskType) || DEFAULT_TASK_TYPES[0],
+    sessionList: dbTask.sessionList ?? [],
     promptGenerationStatus: dbTask.promptGenerationStatus,
     promptGenerationError: dbTask.promptGenerationError,
     createdAt: dbTask.createdAt,

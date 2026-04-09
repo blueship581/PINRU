@@ -687,7 +687,7 @@ export default function Layout() {
                       ))}
                     </select>
                     <p className="mt-1.5 text-xs text-stone-400 dark:text-stone-500">
-                      这里指定哪个模型副本作为源码来源。实际源码目录会自动使用对应 GitLab 项目名。
+                      这里指定哪个模型副本作为源码来源。实际目录会自动使用 `label-xxxxx-任务类型 / 项目ID-任务类型` 规则。
                     </p>
                   </label>
 

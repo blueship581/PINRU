@@ -351,6 +351,54 @@ func TestTaskPromptGenerationLifecycle(t *testing.T) {
 	}
 }
 
+func TestSyncTaskPromptFromArtifactPreservesSubmittedStatus(t *testing.T) {
+	store := openTestStore(t)
+	defer store.Close()
+
+	task := Task{
+		ID:              "task-submitted",
+		GitLabProjectID: 2001,
+		ProjectName:     "Submitted Demo",
+		TaskType:        "Bug修复",
+	}
+	if err := store.CreateTask(task); err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+	if err := store.UpdateTaskStatus(task.ID, "Submitted"); err != nil {
+		t.Fatalf("UpdateTaskStatus() error = %v", err)
+	}
+
+	if err := store.SyncTaskPromptFromArtifact(task.ID, "from artifact"); err != nil {
+		t.Fatalf("SyncTaskPromptFromArtifact() error = %v", err)
+	}
+
+	savedTask, err := store.GetTask(task.ID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if savedTask == nil {
+		t.Fatalf("expected task after sync")
+	}
+	if savedTask.Status != "Submitted" {
+		t.Fatalf("Status after sync = %q, want Submitted", savedTask.Status)
+	}
+	if savedTask.PromptGenerationStatus != "done" {
+		t.Fatalf("PromptGenerationStatus after sync = %q, want done", savedTask.PromptGenerationStatus)
+	}
+	if savedTask.PromptGenerationError != nil {
+		t.Fatalf("PromptGenerationError after sync = %v, want nil", savedTask.PromptGenerationError)
+	}
+	if savedTask.PromptText == nil || *savedTask.PromptText != "from artifact" {
+		t.Fatalf("PromptText after sync = %v, want from artifact", savedTask.PromptText)
+	}
+	if savedTask.PromptGenerationStartedAt == nil {
+		t.Fatalf("expected PromptGenerationStartedAt to be set")
+	}
+	if savedTask.PromptGenerationFinishedAt == nil {
+		t.Fatalf("expected PromptGenerationFinishedAt to be set")
+	}
+}
+
 func openTestStore(t *testing.T) *Store {
 	t.Helper()
 

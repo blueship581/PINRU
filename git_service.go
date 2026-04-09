@@ -157,37 +157,84 @@ func (s *GitService) normalizeManagedSourceFolder(task store.Task, preferredSour
 	}
 
 	sourceRun := pickSourceRun(runs, preferredSourceModel)
-	if sourceRun == nil {
-		detail.Status = "skipped"
-		detail.Message = "未找到源码模型记录"
-		return nil
+	if sourceRun != nil {
+		detail.SourceModelName = sourceRun.ModelName
 	}
-
-	detail.SourceModelName = sourceRun.ModelName
 
 	basePath := ""
 	if task.LocalPath != nil && strings.TrimSpace(*task.LocalPath) != "" {
 		basePath = strings.TrimSpace(*task.LocalPath)
 	}
-	if basePath == "" && sourceRun.LocalPath != nil && strings.TrimSpace(*sourceRun.LocalPath) != "" {
+	if basePath == "" && sourceRun != nil && sourceRun.LocalPath != nil && strings.TrimSpace(*sourceRun.LocalPath) != "" {
 		basePath = filepath.Dir(strings.TrimSpace(*sourceRun.LocalPath))
 	}
 	if basePath == "" {
 		detail.Status = "skipped"
 		detail.Message = "缺少任务工作目录"
+		if sourceRun == nil {
+			detail.Message = joinNormalizeMessages(detail.Message, "未找到源码模型记录")
+		}
 		return nil
 	}
 
-	desiredPath := util.BuildManagedSourceFolderPath(basePath, task.ProjectName)
-	detail.CurrentPath = desiredPath
-
 	currentPath := ""
-	if sourceRun.LocalPath != nil {
+	if sourceRun != nil && sourceRun.LocalPath != nil {
 		currentPath = strings.TrimSpace(*sourceRun.LocalPath)
 		detail.PreviousPath = currentPath
 	}
 
-	status, message, err := normalizeManagedSourceFolderOnDisk(currentPath, desiredPath)
+	baseRoot := filepath.Dir(basePath)
+	desiredBasePath := util.BuildManagedTaskFolderPath(baseRoot, task.ProjectName, task.TaskType)
+	baseStatus, baseMessage, err := normalizeManagedDirectoryOnDisk(basePath, desiredBasePath, "任务目录")
+	if err != nil {
+		return err
+	}
+
+	if !util.SamePath(basePath, desiredBasePath) {
+		if err := s.rewriteModelRunBasePaths(task.ID, runs, basePath, desiredBasePath); err != nil {
+			return err
+		}
+		currentPath = rewriteManagedPathBase(currentPath, basePath, desiredBasePath)
+	}
+
+	if task.LocalPath == nil || !util.SamePath(*task.LocalPath, desiredBasePath) {
+		desiredBase := desiredBasePath
+		if err := s.store.UpdateTaskLocalPath(task.ID, &desiredBase); err != nil {
+			return err
+		}
+		if baseStatus == "skipped" {
+			baseStatus = "updated"
+			if baseMessage == "" {
+				baseMessage = "已回写任务工作目录"
+			}
+		}
+	}
+
+	promptStatus, promptMessage, err := s.syncTaskPromptArtifact(task, desiredBasePath)
+	if err != nil {
+		return err
+	}
+
+	if sourceRun == nil {
+		detail.Status = mergeNormalizeStatuses(baseStatus, promptStatus)
+		detail.Message = joinNormalizeMessages(baseMessage, promptMessage, "未找到源码模型记录")
+		if detail.Message == "" {
+			switch detail.Status {
+			case "renamed":
+				detail.Message = "已完成目录归一"
+			case "updated":
+				detail.Message = "已完成目录路径回写"
+			default:
+				detail.Message = "未找到源码模型记录"
+			}
+		}
+		return nil
+	}
+
+	desiredPath := util.BuildManagedSourceFolderPath(desiredBasePath, task.GitLabProjectID, task.TaskType)
+	detail.CurrentPath = desiredPath
+
+	status, message, err := normalizeManagedDirectoryOnDisk(currentPath, desiredPath, "源码目录")
 	if err != nil {
 		return err
 	}
@@ -199,27 +246,14 @@ func (s *GitService) normalizeManagedSourceFolder(task store.Task, preferredSour
 		}
 	}
 
-	if task.LocalPath == nil || !util.SamePath(*task.LocalPath, basePath) {
-		base := basePath
-		if err := s.store.UpdateTaskLocalPath(task.ID, &base); err != nil {
-			return err
-		}
-		if status == "skipped" {
-			status = "updated"
-			if message == "" {
-				message = "已回写任务工作目录"
-			}
-		}
-	}
-
-	detail.Status = status
-	detail.Message = message
+	detail.Status = mergeNormalizeStatuses(baseStatus, promptStatus, status)
+	detail.Message = joinNormalizeMessages(baseMessage, promptMessage, message)
 	if detail.Message == "" {
-		switch status {
+		switch detail.Status {
 		case "renamed":
-			detail.Message = "已完成源码目录重命名"
+			detail.Message = "已完成目录归一"
 		case "updated":
-			detail.Message = "已完成路径回写"
+			detail.Message = "已完成目录路径回写"
 		case "skipped":
 			detail.Message = "目录已符合当前规则"
 		}
@@ -228,7 +262,46 @@ func (s *GitService) normalizeManagedSourceFolder(task store.Task, preferredSour
 	return nil
 }
 
-func normalizeManagedSourceFolderOnDisk(currentPath, desiredPath string) (string, string, error) {
+func (s *GitService) syncTaskPromptArtifact(task store.Task, taskBasePath string) (string, string, error) {
+	basePath := strings.TrimSpace(taskBasePath)
+	if basePath == "" {
+		return "", "", nil
+	}
+
+	promptPath := promptArtifactPath(util.ExpandTilde(basePath))
+	content, err := os.ReadFile(promptPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", "", nil
+		}
+		return "", "", fmt.Errorf("读取任务提示词失败: %w", err)
+	}
+
+	promptText := strings.TrimSpace(string(content))
+	if promptText == "" {
+		return "", "任务提示词文件为空，已跳过同步", nil
+	}
+	if !taskPromptNeedsSync(task, promptText) {
+		return "", "", nil
+	}
+
+	if err := s.store.SyncTaskPromptFromArtifact(task.ID, promptText); err != nil {
+		return "", "", fmt.Errorf("同步任务提示词失败: %w", err)
+	}
+	return "updated", "已同步任务提示词", nil
+}
+
+func taskPromptNeedsSync(task store.Task, promptText string) bool {
+	if task.PromptText == nil || strings.TrimSpace(*task.PromptText) != promptText {
+		return true
+	}
+	if task.PromptGenerationStatus != "done" || task.PromptGenerationError != nil {
+		return true
+	}
+	return task.Status != "PromptReady" && task.Status != "Submitted"
+}
+
+func normalizeManagedDirectoryOnDisk(currentPath, desiredPath, directoryLabel string) (string, string, error) {
 	desiredPath = strings.TrimSpace(desiredPath)
 	if desiredPath == "" {
 		return "", "", fmt.Errorf("目标目录不能为空")
@@ -239,7 +312,7 @@ func normalizeManagedSourceFolderOnDisk(currentPath, desiredPath string) (string
 		if managedDirectoryExists(desiredPath) {
 			return "skipped", "", nil
 		}
-		return "", "", fmt.Errorf("源码目录不存在: %s", desiredPath)
+		return "", "", fmt.Errorf("%s不存在: %s", directoryLabel, desiredPath)
 	}
 
 	currentExists := managedDirectoryExists(currentPath)
@@ -250,7 +323,7 @@ func normalizeManagedSourceFolderOnDisk(currentPath, desiredPath string) (string
 		if desiredExists {
 			return "updated", "已按目标目录回写路径", nil
 		}
-		return "", "", fmt.Errorf("未找到可归一的源码目录")
+		return "", "", fmt.Errorf("未找到可归一的%s", directoryLabel)
 	case currentExists && desiredExists:
 		return "", "", fmt.Errorf("目标目录已存在，无法归一: %s", desiredPath)
 	case currentExists && !desiredExists:
@@ -260,12 +333,75 @@ func normalizeManagedSourceFolderOnDisk(currentPath, desiredPath string) (string
 		if err := os.Rename(util.ExpandTilde(currentPath), util.ExpandTilde(desiredPath)); err != nil {
 			return "", "", err
 		}
-		return "renamed", fmt.Sprintf("已重命名为 %s", filepath.Base(util.ExpandTilde(desiredPath))), nil
+		return "renamed", fmt.Sprintf("%s已重命名为 %s", directoryLabel, filepath.Base(util.ExpandTilde(desiredPath))), nil
 	case !currentExists && desiredExists:
 		return "updated", "目标目录已存在，已回写数据库路径", nil
 	default:
-		return "", "", fmt.Errorf("源码目录不存在: %s", currentPath)
+		return "", "", fmt.Errorf("%s不存在: %s", directoryLabel, currentPath)
 	}
+}
+
+func (s *GitService) rewriteModelRunBasePaths(taskID string, runs []store.ModelRun, previousBasePath, currentBasePath string) error {
+	for _, run := range runs {
+		if run.LocalPath == nil {
+			continue
+		}
+
+		rewrittenPath := rewriteManagedPathBase(strings.TrimSpace(*run.LocalPath), previousBasePath, currentBasePath)
+		if rewrittenPath == "" || util.SamePath(rewrittenPath, strings.TrimSpace(*run.LocalPath)) {
+			continue
+		}
+
+		nextPath := rewrittenPath
+		if err := s.store.UpdateModelRunLocalPath(taskID, run.ModelName, &nextPath); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func rewriteManagedPathBase(path, previousBasePath, currentBasePath string) string {
+	trimmedPath := strings.TrimSpace(path)
+	trimmedPreviousBase := strings.TrimSpace(previousBasePath)
+	trimmedCurrentBase := strings.TrimSpace(currentBasePath)
+	if trimmedPath == "" || trimmedPreviousBase == "" || trimmedCurrentBase == "" || util.SamePath(trimmedPreviousBase, trimmedCurrentBase) {
+		return trimmedPath
+	}
+
+	expandedPreviousBase := util.ExpandTilde(trimmedPreviousBase)
+	expandedPath := util.ExpandTilde(trimmedPath)
+	rel, err := filepath.Rel(expandedPreviousBase, expandedPath)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return trimmedPath
+	}
+	if rel == "." {
+		return trimmedCurrentBase
+	}
+	return filepath.Join(trimmedCurrentBase, rel)
+}
+
+func mergeNormalizeStatuses(statuses ...string) string {
+	result := "skipped"
+	for _, status := range statuses {
+		switch status {
+		case "renamed":
+			return "renamed"
+		case "updated":
+			result = "updated"
+		}
+	}
+	return result
+}
+
+func joinNormalizeMessages(messages ...string) string {
+	nonEmpty := make([]string, 0, len(messages))
+	for _, message := range messages {
+		if trimmed := strings.TrimSpace(message); trimmed != "" {
+			nonEmpty = append(nonEmpty, trimmed)
+		}
+	}
+	return strings.Join(nonEmpty, "；")
 }
 
 func pickSourceRun(runs []store.ModelRun, preferredSourceModel string) *store.ModelRun {

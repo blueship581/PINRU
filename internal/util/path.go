@@ -1,12 +1,16 @@
 package util
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 )
 
-const DefaultManagedSourceFolderName = "source"
+const (
+	DefaultManagedSourceFolderName = "source"
+	DefaultManagedTaskTypeName     = "feature迭代"
+)
 
 func ExpandTilde(path string) string {
 	if path == "~" {
@@ -23,17 +27,51 @@ func ExpandTilde(path string) string {
 	return path
 }
 
-func NormalizeManagedSourceFolderName(projectName string) string {
-	trimmed := strings.TrimSpace(projectName)
+func normalizeManagedFolderToken(value string) string {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return ""
+	}
+	cleaned := strings.NewReplacer("/", "-", "\\", "-").Replace(trimmed)
+	return strings.Join(strings.Fields(cleaned), "")
+}
+
+func NormalizeManagedProjectFolderName(projectName string) string {
+	trimmed := normalizeManagedFolderToken(projectName)
 	if trimmed == "" {
 		return DefaultManagedSourceFolderName
 	}
-	return strings.NewReplacer("/", "-", "\\", "-").Replace(trimmed)
+	return trimmed
 }
 
-func BuildManagedSourceFolderPath(basePath, projectName string) string {
+func NormalizeManagedTaskTypeFolderName(taskType string) string {
+	trimmed := normalizeManagedFolderToken(taskType)
+	if trimmed == "" {
+		return DefaultManagedTaskTypeName
+	}
+	return strings.ToLower(trimmed)
+}
+
+func BuildManagedTaskFolderName(projectName, taskType string) string {
+	return fmt.Sprintf("%s-%s", NormalizeManagedProjectFolderName(projectName), NormalizeManagedTaskTypeFolderName(taskType))
+}
+
+func BuildManagedTaskFolderPath(basePath, projectName, taskType string) string {
 	trimmedBase := strings.TrimSpace(basePath)
-	folderName := NormalizeManagedSourceFolderName(projectName)
+	folderName := BuildManagedTaskFolderName(projectName, taskType)
+	if trimmedBase == "" {
+		return folderName
+	}
+	return filepath.Join(trimmedBase, folderName)
+}
+
+func BuildManagedSourceFolderName(projectID int64, taskType string) string {
+	return fmt.Sprintf("%05d-%s", projectID, NormalizeManagedTaskTypeFolderName(taskType))
+}
+
+func BuildManagedSourceFolderPath(basePath string, projectID int64, taskType string) string {
+	trimmedBase := strings.TrimSpace(basePath)
+	folderName := BuildManagedSourceFolderName(projectID, taskType)
 	if trimmedBase == "" {
 		return folderName
 	}

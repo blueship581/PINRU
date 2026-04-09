@@ -28,12 +28,13 @@ type Task struct {
 }
 
 type TaskSession struct {
-	SessionID    string `json:"sessionId"`
-	TaskType     string `json:"taskType"`
-	ConsumeQuota bool   `json:"consumeQuota"`
-	IsCompleted  *bool  `json:"isCompleted"`
-	IsSatisfied  *bool  `json:"isSatisfied"`
-	Evaluation   string `json:"evaluation"`
+	SessionID        string `json:"sessionId"`
+	TaskType         string `json:"taskType"`
+	ConsumeQuota     bool   `json:"consumeQuota"`
+	IsCompleted      *bool  `json:"isCompleted"`
+	IsSatisfied      *bool  `json:"isSatisfied"`
+	Evaluation       string `json:"evaluation"`
+	UserConversation string `json:"userConversation"`
 }
 
 func cloneBoolPtr(value *bool) *bool {
@@ -53,9 +54,10 @@ func defaultTaskSessionList(taskType string) []TaskSession {
 
 	return []TaskSession{
 		{
-			SessionID:    "",
-			TaskType:     normalizedTaskType,
-			ConsumeQuota: true,
+			SessionID:        "",
+			TaskType:         normalizedTaskType,
+			ConsumeQuota:     true,
+			UserConversation: "",
 		},
 	}
 }
@@ -82,12 +84,13 @@ func normalizeTaskSessionList(taskType string, sessions []TaskSession) ([]TaskSe
 		}
 
 		normalized = append(normalized, TaskSession{
-			SessionID:    strings.TrimSpace(session.SessionID),
-			TaskType:     nextTaskType,
-			ConsumeQuota: index == 0 || session.ConsumeQuota,
-			IsCompleted:  cloneBoolPtr(session.IsCompleted),
-			IsSatisfied:  cloneBoolPtr(session.IsSatisfied),
-			Evaluation:   strings.TrimSpace(session.Evaluation),
+			SessionID:        strings.TrimSpace(session.SessionID),
+			TaskType:         nextTaskType,
+			ConsumeQuota:     index == 0 || session.ConsumeQuota,
+			IsCompleted:      cloneBoolPtr(session.IsCompleted),
+			IsSatisfied:      cloneBoolPtr(session.IsSatisfied),
+			Evaluation:       strings.TrimSpace(session.Evaluation),
+			UserConversation: strings.TrimSpace(session.UserConversation),
 		})
 	}
 
@@ -503,6 +506,38 @@ func (s *Store) UpdateTaskSessionList(id string, sessionList []TaskSession) erro
 func (s *Store) UpdateTaskPrompt(id, promptText string) error {
 	now := time.Now().Unix()
 	return s.CompleteTaskPromptGeneration(id, promptText, now)
+}
+
+func (s *Store) SyncTaskPromptFromArtifact(id, promptText string) error {
+	promptText = strings.TrimSpace(promptText)
+	if promptText == "" {
+		return fmt.Errorf("promptText 不能为空")
+	}
+
+	now := time.Now().Unix()
+	res, err := s.DB.Exec(
+		`UPDATE tasks
+		 SET prompt_text=?,
+		     status=CASE WHEN status='Submitted' THEN status ELSE 'PromptReady' END,
+		     prompt_generation_status='done',
+		     prompt_generation_error=NULL,
+		     prompt_generation_started_at=COALESCE(prompt_generation_started_at, ?),
+		     prompt_generation_finished_at=?,
+		     updated_at=?
+		 WHERE id=?`,
+		promptText, now, now, now, id,
+	)
+	if err != nil {
+		return err
+	}
+	rowsAffected, rowsErr := res.RowsAffected()
+	if rowsErr != nil {
+		return rowsErr
+	}
+	if rowsAffected == 0 {
+		return fmt.Errorf("task not found: %s", id)
+	}
+	return nil
 }
 
 func (s *Store) StartTaskPromptGeneration(id string, startedAt int64) error {

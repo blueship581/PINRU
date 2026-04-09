@@ -39,7 +39,7 @@ import {
   type TaskType,
   type TaskTypeQuotas,
 } from '../services/config';
-import { buildManagedSourceFolderPath } from '../lib/sourceFolders';
+import { buildManagedSourceFolderPath, buildManagedTaskFolderName } from '../lib/sourceFolders';
 
 /* ─── Types ─── */
 
@@ -161,9 +161,10 @@ export default function Claim() {
 
   const formatProjectName = (v: string) => `label-${v.padStart(5, '0')}`;
   const buildProjectRef = (v: string) => `prompt2repo/${formatProjectName(v)}`;
-  const buildProjectBasePath = (projectName: string, root = defaultCloneRoot) => {
+  const buildProjectBasePath = (projectName: string, taskType: string, root = defaultCloneRoot) => {
     const norm = root.replace(/\/+$/, '');
-    return norm ? `${norm}/${projectName}-comparison` : `${projectName}-comparison`;
+    const folderName = buildManagedTaskFolderName(projectName, taskType);
+    return norm ? `${norm}/${folderName}` : folderName;
   };
 
   /* ─── Core clone logic (unchanged) ─── */
@@ -171,13 +172,14 @@ export default function Claim() {
   const runClonePlan = async (
     currentProject: GitLabProject,
     basePath: string,
+    taskType: string,
     checkedModels: ModelEntry[],
     gitlabToken: string,
     onStatusChange?: (modelId: string, status: ModelEntry['status']) => void,
   ): Promise<ClonePlanResult> => {
     const normalizedBasePath = basePath.replace(/\/+$/, '');
     const sourceModel = pickSourceModel(checkedModels, preferredSourceModelName);
-    const sourcePath = buildManagedSourceFolderPath(normalizedBasePath, currentProject.name);
+    const sourcePath = buildManagedSourceFolderPath(normalizedBasePath, currentProject.id, taskType);
     const successfulModels: string[] = [];
     const failedModels: Array<{ modelId: string; message: string }> = [];
 
@@ -286,7 +288,7 @@ export default function Claim() {
     const initialResults: ClaimResult[] = validProjects.map((l) => ({
       projectId: l.id,
       projectName: l.project!.name,
-      localPath: buildProjectBasePath(l.project!.name),
+      localPath: buildProjectBasePath(l.project!.name, claimTaskType),
       status: 'pending',
       message: '等待中',
       modelStatuses: new Map(selectedModels.map((m) => [m.id, 'pending' as const])),
@@ -304,7 +306,7 @@ export default function Claim() {
 
       for (const lookup of validProjects) {
         const project = lookup.project!;
-        const basePath = buildProjectBasePath(project.name);
+        const basePath = buildProjectBasePath(project.name, claimTaskType);
 
         setClaimResults((prev) =>
           prev.map((r) =>
@@ -318,6 +320,7 @@ export default function Claim() {
           const result = await runClonePlan(
             project,
             basePath,
+            claimTaskType,
             selectedModels,
             gitlabToken,
             (modelId, status) => {
@@ -338,7 +341,7 @@ export default function Claim() {
             taskType: claimTaskType,
             localPath: basePath,
             sourceModelName: pickSourceModel(selectedModels, preferredSourceModelName).id,
-            sourceLocalPath: buildManagedSourceFolderPath(basePath, project.name),
+            sourceLocalPath: buildManagedSourceFolderPath(basePath, project.id, claimTaskType),
             models: result.successfulModels,
             projectConfigId: activeConfigId,
           });
@@ -664,7 +667,7 @@ export default function Claim() {
                   </code>
                 </div>
                 <p className="mt-1 text-xs text-stone-400 dark:text-stone-500">
-                  每个项目会在根目录下创建 <code className="font-mono">[项目名]-comparison/</code>，源码目录默认命名为对应 GitLab 项目名
+                  每个项目会在根目录下创建 <code className="font-mono">label-xxxxx-任务类型/</code>，源码目录默认命名为 <code className="font-mono">项目ID-任务类型</code>
                 </p>
               </div>
 

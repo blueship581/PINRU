@@ -9,6 +9,35 @@ export interface TaskSession {
   isCompleted?: boolean | null;
   isSatisfied?: boolean | null;
   evaluation?: string;
+  userConversation?: string;
+}
+
+export interface ExtractedTraeSession {
+  sessionId: string;
+  userConversation: string;
+  userMessageCount: number;
+  firstUserMessage: string;
+  lastActivityAt: number | null;
+  isCurrent: boolean;
+}
+
+export interface ExtractTaskSessionCandidate {
+  id: string;
+  workspacePath: string;
+  matchedPath: string;
+  matchKind: 'exact' | 'child' | 'parent' | string;
+  sessionCount: number;
+  userId: string;
+  currentSessionId: string;
+  userMessageCount: number;
+  summary: string;
+  lastActivityAt: number | null;
+  sessions: ExtractedTraeSession[];
+}
+
+export interface ExtractTaskSessionsResult {
+  taskId: string;
+  candidates: ExtractTaskSessionCandidate[];
 }
 
 export interface TaskFromDB {
@@ -100,6 +129,10 @@ export interface UpdateTaskSessionListRequest {
 
 export async function updateTaskSessionList(req: UpdateTaskSessionListRequest): Promise<void> {
   return callService('TaskService', 'UpdateTaskSessionList', req);
+}
+
+export async function extractTaskSessions(taskId: string): Promise<ExtractTaskSessionsResult> {
+  return callService<ExtractTaskSessionsResult>('TaskService', 'ExtractTaskSessions', taskId);
 }
 
 export async function updateModelRun(request: UpdateModelRunRequest): Promise<void> {
