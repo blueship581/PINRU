@@ -10,33 +10,38 @@ import (
 // ── 任务类型 ──────────────────────────────────────────────────────────────────
 
 const (
-	TaskTypeBugFix       = "Bug修复"
-	TaskTypeCodeGen      = "代码生成"
-	TaskTypeFeature      = "Feature迭代"
-	TaskTypeUnderstand   = "代码理解"
-	TaskTypeRefactor     = "代码重构"
-	TaskTypeEngineering  = "工程化"
-	TaskTypeTesting      = "代码测试"
+	TaskTypeUncategorized = "未归类"
+	TaskTypeBugFix        = "Bug修复"
+	TaskTypeCodeGen       = "代码生成"
+	TaskTypeFeature       = "Feature迭代"
+	TaskTypeUnderstand    = "代码理解"
+	TaskTypeRefactor      = "代码重构"
+	TaskTypeEngineering   = "工程化"
+	TaskTypeTesting       = "代码测试"
 )
 
 var taskTypeAliases = map[string]string{
-	"bugfix":      TaskTypeBugFix,
-	"bug修复":       TaskTypeBugFix,
-	"缺陷修复":       TaskTypeBugFix,
-	"代码生成":       TaskTypeCodeGen,
-	"feature":     TaskTypeFeature,
-	"feature迭代":  TaskTypeFeature,
-	"功能开发":       TaskTypeFeature,
-	"代码理解":       TaskTypeUnderstand,
-	"refactor":    TaskTypeRefactor,
-	"代码重构":       TaskTypeRefactor,
-	"perf":        "性能优化",
-	"性能优化":       "性能优化",
-	"工程化":        TaskTypeEngineering,
-	"test":        TaskTypeTesting,
-	"测试":          TaskTypeTesting,
-	"测试补全":        TaskTypeTesting,
-	"代码测试":       TaskTypeTesting,
+	"uncategorized": TaskTypeUncategorized,
+	"unclassified":  TaskTypeUncategorized,
+	"未分类":           TaskTypeUncategorized,
+	"未归类":           TaskTypeUncategorized,
+	"bugfix":        TaskTypeBugFix,
+	"bug修复":         TaskTypeBugFix,
+	"缺陷修复":          TaskTypeBugFix,
+	"代码生成":          TaskTypeCodeGen,
+	"feature":       TaskTypeFeature,
+	"feature迭代":     TaskTypeFeature,
+	"功能开发":          TaskTypeFeature,
+	"代码理解":          TaskTypeUnderstand,
+	"refactor":      TaskTypeRefactor,
+	"代码重构":          TaskTypeRefactor,
+	"perf":          "性能优化",
+	"性能优化":          "性能优化",
+	"工程化":           TaskTypeEngineering,
+	"test":          TaskTypeTesting,
+	"测试":            TaskTypeTesting,
+	"测试补全":          TaskTypeTesting,
+	"代码测试":          TaskTypeTesting,
 }
 
 // ── 约束标签类型 ───────────────────────────────────────────────────────────────
@@ -53,10 +58,10 @@ const (
 // ── 修改范围 ──────────────────────────────────────────────────────────────────
 
 const (
-	ScopeSingleFile    = "单文件"
-	ScopeModuleFiles   = "模块内多文件"
-	ScopeCrossModule   = "跨模块多文件"
-	ScopeCrossSystem   = "跨系统多模块"
+	ScopeSingleFile  = "单文件"
+	ScopeModuleFiles = "模块内多文件"
+	ScopeCrossModule = "跨模块多文件"
+	ScopeCrossSystem = "跨系统多模块"
 )
 
 // ── 任务类型到出题要点的精简指导 ──────────────────────────────────────────────
@@ -64,6 +69,13 @@ const (
 // taskGuidance 是从执行手册提炼的出题要点，供 LLM 理解每种任务类型的出题方向。
 // 不直接暴露给最终生成的提示词，而是作为 LLM 的内部参考材料。
 var taskGuidance = map[string]string{
+	TaskTypeUncategorized: `出题方向：先不要预设任务类别，直接根据仓库里最真实、最典型、最容易被开发者提出来的问题或需求出题。
+可以是 bug、功能补充、理解梳理、重构或测试补全中的任意一种，但题目表达仍然要自然，像用户真实提出的需求。
+关键要求：
+- 不要为了贴类别而硬套模板，优先选择仓库里最值得做的一件事
+- 题目描述仍然必须具体，有清晰的业务现象或目标
+- 如果仓库里存在明显问题，优先围绕真实痛点出题`,
+
 	TaskTypeBugFix: `出题方向：找出代码中存在的逻辑错误、运行时异常、边界条件遗漏、类型错误或安全漏洞，
 描述用户在使用系统时遇到的异常现象（报错信息、非预期输出、功能失效等），
 让模型去定位并修复这个 bug。

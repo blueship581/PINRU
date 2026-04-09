@@ -19,7 +19,8 @@ import type { Task, TaskStatus } from '../store';
 import type { ModelRunFromDB, PromptGenerationStatus, TaskFromDB } from '../services/task';
 import {
   getTaskTypePresentation,
-  getTaskTypeQuotaValue,
+  getTaskTypeQuotaRawValue,
+  normalizeTaskTypeName,
   type TaskTypeQuotas,
 } from '../services/config';
 import {
@@ -69,7 +70,6 @@ interface TaskDetailDrawerProps {
   activeDrawerTab: TaskDetailDrawerTab;
   sessionTaskTypeOptions: string[];
   projectQuotas: TaskTypeQuotas;
-  primaryTaskType: string;
   sourceModelName: string;
   selectedPromptGenerationStatus: PromptGenerationStatus;
   selectedPromptGenerationMeta: PromptGenerationMeta;
@@ -78,7 +78,6 @@ interface TaskDetailDrawerProps {
   statusOptions: TaskStatus[];
   onClose: () => void;
   onStatusChange: (taskId: string, nextStatus: TaskStatus) => void;
-  onPrimaryTaskTypeChange: (nextTaskType: string) => void;
   onTabChange: (tab: TaskDetailDrawerTab) => void;
   onAddSession: () => void;
   onAutoExtractSessions: () => void | Promise<void>;
@@ -117,7 +116,6 @@ export default function TaskDetailDrawer({
   activeDrawerTab,
   sessionTaskTypeOptions,
   projectQuotas,
-  primaryTaskType,
   sourceModelName,
   selectedPromptGenerationStatus,
   selectedPromptGenerationMeta,
@@ -126,7 +124,6 @@ export default function TaskDetailDrawer({
   statusOptions,
   onClose,
   onStatusChange,
-  onPrimaryTaskTypeChange,
   onTabChange,
   onAddSession,
   onAutoExtractSessions,
@@ -143,7 +140,73 @@ export default function TaskDetailDrawer({
   onOpenPrompt,
   onOpenSubmit,
 }: TaskDetailDrawerProps) {
-  const primaryTaskTypePresentation = getTaskTypePresentation(primaryTaskType);
+  const persistedSessionList = selectedTaskDetail?.sessionList ?? selected.sessionList;
+
+  const countPersistedQuotaUsage = () => {
+    const counts: Record<string, number> = {};
+
+    persistedSessionList.forEach((session, index) => {
+      if (!isSessionCounted(session, index)) {
+        return;
+      }
+
+      const normalizedTaskType = normalizeTaskTypeName(session.taskType);
+      if (!normalizedTaskType) {
+        return;
+      }
+      counts[normalizedTaskType] = (counts[normalizedTaskType] ?? 0) + 1;
+    });
+
+    return counts;
+  };
+
+  const countDraftQuotaUsage = (excludeLocalId?: string) => {
+    const counts: Record<string, number> = {};
+
+    sessionListDraft.forEach((session, index) => {
+      if (session.localId === excludeLocalId) {
+        return;
+      }
+      if (!isSessionCounted(session, index)) {
+        return;
+      }
+
+      const normalizedTaskType = normalizeTaskTypeName(session.taskType);
+      if (!normalizedTaskType) {
+        return;
+      }
+      counts[normalizedTaskType] = (counts[normalizedTaskType] ?? 0) + 1;
+    });
+
+    return counts;
+  };
+
+  const persistedQuotaUsage = countPersistedQuotaUsage();
+
+  const getEditableQuotaValue = (taskType: string, excludeLocalId?: string) => {
+    const normalizedTaskType = normalizeTaskTypeName(taskType);
+    if (!normalizedTaskType) {
+      return null;
+    }
+
+    const rawQuota = getTaskTypeQuotaRawValue(projectQuotas, normalizedTaskType);
+    if (rawQuota === null) {
+      return null;
+    }
+
+    const otherDraftQuotaUsage = countDraftQuotaUsage(excludeLocalId);
+    return rawQuota + (persistedQuotaUsage[normalizedTaskType] ?? 0) - (otherDraftQuotaUsage[normalizedTaskType] ?? 0);
+  };
+
+  const formatEditableQuota = (value: number | null, mode: 'option' | 'inline') => {
+    if (value === null) {
+      return mode === 'option' ? '' : '当前类型不限额';
+    }
+    if (value < 0) {
+      return mode === 'option' ? ` · 已超 ${Math.abs(value)}` : `当前已超额 ${Math.abs(value)}`;
+    }
+    return mode === 'option' ? ` · 可分配 ${value}` : `当前可分配 ${value}`;
+  };
 
   return (
     <>
@@ -159,7 +222,7 @@ export default function TaskDetailDrawer({
         animate={{ x: 0 }}
         exit={{ x: '100%' }}
         transition={{ type: 'spring', damping: 26, stiffness: 220 }}
-        className="fixed top-0 right-0 bottom-0 w-[560px] bg-white dark:bg-stone-900 border-l border-stone-200 dark:border-stone-800 shadow-2xl z-30 flex flex-col rounded-l-3xl"
+        className="fixed top-0 right-0 bottom-0 w-[640px] max-w-[calc(100vw-16px)] bg-white dark:bg-stone-900 border-l border-stone-200 dark:border-stone-800 shadow-2xl z-30 flex flex-col rounded-l-3xl"
       >
         <div className="px-7 py-6 border-b border-stone-100 dark:border-stone-800 flex items-start justify-between gap-4">
           <div className="min-w-0">
@@ -173,27 +236,6 @@ export default function TaskDetailDrawer({
               >
                 {statusOptions.map((status) => <option key={status} value={status}>{statusMeta[status].label}</option>)}
               </select>
-              <label className={`relative inline-flex items-center rounded-full border ${primaryTaskTypePresentation.badge} ${taskTypeChanging ? 'opacity-70' : ''}`}>
-                <select
-                  value={primaryTaskType}
-                  disabled={drawerLoading || sessionListSaving || taskTypeChanging}
-                  onChange={(event) => onPrimaryTaskTypeChange(event.target.value)}
-                  className="appearance-none bg-transparent pl-3 pr-7 py-1 text-xs font-semibold outline-none cursor-pointer disabled:cursor-default"
-                  title="修改主任务类型"
-                >
-                  {sessionTaskTypeOptions.map((taskType) => {
-                    const presentation = getTaskTypePresentation(taskType);
-                    const remainingQuota = getTaskTypeQuotaValue(projectQuotas, presentation.value);
-                    return (
-                      <option key={presentation.value} value={presentation.value}>
-                        {presentation.label}
-                        {remainingQuota !== null ? ` · 剩余 ${remainingQuota}` : ''}
-                      </option>
-                    );
-                  })}
-                </select>
-                <ChevronDown className="pointer-events-none absolute right-2.5 h-3.5 w-3.5 opacity-70" />
-              </label>
               <span className="text-[10px] font-medium text-stone-400 dark:text-stone-500">
                 {sessionListDraft.length || 1} 个 session
               </span>
@@ -283,7 +325,7 @@ export default function TaskDetailDrawer({
                     <div className="space-y-3">
                       {sessionListDraft.map((session, index) => {
                         const presentation = getTaskTypePresentation(session.taskType);
-                        const remainingQuota = getTaskTypeQuotaValue(projectQuotas, session.taskType);
+                        const editableQuota = getEditableQuotaValue(session.taskType, session.localId);
                         const isCounted = isSessionCounted(session, index);
                         const requiresSessionId = !session.sessionId.trim();
                         const isSessionEditorOpen = openSessionEditors.has(session.localId) || requiresSessionId;
@@ -459,11 +501,11 @@ export default function TaskDetailDrawer({
                                     >
                                       {sessionTaskTypeOptions.map((taskType) => {
                                         const optionPresentation = getTaskTypePresentation(taskType);
-                                        const optionQuota = getTaskTypeQuotaValue(projectQuotas, optionPresentation.value);
+                                        const optionQuota = getEditableQuotaValue(optionPresentation.value, session.localId);
                                         return (
                                           <option key={optionPresentation.value} value={optionPresentation.value}>
                                             {optionPresentation.label}
-                                            {optionQuota !== null ? ` · 剩余 ${optionQuota}` : ''}
+                                            {formatEditableQuota(optionQuota, 'option')}
                                           </option>
                                         );
                                       })}
@@ -487,9 +529,7 @@ export default function TaskDetailDrawer({
                                       <p className="text-[10px] text-stone-400 dark:text-stone-500">
                                         {index === 0
                                           ? '首个 session 固定扣减'
-                                          : remainingQuota !== null
-                                            ? `当前剩余 ${remainingQuota}`
-                                            : '当前类型不限额'}
+                                          : formatEditableQuota(editableQuota, 'inline')}
                                       </p>
                                     </div>
                                   </label>

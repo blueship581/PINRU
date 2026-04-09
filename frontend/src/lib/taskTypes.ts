@@ -7,7 +7,10 @@ export type TaskTypeSource = {
   taskTypeQuotas?: string | null;
 };
 
+export const DEFAULT_TASK_TYPE = '未归类';
+
 export const DEFAULT_TASK_TYPES = [
+  DEFAULT_TASK_TYPE,
   'Bug修复',
   '代码生成',
   'Feature迭代',
@@ -18,6 +21,10 @@ export const DEFAULT_TASK_TYPES = [
 ] as const;
 
 const TASK_TYPE_ALIASES: Record<string, string> = {
+  uncategorized: DEFAULT_TASK_TYPE,
+  unclassified: DEFAULT_TASK_TYPE,
+  '未分类': DEFAULT_TASK_TYPE,
+  '未归类': DEFAULT_TASK_TYPE,
   bugfix: 'Bug修复',
   'bug修复': 'Bug修复',
   '缺陷修复': 'Bug修复',
@@ -154,7 +161,7 @@ export function parseTaskTypeQuotas(quotasStr?: string | null): TaskTypeQuotas {
     for (const [taskType, value] of Object.entries(parsed)) {
       const normalizedType = normalizeTaskTypeName(taskType);
       const parsedValue = Math.floor(Number(value));
-      if (!normalizedType || !Number.isFinite(parsedValue) || parsedValue < 0) continue;
+      if (!normalizedType || !Number.isFinite(parsedValue)) continue;
       normalized[normalizedType] = parsedValue;
     }
 
@@ -192,7 +199,11 @@ export function parseProjectTaskTypes(
   const configuredTypes = parseTaskTypeList(taskTypesStr);
   const quotaTypes = Object.keys(parseTaskTypeQuotas(quotasStr));
   const merged = dedupeTaskTypes([...configuredTypes, ...quotaTypes, ...fallbackTaskTypes]);
-  return merged.length > 0 ? merged : [...DEFAULT_TASK_TYPES];
+  if (merged.length === 0) {
+    return [...DEFAULT_TASK_TYPES];
+  }
+
+  return dedupeTaskTypes([DEFAULT_TASK_TYPE, ...merged]);
 }
 
 export function buildProjectTaskTypes(
@@ -203,17 +214,24 @@ export function buildProjectTaskTypes(
 }
 
 export function serializeProjectTaskTypes(taskTypes: string[]) {
-  return JSON.stringify(dedupeTaskTypes(taskTypes));
+  return JSON.stringify(parseProjectTaskTypes(JSON.stringify(taskTypes)));
 }
 
 export function getTaskTypeQuotaValue(quotas: TaskTypeQuotas, taskType: string) {
+  const rawValue = getTaskTypeQuotaRawValue(quotas, taskType);
+  if (rawValue === null) return null;
+
+  return Math.max(0, rawValue);
+}
+
+export function getTaskTypeQuotaRawValue(quotas: TaskTypeQuotas, taskType: string) {
   const normalizedType = normalizeTaskTypeName(taskType);
   if (!normalizedType) return null;
 
   const rawValue = quotas[normalizedType];
   if (typeof rawValue !== 'number' || !Number.isFinite(rawValue)) return null;
 
-  return Math.max(0, Math.floor(rawValue));
+  return Math.floor(rawValue);
 }
 
 function hashTaskType(value: string) {
@@ -225,7 +243,7 @@ function hashTaskType(value: string) {
 }
 
 export function getTaskTypePresentation(value: string) {
-  const normalized = normalizeTaskTypeName(value) || DEFAULT_TASK_TYPES[0];
+  const normalized = normalizeTaskTypeName(value) || DEFAULT_TASK_TYPE;
   const tone = TASK_TYPE_TONES[hashTaskType(taskTypeIdentity(normalized)) % TASK_TYPE_TONES.length];
 
   return {

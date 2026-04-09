@@ -45,6 +45,14 @@ type NormalizeManagedSourceFoldersResult struct {
 	Details      []NormalizeManagedSourceFolderDetail `json:"details"`
 }
 
+type DirectoryInspectionResult struct {
+	Path    string `json:"path"`
+	Name    string `json:"name"`
+	Exists  bool   `json:"exists"`
+	IsDir   bool   `json:"isDir"`
+	IsEmpty bool   `json:"isEmpty"`
+}
+
 func (s *GitService) FetchGitLabProject(projectRef, url, token string) (*gl.Project, error) {
 	return gl.FetchProject(projectRef, url, token)
 }
@@ -89,6 +97,40 @@ func (s *GitService) CopyProjectDirectory(sourcePath, destinationPath string) er
 
 func (s *GitService) CheckPathsExist(paths []string) []string {
 	return gitops.CheckPathsExist(paths)
+}
+
+func (s *GitService) InspectDirectory(path string) (*DirectoryInspectionResult, error) {
+	trimmed := strings.TrimSpace(path)
+	if trimmed == "" {
+		return nil, fmt.Errorf("目录不能为空")
+	}
+
+	expanded := filepath.Clean(util.ExpandTilde(trimmed))
+	result := &DirectoryInspectionResult{
+		Path: expanded,
+		Name: filepath.Base(expanded),
+	}
+
+	info, err := os.Stat(expanded)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return result, nil
+		}
+		return nil, err
+	}
+
+	result.Exists = true
+	result.IsDir = info.IsDir()
+	if !info.IsDir() {
+		return result, nil
+	}
+
+	entries, err := os.ReadDir(expanded)
+	if err != nil {
+		return nil, err
+	}
+	result.IsEmpty = len(entries) == 0
+	return result, nil
 }
 
 func (s *GitService) NormalizeManagedSourceFolders(projectID string) (*NormalizeManagedSourceFoldersResult, error) {

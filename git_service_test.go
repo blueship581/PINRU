@@ -10,6 +10,42 @@ import (
 	"github.com/blueship581/pinru/internal/util"
 )
 
+func TestInspectDirectoryReportsEmptiness(t *testing.T) {
+	service := &GitService{}
+
+	emptyDir := filepath.Join(t.TempDir(), "empty-project")
+	if err := os.MkdirAll(emptyDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(emptyDir) error = %v", err)
+	}
+
+	emptyResult, err := service.InspectDirectory(emptyDir)
+	if err != nil {
+		t.Fatalf("InspectDirectory(emptyDir) error = %v", err)
+	}
+	if !emptyResult.Exists || !emptyResult.IsDir || !emptyResult.IsEmpty {
+		t.Fatalf("unexpected empty directory result: %+v", emptyResult)
+	}
+	if emptyResult.Name != "empty-project" {
+		t.Fatalf("emptyResult.Name = %q, want %q", emptyResult.Name, "empty-project")
+	}
+
+	nonEmptyDir := filepath.Join(t.TempDir(), "non-empty-project")
+	if err := os.MkdirAll(nonEmptyDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(nonEmptyDir) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(nonEmptyDir, "README.md"), []byte("demo"), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	nonEmptyResult, err := service.InspectDirectory(nonEmptyDir)
+	if err != nil {
+		t.Fatalf("InspectDirectory(nonEmptyDir) error = %v", err)
+	}
+	if !nonEmptyResult.Exists || !nonEmptyResult.IsDir || nonEmptyResult.IsEmpty {
+		t.Fatalf("unexpected non-empty directory result: %+v", nonEmptyResult)
+	}
+}
+
 func TestNormalizeManagedSourceFoldersSyncsTaskPromptArtifact(t *testing.T) {
 	testStore := openChatServiceTestStore(t)
 	defer testStore.Close()
@@ -64,8 +100,8 @@ func TestNormalizeManagedSourceFoldersSyncsTaskPromptArtifact(t *testing.T) {
 		t.Fatalf("CreateModelRun() error = %v", err)
 	}
 
-	service := &GitService{store: testStore}
-	result, err := service.NormalizeManagedSourceFolders(project.ID)
+	serviceWithStore := &GitService{store: testStore}
+	result, err := serviceWithStore.NormalizeManagedSourceFolders(project.ID)
 	if err != nil {
 		t.Fatalf("NormalizeManagedSourceFolders() error = %v", err)
 	}

@@ -218,11 +218,17 @@ func TestSaveMessageAsPromptParsesJSONPayload(t *testing.T) {
 	defer testStore.Close()
 
 	service := &ChatService{store: testStore}
+	workDir := t.TempDir()
+	artifactPath := filepath.Join(workDir, "任务提示词.md")
+	if err := os.WriteFile(artifactPath, []byte("旧提示词\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
 	task := store.Task{
 		ID:              "task-3",
 		GitLabProjectID: 1003,
 		ProjectName:     "Demo Save Task",
 		TaskType:        "代码生成",
+		LocalPath:       &workDir,
 	}
 	if err := testStore.CreateTask(task); err != nil {
 		t.Fatalf("CreateTask() error = %v", err)
@@ -266,6 +272,14 @@ func TestSaveMessageAsPromptParsesJSONPayload(t *testing.T) {
 	}
 	if savedTask.Status != "PromptReady" {
 		t.Fatalf("Status = %q, want PromptReady", savedTask.Status)
+	}
+
+	content, err := os.ReadFile(artifactPath)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	if strings.TrimSpace(string(content)) != expected {
+		t.Fatalf("artifact content = %q, want %q", strings.TrimSpace(string(content)), expected)
 	}
 }
 

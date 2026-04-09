@@ -8,7 +8,7 @@ import {
   type PromptGenerationStatus,
 } from './services/task';
 import {
-  DEFAULT_TASK_TYPES,
+  DEFAULT_TASK_TYPE,
   getActiveProjectId,
   getConfig,
   getProjects,
@@ -54,7 +54,7 @@ function mapDbTaskToTask(dbTask: TaskFromDB): Task {
     projectId: String(dbTask.gitlabProjectId),
     projectName: dbTask.projectName,
     status: dbTask.status as TaskStatus,
-    taskType: normalizeTaskTypeName(dbTask.taskType) || DEFAULT_TASK_TYPES[0],
+    taskType: normalizeTaskTypeName(dbTask.taskType) || DEFAULT_TASK_TYPE,
     sessionList: dbTask.sessionList ?? [],
     promptGenerationStatus: dbTask.promptGenerationStatus,
     promptGenerationError: dbTask.promptGenerationError,

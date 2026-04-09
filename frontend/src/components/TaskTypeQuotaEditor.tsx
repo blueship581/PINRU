@@ -77,7 +77,7 @@ export default function TaskTypeQuotaEditor({
     <div className="space-y-2.5">
       <div className="grid grid-cols-[minmax(0,1fr)_104px] gap-2 px-1 text-[11px] font-bold uppercase tracking-wider text-stone-400 dark:text-stone-500">
         <span>任务类型</span>
-        <span>数量</span>
+        <span>总量</span>
       </div>
 
       {normalizedTaskTypes.length === 0 ? (
@@ -95,7 +95,7 @@ export default function TaskTypeQuotaEditor({
                 {getTaskTypeDisplayLabel(taskType)}
               </p>
               <p className="mt-0.5 text-[11px] text-stone-400 dark:text-stone-500">
-                留空表示不限，0 表示当前不可再领取
+                留空表示不限，填写后表示项目固定总量
               </p>
             </div>
             <input

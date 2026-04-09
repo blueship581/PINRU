@@ -17,6 +17,7 @@ import { Dialogs } from '@wailsio/runtime';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import TaskTypeQuotaEditor from './TaskTypeQuotaEditor';
 import { useAppStore } from '../store';
+import { inspectDirectory } from '../services/git';
 import {
   DEFAULT_TASK_TYPES,
   createProject,
@@ -78,6 +79,20 @@ function normalizeModelName(name: string) {
 
 function isOriginModel(name: string) {
   return normalizeModelName(name) === 'ORIGIN';
+}
+
+async function ensureEmptyProjectDirectory(path: string) {
+  const inspection = await inspectDirectory(path);
+  if (!inspection.exists) {
+    throw new Error('所选目录不存在');
+  }
+  if (!inspection.isDir) {
+    throw new Error('所选路径不是文件夹');
+  }
+  if (!inspection.isEmpty) {
+    throw new Error('请选择空文件夹，当前目录中已有内容');
+  }
+  return inspection;
 }
 
 export default function Layout() {
@@ -227,7 +242,12 @@ export default function Layout() {
         return;
       }
 
-      setProjectForm((prev) => ({ ...prev, basePath: selectedPath.trim() }));
+      const inspection = await ensureEmptyProjectDirectory(selectedPath.trim());
+      setProjectForm((prev) => ({
+        ...prev,
+        basePath: inspection.path,
+        name: inspection.name || prev.name,
+      }));
     } catch (error) {
       setProjectError(error instanceof Error ? error.message : '打开目录选择器失败');
     } finally {
@@ -284,6 +304,7 @@ export default function Layout() {
 
   const handleCreateProject = async () => {
     const name = projectForm.name.trim();
+    let cloneBasePath = '';
     const normalizedModels = modelList
       .map((model) => normalizeModelName(model.name))
       .filter(Boolean);
@@ -298,6 +319,13 @@ export default function Layout() {
     }
     if (!projectForm.basePath.trim()) {
       setProjectError('请选择项目文件位置');
+      return;
+    }
+    try {
+      const inspection = await ensureEmptyProjectDirectory(projectForm.basePath.trim());
+      cloneBasePath = inspection.path;
+    } catch (error) {
+      setProjectError(error instanceof Error ? error.message : '项目目录校验失败');
       return;
     }
     if (normalizedModels.length === 0) {
@@ -329,12 +357,13 @@ export default function Layout() {
         name,
         gitlabUrl: '',
         gitlabToken: '',
-        cloneBasePath: projectForm.basePath.trim(),
+        cloneBasePath,
         models: serializeProjectModels(normalizedModels),
         sourceModelFolder,
         defaultSubmitRepo: projectForm.defaultSubmitRepo.trim(),
         taskTypes: serializeProjectTaskTypes(taskTypes),
         taskTypeQuotas: serializeTaskTypeQuotas(quotas, taskTypes),
+        taskTypeTotals: serializeTaskTypeQuotas(quotas, taskTypes),
         createdAt: 0,
         updatedAt: 0,
       };
@@ -571,6 +600,9 @@ export default function Layout() {
                         浏览
                       </button>
                     </div>
+                    <p className="mt-2 text-xs text-stone-400 dark:text-stone-500">
+                      请选择空文件夹。选中后会自动将目录名带入项目名称。
+                    </p>
                   </label>
 
                   <div>

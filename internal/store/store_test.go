@@ -24,6 +24,7 @@ func TestOpenMigratesLegacyConfigsIntoNewTables(t *testing.T) {
 		readMigrationFile(t, "007_project_task_types.sql"),
 		readMigrationFile(t, "008_task_session_list.sql"),
 		readMigrationFile(t, "009_task_prompt_generation_status.sql"),
+		readMigrationFile(t, "010_project_task_type_totals.sql"),
 	}
 
 	store, err := Open(dbPath, migrations...)
@@ -39,6 +40,7 @@ func TestOpenMigratesLegacyConfigsIntoNewTables(t *testing.T) {
 	assertColumnExists(t, store.DB, "tasks", "prompt_generation_error")
 	assertColumnExists(t, store.DB, "projects", "default_submit_repo")
 	assertColumnExists(t, store.DB, "projects", "task_types")
+	assertColumnExists(t, store.DB, "projects", "task_type_totals")
 
 	tasks, err := store.ListTasks(nil)
 	if err != nil {
@@ -132,6 +134,40 @@ func TestOpenMigratesLegacyConfigsIntoNewTables(t *testing.T) {
 	assertTableCount(t, reopened.DB, "llm_providers", 1)
 }
 
+func TestCreateTaskDefaultsToUncategorizedType(t *testing.T) {
+	store := openTestStore(t)
+	defer store.Close()
+
+	task := Task{
+		ID:              "task-default-type",
+		GitLabProjectID: 2048,
+		ProjectName:     "Default Type Demo",
+	}
+	if err := store.CreateTask(task); err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+
+	created, err := store.GetTask(task.ID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if created == nil {
+		t.Fatalf("expected created task")
+	}
+	if created.TaskType != defaultTaskType {
+		t.Fatalf("TaskType = %q, want %q", created.TaskType, defaultTaskType)
+	}
+	if len(created.SessionList) != 1 {
+		t.Fatalf("SessionList length = %d, want 1", len(created.SessionList))
+	}
+	if created.SessionList[0].TaskType != defaultTaskType {
+		t.Fatalf("SessionList[0].TaskType = %q, want %q", created.SessionList[0].TaskType, defaultTaskType)
+	}
+	if !created.SessionList[0].ConsumeQuota {
+		t.Fatalf("expected default session to consume quota")
+	}
+}
+
 func TestUpdateTaskSessionListAdjustsProjectQuota(t *testing.T) {
 	store := openTestStore(t)
 	defer store.Close()
@@ -145,6 +181,7 @@ func TestUpdateTaskSessionListAdjustsProjectQuota(t *testing.T) {
 		Models:         "ORIGIN,cotv21-pro",
 		TaskTypes:      `["Feature迭代","Bug修复","代码生成"]`,
 		TaskTypeQuotas: `{"Feature迭代":2,"Bug修复":1,"代码生成":3}`,
+		TaskTypeTotals: `{"Feature迭代":2,"Bug修复":1,"代码生成":3}`,
 	}
 	if err := store.CreateProject(project); err != nil {
 		t.Fatalf("CreateProject() error = %v", err)
@@ -242,6 +279,174 @@ func TestUpdateTaskSessionListAdjustsProjectQuota(t *testing.T) {
 		if gotQuotas[taskType] != want {
 			t.Fatalf("TaskTypeQuotas[%q] = %d, want %d", taskType, gotQuotas[taskType], want)
 		}
+	}
+	var gotTotals map[string]int
+	if err := json.Unmarshal([]byte(updatedProject.TaskTypeTotals), &gotTotals); err != nil {
+		t.Fatalf("json.Unmarshal(TaskTypeTotals) error = %v", err)
+	}
+	wantTotals := map[string]int{
+		"Feature迭代": 2,
+		"Bug修复":     1,
+		"代码生成":      3,
+	}
+	for taskType, want := range wantTotals {
+		if gotTotals[taskType] != want {
+			t.Fatalf("TaskTypeTotals[%q] = %d, want %d", taskType, gotTotals[taskType], want)
+		}
+	}
+}
+
+func TestUpdateTaskSessionListAllowsQuotaOverdraft(t *testing.T) {
+	store := openTestStore(t)
+	defer store.Close()
+
+	project := Project{
+		ID:             "proj-overdraft",
+		Name:           "Demo",
+		GitLabURL:      "https://gitlab.example.com",
+		GitLabToken:    "glpat-test",
+		CloneBasePath:  "/tmp/demo",
+		Models:         "ORIGIN,cotv21-pro",
+		TaskTypes:      `["Feature迭代","Bug修复"]`,
+		TaskTypeQuotas: `{"Feature迭代":1,"Bug修复":0}`,
+		TaskTypeTotals: `{"Feature迭代":1,"Bug修复":0}`,
+	}
+	if err := store.CreateProject(project); err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+
+	task := Task{
+		ID:              "task-overdraft",
+		GitLabProjectID: 1002,
+		ProjectName:     "Overdraft Task",
+		TaskType:        "Feature迭代",
+		ProjectConfigID: &project.ID,
+	}
+	if err := store.CreateTask(task); err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+	if err := store.ConsumeProjectQuota(project.ID, "Feature迭代"); err != nil {
+		t.Fatalf("ConsumeProjectQuota() error = %v", err)
+	}
+
+	if err := store.UpdateTaskSessionList("task-overdraft", []TaskSession{
+		{
+			SessionID:    "sess-main",
+			TaskType:     "Feature迭代",
+			ConsumeQuota: true,
+			IsCompleted:  boolPtr(true),
+			IsSatisfied:  boolPtr(true),
+			Evaluation:   "主流程已完成",
+		},
+		{
+			SessionID:    "sess-bug",
+			TaskType:     "Bug修复",
+			ConsumeQuota: true,
+			IsCompleted:  boolPtr(true),
+			IsSatisfied:  boolPtr(false),
+			Evaluation:   "补充记录一个 bug 轮次",
+		},
+	}); err != nil {
+		t.Fatalf("UpdateTaskSessionList() error = %v", err)
+	}
+
+	updatedProject, err := store.GetProject(project.ID)
+	if err != nil {
+		t.Fatalf("GetProject() error = %v", err)
+	}
+	if updatedProject == nil {
+		t.Fatalf("expected updated project")
+	}
+
+	var gotQuotas map[string]int
+	if err := json.Unmarshal([]byte(updatedProject.TaskTypeQuotas), &gotQuotas); err != nil {
+		t.Fatalf("json.Unmarshal(TaskTypeQuotas) error = %v", err)
+	}
+	if gotQuotas["Feature迭代"] != 0 {
+		t.Fatalf("TaskTypeQuotas[%q] = %d, want 0", "Feature迭代", gotQuotas["Feature迭代"])
+	}
+	if gotQuotas["Bug修复"] != -1 {
+		t.Fatalf("TaskTypeQuotas[%q] = %d, want -1", "Bug修复", gotQuotas["Bug修复"])
+	}
+	if updatedProject.TaskTypeTotals != `{"Bug修复":0,"Feature迭代":1}` && updatedProject.TaskTypeTotals != `{"Feature迭代":1,"Bug修复":0}` {
+		t.Fatalf("TaskTypeTotals should remain fixed, got %s", updatedProject.TaskTypeTotals)
+	}
+}
+
+func TestUpdateProjectRecomputesRemainingQuotaFromFixedTotals(t *testing.T) {
+	store := openTestStore(t)
+	defer store.Close()
+
+	project := Project{
+		ID:             "proj-update",
+		Name:           "Demo",
+		GitLabURL:      "https://gitlab.example.com",
+		GitLabToken:    "glpat-test",
+		CloneBasePath:  "/tmp/demo",
+		Models:         "ORIGIN,cotv21-pro",
+		TaskTypes:      `["Feature迭代","Bug修复"]`,
+		TaskTypeQuotas: `{"Feature迭代":1,"Bug修复":2}`,
+		TaskTypeTotals: `{"Feature迭代":3,"Bug修复":2}`,
+	}
+	if err := store.CreateProject(project); err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+
+	task := Task{
+		ID:              "task-update",
+		GitLabProjectID: 1003,
+		ProjectName:     "Quota Task",
+		TaskType:        "Feature迭代",
+		ProjectConfigID: &project.ID,
+	}
+	if err := store.CreateTask(task); err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+	if err := store.ConsumeProjectQuota(project.ID, "Feature迭代"); err != nil {
+		t.Fatalf("ConsumeProjectQuota() error = %v", err)
+	}
+	if err := store.UpdateTaskSessionList("task-update", []TaskSession{
+		{
+			SessionID:    "sess-main",
+			TaskType:     "Feature迭代",
+			ConsumeQuota: true,
+			IsCompleted:  boolPtr(true),
+			IsSatisfied:  boolPtr(true),
+		},
+		{
+			SessionID:    "sess-bug",
+			TaskType:     "Bug修复",
+			ConsumeQuota: true,
+			IsCompleted:  boolPtr(true),
+			IsSatisfied:  boolPtr(false),
+		},
+	}); err != nil {
+		t.Fatalf("UpdateTaskSessionList() error = %v", err)
+	}
+
+	project.TaskTypeTotals = `{"Feature迭代":5,"Bug修复":4}`
+	project.TaskTypeQuotas = `{"Feature迭代":999,"Bug修复":999}`
+	if err := store.UpdateProject(project); err != nil {
+		t.Fatalf("UpdateProject() error = %v", err)
+	}
+
+	updatedProject, err := store.GetProject(project.ID)
+	if err != nil {
+		t.Fatalf("GetProject() error = %v", err)
+	}
+	if updatedProject == nil {
+		t.Fatalf("expected updated project")
+	}
+
+	var gotQuotas map[string]int
+	if err := json.Unmarshal([]byte(updatedProject.TaskTypeQuotas), &gotQuotas); err != nil {
+		t.Fatalf("json.Unmarshal(TaskTypeQuotas) error = %v", err)
+	}
+	if gotQuotas["Feature迭代"] != 4 {
+		t.Fatalf("TaskTypeQuotas[Feature迭代] = %d, want 4", gotQuotas["Feature迭代"])
+	}
+	if gotQuotas["Bug修复"] != 3 {
+		t.Fatalf("TaskTypeQuotas[Bug修复] = %d, want 3", gotQuotas["Bug修复"])
 	}
 }
 
@@ -413,6 +618,7 @@ func openTestStore(t *testing.T) *Store {
 		readMigrationFile(t, "007_project_task_types.sql"),
 		readMigrationFile(t, "008_task_session_list.sql"),
 		readMigrationFile(t, "009_task_prompt_generation_status.sql"),
+		readMigrationFile(t, "010_project_task_type_totals.sql"),
 	}
 
 	store, err := Open(dbPath, migrations...)

@@ -2,10 +2,12 @@ import { callService } from './wails';
 import type { LlmProviderConfig } from './llm';
 import {
   buildProjectTaskTypes,
+  DEFAULT_TASK_TYPE,
   DEFAULT_TASK_TYPES,
   dedupeTaskTypes,
   getTaskTypeQuotaValue,
   getTaskTypeDisplayLabel,
+  getTaskTypeQuotaRawValue,
   getTaskTypePresentation,
   normalizeTaskTypeName,
   parseProjectTaskTypes,
@@ -19,10 +21,12 @@ import {
 export type { TaskType, TaskTypeQuotas };
 export {
   buildProjectTaskTypes,
+  DEFAULT_TASK_TYPE,
   DEFAULT_TASK_TYPES,
   dedupeTaskTypes,
   getTaskTypeQuotaValue,
   getTaskTypeDisplayLabel,
+  getTaskTypeQuotaRawValue,
   getTaskTypePresentation,
   normalizeTaskTypeName,
   parseProjectTaskTypes,
@@ -42,6 +46,7 @@ export interface ProjectConfig {
   defaultSubmitRepo: string;
   taskTypes: string;
   taskTypeQuotas: string;
+  taskTypeTotals: string;
   createdAt: number;
   updatedAt: number;
 }

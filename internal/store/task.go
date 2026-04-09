@@ -8,6 +8,8 @@ import (
 	"time"
 )
 
+const defaultTaskType = "未归类"
+
 type Task struct {
 	ID                         string        `json:"id"`
 	GitLabProjectID            int64         `json:"gitlabProjectId"`
@@ -49,7 +51,7 @@ func cloneBoolPtr(value *bool) *bool {
 func defaultTaskSessionList(taskType string) []TaskSession {
 	normalizedTaskType := strings.TrimSpace(taskType)
 	if normalizedTaskType == "" {
-		normalizedTaskType = "Feature迭代"
+		normalizedTaskType = defaultTaskType
 	}
 
 	return []TaskSession{
@@ -65,7 +67,7 @@ func defaultTaskSessionList(taskType string) []TaskSession {
 func normalizeTaskSessionList(taskType string, sessions []TaskSession) ([]TaskSession, error) {
 	normalizedTaskType := strings.TrimSpace(taskType)
 	if normalizedTaskType == "" {
-		normalizedTaskType = "Feature迭代"
+		normalizedTaskType = defaultTaskType
 	}
 
 	if len(sessions) == 0 {
@@ -150,7 +152,7 @@ func countedTaskTypeSessions(sessions []TaskSession) map[string]int {
 	return counts
 }
 
-func applyTaskSessionQuotaDelta(quotas map[string]int, previousSessions, nextSessions []TaskSession) error {
+func applyTaskSessionQuotaDelta(quotas map[string]int, previousSessions, nextSessions []TaskSession, enforceLimit bool) error {
 	previousCounts := countedTaskTypeSessions(previousSessions)
 	nextCounts := countedTaskTypeSessions(nextSessions)
 
@@ -174,7 +176,7 @@ func applyTaskSessionQuotaDelta(quotas map[string]int, previousSessions, nextSes
 		}
 
 		if delta > 0 {
-			if currentQuota < delta {
+			if enforceLimit && currentQuota < delta {
 				return fmt.Errorf("任务类型 %q 的配额已用尽", taskType)
 			}
 			quotas[taskType] = currentQuota - delta
@@ -263,11 +265,53 @@ func (s *Store) GetTask(id string) (*Task, error) {
 	return &t, nil
 }
 
+func (s *Store) FindTaskByProjectConfigAndGitLabProjectID(projectConfigID string, gitLabProjectID int64) (*Task, error) {
+	projectConfigID = strings.TrimSpace(projectConfigID)
+	if projectConfigID == "" {
+		return nil, fmt.Errorf("projectConfigID 不能为空")
+	}
+
+	var t Task
+	query := fmt.Sprintf(
+		`SELECT id, gitlab_project_id, project_name, status, task_type, session_list, local_path, prompt_text,
+		        prompt_generation_status, prompt_generation_error, %s, %s,
+		        notes, project_config_id, %s, %s
+		   FROM tasks
+		  WHERE project_config_id = ? AND gitlab_project_id = ?
+		  ORDER BY created_at DESC
+		  LIMIT 1`,
+		nullableUnixTimestampExpr("prompt_generation_started_at"),
+		nullableUnixTimestampExpr("prompt_generation_finished_at"),
+		unixTimestampExpr("created_at"),
+		unixTimestampExpr("updated_at"),
+	)
+
+	var rawSessionList string
+	err := s.DB.QueryRow(query, projectConfigID, gitLabProjectID).
+		Scan(
+			&t.ID, &t.GitLabProjectID, &t.ProjectName, &t.Status, &t.TaskType, &rawSessionList, &t.LocalPath, &t.PromptText,
+			&t.PromptGenerationStatus, &t.PromptGenerationError, &t.PromptGenerationStartedAt, &t.PromptGenerationFinishedAt,
+			&t.Notes, &t.ProjectConfigID, &t.CreatedAt, &t.UpdatedAt,
+		)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	t.SessionList, err = parseTaskSessionList(rawSessionList, t.TaskType)
+	if err != nil {
+		return nil, err
+	}
+	return &t, nil
+}
+
 func (s *Store) CreateTask(t Task) error {
 	now := time.Now().Unix()
 	taskType := t.TaskType
 	if taskType == "" {
-		taskType = "Feature迭代"
+		taskType = defaultTaskType
 	}
 	sessionListJSON, _, err := marshalTaskSessionList(taskType, t.SessionList)
 	if err != nil {
@@ -363,7 +407,7 @@ func (s *Store) UpdateTaskType(id, nextTaskType string) error {
 				}
 			}
 
-			if adjustErr := applyTaskSessionQuotaDelta(quotas, currentSessions, normalizedSessions); adjustErr != nil {
+			if adjustErr := applyTaskSessionQuotaDelta(quotas, currentSessions, normalizedSessions, true); adjustErr != nil {
 				err = adjustErr
 				return err
 			}
@@ -463,7 +507,7 @@ func (s *Store) UpdateTaskSessionList(id string, sessionList []TaskSession) erro
 				}
 			}
 
-			if adjustErr := applyTaskSessionQuotaDelta(quotas, currentSessions, normalizedSessions); adjustErr != nil {
+			if adjustErr := applyTaskSessionQuotaDelta(quotas, currentSessions, normalizedSessions, false); adjustErr != nil {
 				return adjustErr
 			}
 

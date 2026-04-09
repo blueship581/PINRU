@@ -31,6 +31,10 @@ func Open(dbPath string, migrationSQL ...string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
+	if err := s.backfillProjectTaskTypeTotals(); err != nil {
+		db.Close()
+		return nil, err
+	}
 	return s, nil
 }
 
@@ -86,13 +90,14 @@ func (s *Store) ensureSchema() error {
 		definition string
 	}{
 		{table: "tasks", column: "project_config_id", definition: "TEXT"},
-		{table: "tasks", column: "task_type", definition: "TEXT NOT NULL DEFAULT 'Feature迭代'"},
+		{table: "tasks", column: "task_type", definition: "TEXT NOT NULL DEFAULT '" + defaultTaskType + "'"},
 		{table: "tasks", column: "session_list", definition: "TEXT NOT NULL DEFAULT '[]'"},
 		{table: "tasks", column: "prompt_generation_status", definition: "TEXT NOT NULL DEFAULT 'idle'"},
 		{table: "tasks", column: "prompt_generation_error", definition: "TEXT"},
 		{table: "tasks", column: "prompt_generation_started_at", definition: "INTEGER"},
 		{table: "tasks", column: "prompt_generation_finished_at", definition: "INTEGER"},
 		{table: "projects", column: "task_type_quotas", definition: "TEXT NOT NULL DEFAULT '{}'"},
+		{table: "projects", column: "task_type_totals", definition: "TEXT NOT NULL DEFAULT '{}'"},
 		{table: "projects", column: "source_model_folder", definition: "TEXT NOT NULL DEFAULT 'ORIGIN'"},
 		{table: "projects", column: "default_submit_repo", definition: "TEXT NOT NULL DEFAULT ''"},
 		{table: "projects", column: "task_types", definition: "TEXT NOT NULL DEFAULT '[]'"},

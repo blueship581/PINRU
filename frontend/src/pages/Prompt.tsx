@@ -70,6 +70,7 @@ const ASSISTANT_POLL_MS = 800;
 // ── Prompt-gen panel data ─────────────────────────────────────────────────────
 
 const TASK_TYPE_DESCRIPTIONS: Record<string, string> = {
+  未归类: '暂不预设任务类别，按仓库现状出题',
   Bug修复: '定位并修复代码缺陷',
   代码生成: '从零构建新模块',
   Feature迭代: '在现有功能上扩展',

@@ -9,10 +9,15 @@ import { useAppStore, TaskStatus, TaskType, Task } from '../store';
 import { motion, AnimatePresence } from 'motion/react';
 import TaskTypeQuotaEditor from '../components/TaskTypeQuotaEditor';
 import TaskGroupSection from '../components/TaskGroupSection';
-import TaskTypeOverviewBar, { type TaskTypeOverviewSummary } from '../components/TaskTypeOverviewBar';
+import TaskTypeOverviewBar from '../components/TaskTypeOverviewBar';
 import TaskDetailDrawer, { type TaskDetailDrawerTab } from '../components/TaskDetailDrawer';
 import {
+  buildTaskTypeOverviewSummaries,
+  type TaskTypeOverviewSummary,
+} from '../lib/taskTypeOverview';
+import {
   buildProjectTaskTypes,
+  DEFAULT_TASK_TYPE,
   getTaskTypePresentation,
   getTaskTypeQuotaValue,
   normalizeTaskTypeName,
@@ -47,9 +52,7 @@ import {
 import {
   buildDraftsFromExtractedCandidate,
   buildSessionEditorOpenSet,
-  countCountedSessionsByTaskType,
   createSessionDraft,
-  hasCountedSessionForTaskType,
   hydrateSessionDrafts,
   isSessionCounted,
   mapSessionDraftsToSessionList,
@@ -106,6 +109,10 @@ function normalizePromptGenerationStatus(status?: string | null): PromptGenerati
   return 'idle';
 }
 
+function isOriginModel(name: string) {
+  return name.trim().toUpperCase() === 'ORIGIN';
+}
+
 type CardSize = 'sm' | 'md' | 'lg';
 type TaskSortOption = 'created-desc' | 'created-asc' | 'round-desc' | 'round-asc';
 type TaskCardContextMenuState = {
@@ -138,6 +145,10 @@ export default function Board() {
   const projectQuotas = useMemo(
     () => parseTaskTypeQuotas(activeProject?.taskTypeQuotas),
     [activeProject?.taskTypeQuotas],
+  );
+  const projectTotals = useMemo(
+    () => parseTaskTypeQuotas(activeProject?.taskTypeTotals),
+    [activeProject?.taskTypeTotals],
   );
 
   const [showProjectPanel, setShowProjectPanel] = useState(false);
@@ -198,8 +209,8 @@ export default function Board() {
       selectedTaskDetail?.taskType ??
       selected?.taskType ??
       availableTaskTypes[0] ??
-      'Feature迭代',
-    ) || 'Feature迭代';
+      DEFAULT_TASK_TYPE,
+    ) || DEFAULT_TASK_TYPE;
 
   const toggleType = (id: TaskType) =>
     setActiveTypes(prev => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n; });
@@ -416,44 +427,9 @@ export default function Board() {
       .filter((group) => group.tasks.length > 0);
   }, [availableTaskTypes, sortedTasks]);
 
-  const countedSessionsByTaskType = useMemo(
-    () => countCountedSessionsByTaskType(tasks),
-    [tasks],
-  );
-
-  const submittedSessionsByTaskType = useMemo(
-    () => countCountedSessionsByTaskType(tasks, { status: 'Submitted' }),
-    [tasks],
-  );
-
-  const buildTaskTypeSummary = (taskType: string, taskPool: Task[]): TaskTypeOverviewSummary => {
-    const matchingTasks = taskPool.filter(
-      (task) => normalizeTaskTypeName(task.taskType) === taskType,
-    );
-    const remainingQuota = getTaskTypeQuotaValue(projectQuotas, taskType);
-    const allocatedSessionCount = countedSessionsByTaskType[taskType] ?? 0;
-    const submittedSessionCount = submittedSessionsByTaskType[taskType] ?? 0;
-
-    return {
-      taskType,
-      remainingQuota,
-      waitingTasks: matchingTasks.filter((task) => task.status === 'Claimed'),
-      processingTasks: matchingTasks.filter((task) =>
-        task.status === 'Downloading' || task.status === 'Downloaded' || task.status === 'PromptReady',
-      ),
-      submittedTasks: taskPool.filter(
-        (task) => task.status === 'Submitted' && hasCountedSessionForTaskType(task, taskType),
-      ),
-      errorTasks: matchingTasks.filter((task) => task.status === 'Error'),
-      submittedSessionCount,
-      allocatedSessionCount,
-      totalTaskCount: remainingQuota === null ? allocatedSessionCount : allocatedSessionCount + remainingQuota,
-    };
-  };
-
   const projectTaskSummaries = useMemo(
-    () => availableTaskTypes.map((taskType) => buildTaskTypeSummary(taskType, tasks)),
-    [availableTaskTypes, tasks, projectQuotas, countedSessionsByTaskType, submittedSessionsByTaskType],
+    () => buildTaskTypeOverviewSummaries(availableTaskTypes, tasks, projectQuotas, projectTotals),
+    [availableTaskTypes, tasks, projectQuotas, projectTotals],
   );
 
   const visibleProjectTaskSummaries = useMemo(
@@ -570,11 +546,6 @@ export default function Board() {
     }
   };
 
-  const handlePrimaryTaskTypeChange = async (nextTaskType: string) => {
-    if (!selected?.id) return;
-    await handleTaskTypeChange(selected.id, nextTaskType);
-  };
-
   const handlePromptSave = async () => {
     if (!selected?.id) return;
     if (!promptDraft.trim()) {
@@ -626,7 +597,7 @@ export default function Board() {
       selectedTaskDetail?.taskType ||
       selected?.taskType ||
       availableTaskTypes[0] ||
-      'Feature迭代';
+      DEFAULT_TASK_TYPE;
 
     const nextSession = createSessionDraft(fallbackTaskType, {
       taskType: fallbackTaskType,
@@ -673,7 +644,7 @@ export default function Board() {
   };
 
   const handleResetSessions = () => {
-    const fallbackTaskType = selectedTaskDetail?.taskType ?? selected?.taskType ?? availableTaskTypes[0] ?? 'Feature迭代';
+    const fallbackTaskType = selectedTaskDetail?.taskType ?? selected?.taskType ?? availableTaskTypes[0] ?? DEFAULT_TASK_TYPE;
     const hydratedSessions = hydrateSessionDrafts(selectedTaskDetail?.sessionList, fallbackTaskType);
     setSessionListDraft(hydratedSessions);
     setSessionExtractCandidates([]);
@@ -687,7 +658,7 @@ export default function Board() {
       selectedTaskDetail?.taskType ??
       selected?.taskType ??
       availableTaskTypes[0] ??
-      'Feature迭代';
+      DEFAULT_TASK_TYPE;
 
     const nextDrafts = buildDraftsFromExtractedCandidate(candidate, sessionListDraft, fallbackTaskType);
     if (nextDrafts.length === 0) {
@@ -1073,6 +1044,7 @@ export default function Board() {
               taskCount={tasks.length}
               onClose={() => setShowProjectOverview(false)}
               onNormalized={loadTasks}
+              onOpenTaskContextMenu={openTaskCardContextMenu}
               onSelectTask={(task) => {
                 setShowProjectOverview(false);
                 setSelected(task);
@@ -1156,7 +1128,6 @@ export default function Board() {
             activeDrawerTab={activeDrawerTab}
             sessionTaskTypeOptions={sessionTaskTypeOptions}
             projectQuotas={projectQuotas}
-            primaryTaskType={primaryTaskType}
             sourceModelName={sourceModelName}
             selectedPromptGenerationStatus={selectedPromptGenerationStatus}
             selectedPromptGenerationMeta={selectedPromptGenerationMeta}
@@ -1165,7 +1136,6 @@ export default function Board() {
             statusOptions={COLUMNS}
             onClose={() => setSelected(null)}
             onStatusChange={handleStatusChange}
-            onPrimaryTaskTypeChange={(nextTaskType) => void handlePrimaryTaskTypeChange(nextTaskType)}
             onTabChange={setActiveDrawerTab}
             onAddSession={handleAddSession}
             onAutoExtractSessions={() => void handleAutoExtractSessions()}
@@ -1768,9 +1738,11 @@ type TaskTypeSummary = TaskTypeOverviewSummary;
 function TaskTypeOverviewCard({
   summary,
   onSelectTask,
+  onOpenTaskContextMenu,
 }: {
   summary: TaskTypeSummary;
   onSelectTask: (task: Task) => void;
+  onOpenTaskContextMenu: (event: React.MouseEvent, task: Task) => void;
 }) {
   const presentation = getTaskTypePresentation(summary.taskType);
   const remainingLabel = summary.remainingQuota === null ? '不限额' : `剩余 ${summary.remainingQuota}`;
@@ -1802,6 +1774,7 @@ function TaskTypeOverviewCard({
           tasks={summary.processingTasks}
           emptyText="当前没有执行中的题卡"
           onSelectTask={onSelectTask}
+          onOpenTaskContextMenu={onOpenTaskContextMenu}
           tone="amber"
         />
         <TaskGroupPreview
@@ -1809,6 +1782,7 @@ function TaskTypeOverviewCard({
           tasks={summary.waitingTasks}
           emptyText={summary.remainingQuota === 0 ? '当前没有待处理题卡' : '这个分类还没开始'}
           onSelectTask={onSelectTask}
+          onOpenTaskContextMenu={onOpenTaskContextMenu}
           tone="stone"
         />
       </div>
@@ -1845,12 +1819,14 @@ function TaskGroupPreview({
   tasks,
   emptyText,
   onSelectTask,
+  onOpenTaskContextMenu,
   tone,
 }: {
   label: string;
   tasks: Task[];
   emptyText: string;
   onSelectTask: (task: Task) => void;
+  onOpenTaskContextMenu: (event: React.MouseEvent, task: Task) => void;
   tone: 'stone' | 'amber';
 }) {
   const toneMap = {
@@ -1879,6 +1855,7 @@ function TaskGroupPreview({
             <button
               key={task.id}
               onClick={() => onSelectTask(task)}
+              onContextMenu={(event) => onOpenTaskContextMenu(event, task)}
               className={`rounded-full border px-2.5 py-1 text-[11px] font-medium transition-colors hover:opacity-90 cursor-default ${toneMap[tone]}`}
             >
               {task.id}
@@ -1902,6 +1879,7 @@ function ProjectOverviewPanel({
   onClose,
   onNormalized,
   onSelectTask,
+  onOpenTaskContextMenu,
 }: {
   project: ProjectConfig;
   summaries: TaskTypeSummary[];
@@ -1909,6 +1887,7 @@ function ProjectOverviewPanel({
   onClose: () => void;
   onNormalized: () => Promise<void>;
   onSelectTask: (task: Task) => void;
+  onOpenTaskContextMenu: (event: React.MouseEvent, task: Task) => void;
 }) {
   const modelList = normalizeProjectModels(project.models);
   const totalInFlight = summaries.reduce(
@@ -2028,6 +2007,7 @@ function ProjectOverviewPanel({
                   key={summary.taskType}
                   summary={summary}
                   onSelectTask={onSelectTask}
+                  onOpenTaskContextMenu={onOpenTaskContextMenu}
                 />
               ))}
             </div>
@@ -2046,7 +2026,7 @@ function ProjectPanel({ project, onClose, onSaved }: { project: ProjectConfig; o
   const [addingModel, setAddingModel] = useState(false);
   const [newModelInput, setNewModelInput] = useState('');
   const [taskTypes, setTaskTypes] = useState<string[]>(() => buildProjectTaskTypes(project));
-  const [quotas, setQuotas] = useState<TaskTypeQuotas>(() => parseTaskTypeQuotas(project.taskTypeQuotas));
+  const [quotas, setQuotas] = useState<TaskTypeQuotas>(() => parseTaskTypeQuotas(project.taskTypeTotals || project.taskTypeQuotas));
 
   const setField = <K extends keyof Pick<ProjectConfig, 'name' | 'gitlabUrl' | 'gitlabToken' | 'cloneBasePath' | 'models' | 'sourceModelFolder' | 'defaultSubmitRepo'>>(key: K, value: string) =>
     setForm(prev => ({ ...prev, [key]: value }));
@@ -2087,10 +2067,13 @@ function ProjectPanel({ project, onClose, onSaved }: { project: ProjectConfig; o
         sourceModelFolder,
         defaultSubmitRepo: form.defaultSubmitRepo.trim(),
         taskTypes: serializeProjectTaskTypes(taskTypes),
-        taskTypeQuotas: serializeTaskTypeQuotas(quotas, taskTypes),
+        taskTypeQuotas: form.taskTypeQuotas,
+        taskTypeTotals: serializeTaskTypeQuotas(quotas, taskTypes),
       };
       await updateProject(nextProject);
-      onSaved(nextProject);
+      const refreshedProjects = await getProjects();
+      const updatedProject = refreshedProjects.find((item) => item.id === nextProject.id) ?? nextProject;
+      onSaved(updatedProject);
     } catch (err) {
       setError(err instanceof Error ? err.message : '保存失败');
     } finally {
@@ -2167,7 +2150,7 @@ function ProjectPanel({ project, onClose, onSaved }: { project: ProjectConfig; o
             任务类型与配额
           </span>
           <p className="mb-3 text-xs text-stone-400 dark:text-stone-500">
-            这里维护项目级任务类型。留空表示不限，0 表示当前已不可再领取。
+            这里维护项目级任务类型总量。保存后会按当前已分配数量自动重算剩余额度。
           </p>
           <TaskTypeQuotaEditor
             taskTypes={taskTypes}

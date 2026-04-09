@@ -1,5 +1,5 @@
 import type { ExtractTaskSessionCandidate, TaskSession } from '../services/task';
-import { normalizeTaskTypeName } from './taskTypes';
+import { DEFAULT_TASK_TYPE, normalizeTaskTypeName } from './taskTypes';
 
 export type EditableTaskSession = TaskSession & {
   localId: string;
@@ -12,7 +12,7 @@ export function createSessionDraft(
   const normalizedTaskType =
     normalizeTaskTypeName(session?.taskType ?? '') ||
     normalizeTaskTypeName(fallbackTaskType) ||
-    'Feature迭代';
+    DEFAULT_TASK_TYPE;
 
   return {
     localId: globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`,
@@ -100,7 +100,7 @@ export function hasCountedSessionForTaskType(
 
 export function countCountedSessionsByTaskType(
   tasks: Array<{ status: string; sessionList: TaskSession[] }>,
-  options?: { status?: string },
+  options?: { status?: string; requireSessionId?: boolean },
 ): Record<string, number> {
   const counts: Record<string, number> = {};
 
@@ -111,6 +111,9 @@ export function countCountedSessionsByTaskType(
 
     for (const [index, session] of task.sessionList.entries()) {
       if (!isSessionCounted(session, index)) {
+        continue;
+      }
+      if (options?.requireSessionId && !hasSessionId(session)) {
         continue;
       }
 

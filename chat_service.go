@@ -777,11 +777,17 @@ func (s *ChatService) SaveMessageAsPrompt(taskID, messageID string) error {
 		promptText = extracted
 	}
 
+	task, err := loadTaskForPromptSync(s.store, taskID)
+	if err != nil {
+		return err
+	}
+
 	if err := s.store.UpdateTaskPrompt(taskID, promptText); err != nil {
 		return err
 	}
-	// Mark task as PromptReady so it surfaces in the board
-	return s.store.UpdateTaskStatus(taskID, "PromptReady")
+
+	bestEffortSyncTaskPromptArtifact(task, promptText)
+	return nil
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────

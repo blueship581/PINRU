@@ -37,6 +37,14 @@ export interface NormalizeManagedSourceFoldersResult {
   details: NormalizeManagedSourceFolderDetail[];
 }
 
+export interface DirectoryInspectionResult {
+  path: string;
+  name: string;
+  exists: boolean;
+  isDir: boolean;
+  isEmpty: boolean;
+}
+
 export async function fetchGitLabProject(projectRef: string, url: string, token: string): Promise<GitLabProject> {
   return callService<GitLabProject>('GitService', 'FetchGitLabProject', projectRef, url, token);
 }
@@ -69,6 +77,10 @@ export async function copyProjectDirectory(sourcePath: string, destinationPath: 
 
 export async function checkPathsExist(paths: string[]): Promise<string[]> {
   return callService<string[]>('GitService', 'CheckPathsExist', paths);
+}
+
+export async function inspectDirectory(path: string): Promise<DirectoryInspectionResult> {
+  return callService<DirectoryInspectionResult>('GitService', 'InspectDirectory', path);
 }
 
 export async function normalizeManagedSourceFolders(projectId: string): Promise<NormalizeManagedSourceFoldersResult> {

@@ -1,17 +1,5 @@
-import { type Task } from '../store';
 import { getTaskTypePresentation } from '../lib/taskTypes';
-
-export type TaskTypeOverviewSummary = {
-  taskType: string;
-  remainingQuota: number | null;
-  waitingTasks: Task[];
-  processingTasks: Task[];
-  submittedTasks: Task[];
-  errorTasks: Task[];
-  submittedSessionCount: number;
-  allocatedSessionCount: number;
-  totalTaskCount: number;
-};
+import { type TaskTypeOverviewSummary } from '../lib/taskTypeOverview';
 
 function TaskTypeOverviewBarCard({
   summary,
@@ -21,7 +9,7 @@ function TaskTypeOverviewBarCard({
   const presentation = getTaskTypePresentation(summary.taskType);
   const total = summary.totalTaskCount;
   const submitted = summary.submittedSessionCount;
-  const progress = total > 0 ? (submitted / total) * 100 : 0;
+  const progress = total > 0 ? Math.min((submitted / total) * 100, 100) : 0;
 
   return (
     <article className="min-w-[220px] flex-1 rounded-2xl border border-stone-200 dark:border-stone-800 bg-white/90 dark:bg-stone-900/80 px-4 py-3.5 shadow-sm shadow-stone-950/[0.02]">

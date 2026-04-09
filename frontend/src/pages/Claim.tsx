@@ -27,7 +27,7 @@ import { createTask } from '../services/task';
 import {
   buildProjectTaskTypes,
   consumeProjectQuota,
-  DEFAULT_TASK_TYPES,
+  DEFAULT_TASK_TYPE,
   getActiveProjectId,
   getConfig,
   getProjects,
@@ -140,7 +140,7 @@ export default function Claim() {
       availableTaskTypes.find((taskType) => {
         const remaining = getTaskTypeQuotaValue(quotas, taskType);
         return remaining === null || remaining > 0;
-      }) ?? availableTaskTypes[0] ?? DEFAULT_TASK_TYPES[0],
+      }) ?? availableTaskTypes[0] ?? DEFAULT_TASK_TYPE,
     [availableTaskTypes, quotas],
   );
   const claimTaskType = selectedTaskType ?? defaultTaskType;

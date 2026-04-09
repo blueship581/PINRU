@@ -12,6 +12,7 @@ const (
 	defaultSourceModelFolder = "ORIGIN"
 	defaultProjectTaskTypes  = "[]"
 	defaultProjectQuotas     = "{}"
+	defaultProjectTotals     = "{}"
 )
 
 type Project struct {
@@ -25,6 +26,7 @@ type Project struct {
 	DefaultSubmitRepo string `json:"defaultSubmitRepo"`
 	TaskTypes         string `json:"taskTypes"`
 	TaskTypeQuotas    string `json:"taskTypeQuotas"`
+	TaskTypeTotals    string `json:"taskTypeTotals"`
 	CreatedAt         int64  `json:"createdAt"`
 	UpdatedAt         int64  `json:"updatedAt"`
 }
@@ -38,6 +40,7 @@ type projectColumnSet struct {
 	DefaultSubmitRepo bool
 	TaskTypes         bool
 	TaskTypeQuotas    bool
+	TaskTypeTotals    bool
 }
 
 func (s *Store) loadProjectColumnSet() (projectColumnSet, error) {
@@ -54,6 +57,9 @@ func (s *Store) loadProjectColumnSet() (projectColumnSet, error) {
 		return columns, err
 	}
 	if columns.TaskTypeQuotas, err = s.columnExists("projects", "task_type_quotas"); err != nil {
+		return columns, err
+	}
+	if columns.TaskTypeTotals, err = s.columnExists("projects", "task_type_totals"); err != nil {
 		return columns, err
 	}
 
@@ -74,11 +80,12 @@ func (s *Store) projectSelectQuery(suffix string) (string, error) {
 	}
 
 	query := fmt.Sprintf(
-		"SELECT id, name, gitlab_url, gitlab_token, clone_base_path, models, %s, %s, %s, %s, created_at, updated_at FROM projects",
+		"SELECT id, name, gitlab_url, gitlab_token, clone_base_path, models, %s, %s, %s, %s, %s, created_at, updated_at FROM projects",
 		projectSelectExpr(columns.SourceModelFolder, "source_model_folder", "'"+defaultSourceModelFolder+"'"),
 		projectSelectExpr(columns.DefaultSubmitRepo, "default_submit_repo", "''"),
 		projectSelectExpr(columns.TaskTypes, "task_types", "'"+defaultProjectTaskTypes+"'"),
 		projectSelectExpr(columns.TaskTypeQuotas, "task_type_quotas", "'"+defaultProjectQuotas+"'"),
+		projectSelectExpr(columns.TaskTypeTotals, "task_type_totals", "'"+defaultProjectTotals+"'"),
 	)
 	if suffix != "" {
 		query += " " + suffix
@@ -99,6 +106,7 @@ func scanProject(scanner projectScanner) (*Project, error) {
 		&p.DefaultSubmitRepo,
 		&p.TaskTypes,
 		&p.TaskTypeQuotas,
+		&p.TaskTypeTotals,
 		&p.CreatedAt,
 		&p.UpdatedAt,
 	); err != nil {
@@ -107,7 +115,7 @@ func scanProject(scanner projectScanner) (*Project, error) {
 	return &p, nil
 }
 
-func normalizeProjectPayload(p Project) (string, string, string) {
+func normalizeProjectPayload(p Project) (string, string, string, string) {
 	sourceModelFolder := strings.TrimSpace(p.SourceModelFolder)
 	if sourceModelFolder == "" {
 		sourceModelFolder = defaultSourceModelFolder
@@ -123,7 +131,136 @@ func normalizeProjectPayload(p Project) (string, string, string) {
 		quotas = defaultProjectQuotas
 	}
 
-	return sourceModelFolder, taskTypes, quotas
+	totals := strings.TrimSpace(p.TaskTypeTotals)
+	if totals == "" {
+		totals = quotas
+	}
+	if totals == "" {
+		totals = defaultProjectTotals
+	}
+	if quotas == "" {
+		quotas = totals
+	}
+
+	return sourceModelFolder, taskTypes, quotas, totals
+}
+
+func parseTaskTypeCountMap(raw string) (map[string]int, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" || trimmed == "{}" {
+		return make(map[string]int), nil
+	}
+
+	var counts map[string]int
+	if err := json.Unmarshal([]byte(trimmed), &counts); err != nil {
+		return nil, fmt.Errorf("invalid task type count JSON: %w", err)
+	}
+	if counts == nil {
+		counts = make(map[string]int)
+	}
+	return counts, nil
+}
+
+func marshalTaskTypeCountMap(counts map[string]int) (string, error) {
+	if counts == nil {
+		counts = make(map[string]int)
+	}
+
+	payload, err := json.Marshal(counts)
+	if err != nil {
+		return "", err
+	}
+	return string(payload), nil
+}
+
+func (s *Store) countProjectUsedQuotaByTaskType(projectID string) (map[string]int, error) {
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		return make(map[string]int), nil
+	}
+
+	tasks, err := s.ListTasks(&projectID)
+	if err != nil {
+		return nil, err
+	}
+
+	counts := make(map[string]int)
+	for _, task := range tasks {
+		for _, session := range task.SessionList {
+			if !session.ConsumeQuota {
+				continue
+			}
+
+			taskType := strings.TrimSpace(session.TaskType)
+			if taskType == "" {
+				continue
+			}
+
+			counts[taskType]++
+		}
+	}
+
+	return counts, nil
+}
+
+func (s *Store) backfillProjectTaskTypeTotals() error {
+	columns, err := s.loadProjectColumnSet()
+	if err != nil {
+		return err
+	}
+	if !columns.TaskTypeTotals {
+		return nil
+	}
+
+	projects, err := s.ListProjects()
+	if err != nil {
+		return err
+	}
+
+	now := time.Now().Unix()
+	for _, project := range projects {
+		if strings.TrimSpace(project.TaskTypeTotals) != "" && strings.TrimSpace(project.TaskTypeTotals) != "{}" {
+			continue
+		}
+		if strings.TrimSpace(project.TaskTypeQuotas) == "" || strings.TrimSpace(project.TaskTypeQuotas) == "{}" {
+			continue
+		}
+
+		remainingCounts, err := parseTaskTypeCountMap(project.TaskTypeQuotas)
+		if err != nil {
+			return fmt.Errorf("backfill project %s quotas: %w", project.ID, err)
+		}
+		usedCounts, err := s.countProjectUsedQuotaByTaskType(project.ID)
+		if err != nil {
+			return fmt.Errorf("backfill project %s usage: %w", project.ID, err)
+		}
+
+		totalCounts := make(map[string]int, len(remainingCounts)+len(usedCounts))
+		for taskType, remaining := range remainingCounts {
+			totalCounts[taskType] = remaining + usedCounts[taskType]
+		}
+		for taskType, used := range usedCounts {
+			if _, exists := totalCounts[taskType]; !exists {
+				totalCounts[taskType] = used
+			}
+		}
+
+		totalJSON, err := marshalTaskTypeCountMap(totalCounts)
+		if err != nil {
+			return fmt.Errorf("backfill project %s totals: %w", project.ID, err)
+		}
+
+		if _, err := s.DB.Exec(
+			"UPDATE projects SET task_type_totals=?, updated_at=? WHERE id=?",
+			totalJSON,
+			now,
+			project.ID,
+		); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 func (s *Store) ListProjects() ([]Project, error) {
@@ -163,7 +300,7 @@ func (s *Store) GetProject(id string) (*Project, error) {
 
 func (s *Store) CreateProject(p Project) error {
 	now := time.Now().Unix()
-	sourceModelFolder, taskTypes, quotas := normalizeProjectPayload(p)
+	sourceModelFolder, taskTypes, quotas, totals := normalizeProjectPayload(p)
 
 	columns, err := s.loadProjectColumnSet()
 	if err != nil {
@@ -203,6 +340,10 @@ func (s *Store) CreateProject(p Project) error {
 		columnNames = append(columnNames, "task_type_quotas")
 		values = append(values, quotas)
 	}
+	if columns.TaskTypeTotals {
+		columnNames = append(columnNames, "task_type_totals")
+		values = append(values, totals)
+	}
 
 	columnNames = append(columnNames, "created_at", "updated_at")
 	values = append(values, now, now)
@@ -223,10 +364,32 @@ func (s *Store) CreateProject(p Project) error {
 
 func (s *Store) UpdateProject(p Project) error {
 	now := time.Now().Unix()
-	sourceModelFolder, taskTypes, quotas := normalizeProjectPayload(p)
+	sourceModelFolder, taskTypes, quotas, totals := normalizeProjectPayload(p)
 
 	columns, err := s.loadProjectColumnSet()
 	if err != nil {
+		return err
+	}
+
+	desiredTotals, err := parseTaskTypeCountMap(totals)
+	if err != nil {
+		return err
+	}
+
+	usedCounts, err := s.countProjectUsedQuotaByTaskType(p.ID)
+	if err != nil {
+		return err
+	}
+
+	recomputedQuotas := make(map[string]int, len(desiredTotals))
+	for taskType, total := range desiredTotals {
+		recomputedQuotas[taskType] = total - usedCounts[taskType]
+	}
+
+	if totals, err = marshalTaskTypeCountMap(desiredTotals); err != nil {
+		return err
+	}
+	if quotas, err = marshalTaskTypeCountMap(recomputedQuotas); err != nil {
 		return err
 	}
 
@@ -260,6 +423,10 @@ func (s *Store) UpdateProject(p Project) error {
 	if columns.TaskTypeQuotas {
 		assignments = append(assignments, "task_type_quotas=?")
 		values = append(values, quotas)
+	}
+	if columns.TaskTypeTotals {
+		assignments = append(assignments, "task_type_totals=?")
+		values = append(values, totals)
 	}
 
 	assignments = append(assignments, "updated_at=?")

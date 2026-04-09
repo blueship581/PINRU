@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/blueship581/pinru/internal/store"
@@ -48,6 +49,8 @@ type UpdateTaskSessionListRequest struct {
 	SessionList []store.TaskSession `json:"sessionList"`
 }
 
+var taskIdentityTokenPattern = regexp.MustCompile(`[^a-zA-Z0-9]+`)
+
 func (s *TaskService) ListTasks(projectConfigID *string) ([]store.Task, error) {
 	return s.store.ListTasks(projectConfigID)
 }
@@ -57,7 +60,14 @@ func (s *TaskService) GetTask(id string) (*store.Task, error) {
 }
 
 func (s *TaskService) CreateTask(req CreateTaskRequest) (*store.Task, error) {
-	taskID := fmt.Sprintf("label-%05d", req.GitLabProjectID)
+	taskID := buildTaskID(req)
+
+	if existing, err := s.findExistingTask(req); err != nil {
+		return nil, err
+	} else if existing != nil {
+		return nil, fmt.Errorf("当前项目下题卡已存在：%s", existing.ID)
+	}
+
 	task := store.Task{
 		ID:              taskID,
 		GitLabProjectID: req.GitLabProjectID,
@@ -165,4 +175,41 @@ func buildModelRunLocalPath(req CreateTaskRequest, model string) *string {
 	}
 	path := filepath.Join(strings.TrimSpace(*req.LocalPath), model)
 	return &path
+}
+
+func (s *TaskService) findExistingTask(req CreateTaskRequest) (*store.Task, error) {
+	if req.ProjectConfigID != nil && strings.TrimSpace(*req.ProjectConfigID) != "" {
+		return s.store.FindTaskByProjectConfigAndGitLabProjectID(strings.TrimSpace(*req.ProjectConfigID), req.GitLabProjectID)
+	}
+
+	return s.store.GetTask(legacyTaskID(req.GitLabProjectID))
+}
+
+func buildTaskID(req CreateTaskRequest) string {
+	legacyID := legacyTaskID(req.GitLabProjectID)
+	if req.ProjectConfigID == nil {
+		return legacyID
+	}
+
+	projectConfigToken := normalizeTaskIdentityToken(*req.ProjectConfigID)
+	if projectConfigToken == "" {
+		return legacyID
+	}
+
+	return fmt.Sprintf("p%s__%s", projectConfigToken, legacyID)
+}
+
+func legacyTaskID(gitLabProjectID int64) string {
+	return fmt.Sprintf("label-%05d", gitLabProjectID)
+}
+
+func normalizeTaskIdentityToken(value string) string {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return ""
+	}
+
+	trimmed = strings.TrimPrefix(trimmed, "project-")
+	normalized := taskIdentityTokenPattern.ReplaceAllString(trimmed, "-")
+	return strings.Trim(normalized, "-")
 }

@@ -146,7 +146,18 @@ func (s *PromptService) SaveTaskPrompt(taskID, promptText string) error {
 	if strings.TrimSpace(promptText) == "" {
 		return fmt.Errorf("提示词内容不能为空")
 	}
-	return s.store.UpdateTaskPrompt(taskID, promptText)
+
+	task, err := loadTaskForPromptSync(s.store, taskID)
+	if err != nil {
+		return err
+	}
+
+	if err := s.store.UpdateTaskPrompt(taskID, promptText); err != nil {
+		return err
+	}
+
+	bestEffortSyncTaskPromptArtifact(task, promptText)
+	return nil
 }
 
 func selectProvider(providers []store.LLMProvider, requestedID *string) *store.LLMProvider {

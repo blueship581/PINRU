@@ -56,6 +56,12 @@ describe('sessionUtils', () => {
     expect(draft.localId).toBeTruthy();
   });
 
+  it('falls back to 未归类 when no task type context is provided', () => {
+    const draft = createSessionDraft('', {});
+
+    expect(draft.taskType).toBe('未归类');
+  });
+
   it('hydrates drafts and opens editors for empty session ids', () => {
     const drafts = hydrateSessionDrafts([
       createEditableSession({ localId: 'a', sessionId: 'sess-1', consumeQuota: true }),

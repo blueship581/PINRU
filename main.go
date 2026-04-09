@@ -40,6 +40,9 @@ var migration008 string
 //go:embed migrations/009_task_prompt_generation_status.sql
 var migration009 string
 
+//go:embed migrations/010_project_task_type_totals.sql
+var migration010 string
+
 func main() {
 	home, _ := os.UserHomeDir()
 	dbPath := filepath.Join(home, ".pinru", "pinru.db")
@@ -55,6 +58,7 @@ func main() {
 		migration007,
 		migration008,
 		migration009,
+		migration010,
 	)
 	if err != nil {
 		log.Fatalf("Failed to open database: %v", err)
