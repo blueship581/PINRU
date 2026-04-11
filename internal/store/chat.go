@@ -1,6 +1,10 @@
 package store
 
-import "github.com/google/uuid"
+import (
+	"strings"
+
+	"github.com/google/uuid"
+)
 
 type ChatSession struct {
 	ID        string `json:"id"`
@@ -42,11 +46,17 @@ func (s *Store) GetChatSession(id string) (*ChatSession, error) {
 	return &sess, nil
 }
 
-func (s *Store) ListChatSessions(taskID string) ([]ChatSession, error) {
-	rows, err := s.DB.Query(
-		`SELECT id, task_id, title, model, created_at, updated_at
-		   FROM chat_sessions WHERE task_id = ? ORDER BY updated_at DESC`, taskID,
-	)
+func (s *Store) ListChatSessions(taskID, model string) ([]ChatSession, error) {
+	query := `SELECT id, task_id, title, model, created_at, updated_at
+		FROM chat_sessions WHERE task_id = ?`
+	args := []any{taskID}
+	if trimmedModel := strings.TrimSpace(model); trimmedModel != "" {
+		query += ` AND model = ?`
+		args = append(args, trimmedModel)
+	}
+	query += ` ORDER BY updated_at DESC`
+
+	rows, err := s.DB.Query(query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -64,41 +74,61 @@ func (s *Store) ListChatSessions(taskID string) ([]ChatSession, error) {
 }
 
 func (s *Store) UpdateChatSessionTitle(id, title string) error {
-	_, err := s.DB.Exec(
+	res, err := s.DB.Exec(
 		`UPDATE chat_sessions SET title = ?, updated_at = strftime('%s','now') WHERE id = ?`, title, id,
 	)
-	return err
+	return ensureRowsAffected(res, err, "chat session %q not found", id)
 }
 
 func (s *Store) UpdateChatSessionModel(id, model string) error {
-	_, err := s.DB.Exec(
+	res, err := s.DB.Exec(
 		`UPDATE chat_sessions SET model = ?, updated_at = strftime('%s','now') WHERE id = ?`, model, id,
 	)
-	return err
+	return ensureRowsAffected(res, err, "chat session %q not found", id)
 }
 
 func (s *Store) TouchChatSession(id string) error {
-	_, err := s.DB.Exec(
+	res, err := s.DB.Exec(
 		`UPDATE chat_sessions SET updated_at = strftime('%s','now') WHERE id = ?`, id,
 	)
-	return err
+	return ensureRowsAffected(res, err, "chat session %q not found", id)
 }
 
 func (s *Store) DeleteChatSession(id string) error {
-	_, err := s.DB.Exec(`DELETE FROM chat_sessions WHERE id = ?`, id)
-	return err
+	res, err := s.DB.Exec(`DELETE FROM chat_sessions WHERE id = ?`, id)
+	return ensureRowsAffected(res, err, "chat session %q not found", id)
 }
 
 func (s *Store) AddChatMessage(sessionID, role, content string) (*ChatMessage, error) {
 	id := uuid.New().String()
-	_, err := s.DB.Exec(
-		`INSERT INTO chat_messages (id, session_id, role, content) VALUES (?, ?, ?, ?)`,
-		id, sessionID, role, content,
-	)
+	tx, err := s.DB.Begin()
 	if err != nil {
 		return nil, err
 	}
-	_ = s.TouchChatSession(sessionID)
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	if _, err := tx.Exec(
+		`INSERT INTO chat_messages (id, session_id, role, content) VALUES (?, ?, ?, ?)`,
+		id, sessionID, role, content,
+	); err != nil {
+		return nil, err
+	}
+
+	res, err := tx.Exec(
+		`UPDATE chat_sessions SET updated_at = strftime('%s','now') WHERE id = ?`, sessionID,
+	)
+	if err := ensureRowsAffected(res, err, "chat session %q not found", sessionID); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	committed = true
 	return s.GetChatMessage(id)
 }
 
@@ -135,6 +165,11 @@ func (s *Store) ListChatMessages(sessionID string) ([]ChatMessage, error) {
 }
 
 func (s *Store) UpdateChatMessage(id, content string) error {
-	_, err := s.DB.Exec(`UPDATE chat_messages SET content = ? WHERE id = ?`, content, id)
-	return err
+	res, err := s.DB.Exec(`UPDATE chat_messages SET content = ? WHERE id = ?`, content, id)
+	return ensureRowsAffected(res, err, "chat message %q not found", id)
+}
+
+func (s *Store) DeleteChatMessage(id string) error {
+	res, err := s.DB.Exec(`DELETE FROM chat_messages WHERE id = ?`, id)
+	return ensureRowsAffected(res, err, "chat message %q not found", id)
 }

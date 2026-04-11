@@ -42,6 +42,17 @@ jobs:
         working-directory: frontend
         run: npm ci
 
+      - name: Run backend tests
+        run: go test ./...
+
+      - name: Run frontend typecheck
+        working-directory: frontend
+        run: npm run typecheck
+
+      - name: Run frontend tests
+        working-directory: frontend
+        run: npm test
+
       - name: Build frontend
         working-directory: frontend
         run: npm run build
@@ -61,6 +72,7 @@ jobs:
           mkdir -p PINRU.app/Contents/Resources
           cp build/bin/pinru PINRU.app/Contents/MacOS/pinru
           cp build/darwin/Info.plist PINRU.app/Contents/Info.plist
+          cp build/darwin/icons.icns PINRU.app/Contents/Resources/icons.icns
           zip -r PINRU-${{ matrix.name }}.zip PINRU.app
 
       - name: Package (Windows)

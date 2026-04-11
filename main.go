@@ -6,72 +6,38 @@ import (
 	"os"
 	"path/filepath"
 
+	appchat "github.com/blueship581/pinru/app/chat"
+	appcli "github.com/blueship581/pinru/app/cli"
+	appconfig "github.com/blueship581/pinru/app/config"
+	appgit "github.com/blueship581/pinru/app/git"
+	appprompt "github.com/blueship581/pinru/app/prompt"
+	appsubmit "github.com/blueship581/pinru/app/submit"
+	apptask "github.com/blueship581/pinru/app/task"
 	"github.com/blueship581/pinru/internal/store"
+	"github.com/blueship581/pinru/migrations"
 	"github.com/wailsapp/wails/v3/pkg/application"
 )
 
 //go:embed all:frontend/dist
 var assets embed.FS
 
-//go:embed migrations/001_init.sql
-var migration001 string
-
-//go:embed migrations/002_model_runs_extend.sql
-var migration002 string
-
-//go:embed migrations/003_submit_results.sql
-var migration003 string
-
-//go:embed migrations/004_task_type.sql
-var migration004 string
-
-//go:embed migrations/005_project_task_quotas.sql
-var migration005 string
-
-//go:embed migrations/006_project_submit_defaults.sql
-var migration006 string
-
-//go:embed migrations/007_project_task_types.sql
-var migration007 string
-
-//go:embed migrations/008_task_session_list.sql
-var migration008 string
-
-//go:embed migrations/009_task_prompt_generation_status.sql
-var migration009 string
-
-//go:embed migrations/010_project_task_type_totals.sql
-var migration010 string
-
 func main() {
 	home, _ := os.UserHomeDir()
 	dbPath := filepath.Join(home, ".pinru", "pinru.db")
 
-	db, err := store.Open(
-		dbPath,
-		migration001,
-		migration002,
-		migration003,
-		migration004,
-		migration005,
-		migration006,
-		migration007,
-		migration008,
-		migration009,
-		migration010,
-	)
+	db, err := store.Open(dbPath, migrations.All()...)
 	if err != nil {
 		log.Fatalf("Failed to open database: %v", err)
 	}
 	defer db.Close()
 
-	configSvc := &ConfigService{store: db}
-	taskSvc := &TaskService{store: db}
-	gitSvc := &GitService{store: db}
-	promptSvc := &PromptService{store: db}
-	submitSvc := &SubmitService{store: db}
-	cliSvc := NewCliService()
-	chatSvc := &ChatService{store: db, cliSvc: cliSvc}
+	configSvc := appconfig.New(db)
+	gitSvc := appgit.New(db)
+	taskSvc := apptask.New(db, gitSvc)
+	promptSvc := appprompt.New(db)
+	submitSvc := appsubmit.New(db)
+	cliSvc := appcli.New()
+	chatSvc := appchat.New(db, cliSvc)
 
 	// Pre-install bundled skills to ~/.claude/skills/ (non-destructive).
 	cliSvc.InstallBuiltinSkills()

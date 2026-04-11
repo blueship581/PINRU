@@ -4,13 +4,13 @@
  */
 
 import { BrowserRouter, Routes, Route } from 'react-router-dom';
-import Layout from './components/Layout';
-import RouteErrorBoundary from './components/RouteErrorBoundary';
-import Board from './pages/Board';
-import Claim from './pages/Claim';
-import Prompt from './pages/Prompt';
-import Submit from './pages/Submit';
-import Settings from './pages/Settings';
+import Layout from './shared/components/Layout';
+import RouteErrorBoundary from './shared/components/RouteErrorBoundary';
+import Board from './features/board';
+import Claim from './features/claim';
+import Prompt from './features/prompt';
+import Submit from './features/submit';
+import Settings from './features/settings';
 
 export default function App() {
   return (

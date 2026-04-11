@@ -1,8 +1,8 @@
 import { render, screen } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
-import TaskTypeOverviewBar from '../components/TaskTypeOverviewBar';
+import TaskTypeOverviewBar from '../shared/components/TaskTypeOverviewBar';
 import type { Task } from '../store';
-import type { TaskTypeOverviewSummary } from '../lib/taskTypeOverview';
+import type { TaskTypeOverviewSummary } from '../shared/lib/taskTypeOverview';
 
 function createTask(overrides: Partial<Task> = {}): Task {
   return {

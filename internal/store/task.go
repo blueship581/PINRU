@@ -100,10 +100,13 @@ func normalizeTaskSessionList(taskType string, sessions []TaskSession) ([]TaskSe
 	return normalized, nil
 }
 
-func parseTaskSessionList(rawSessionList, taskType string) ([]TaskSession, error) {
+func parseTaskSessionListWithMode(rawSessionList, taskType string, emptyAsDefault bool) ([]TaskSession, error) {
 	trimmed := strings.TrimSpace(rawSessionList)
 	if trimmed == "" || trimmed == "[]" || strings.EqualFold(trimmed, "null") {
-		return defaultTaskSessionList(taskType), nil
+		if emptyAsDefault {
+			return defaultTaskSessionList(taskType), nil
+		}
+		return []TaskSession{}, nil
 	}
 
 	var sessions []TaskSession
@@ -112,6 +115,14 @@ func parseTaskSessionList(rawSessionList, taskType string) ([]TaskSession, error
 	}
 
 	return normalizeTaskSessionList(taskType, sessions)
+}
+
+func parseTaskSessionList(rawSessionList, taskType string) ([]TaskSession, error) {
+	return parseTaskSessionListWithMode(rawSessionList, taskType, true)
+}
+
+func parseOptionalTaskSessionList(rawSessionList, taskType string) ([]TaskSession, error) {
+	return parseTaskSessionListWithMode(rawSessionList, taskType, false)
 }
 
 func marshalTaskSessionList(taskType string, sessions []TaskSession) (string, []TaskSession, error) {
@@ -323,6 +334,49 @@ func (s *Store) CreateTask(t Task) error {
 	return err
 }
 
+func (s *Store) CreateTaskWithModelRuns(t Task, runs []ModelRun) error {
+	tx, err := s.DB.Begin()
+	if err != nil {
+		return err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	now := time.Now().Unix()
+	taskType := t.TaskType
+	if taskType == "" {
+		taskType = defaultTaskType
+	}
+	sessionListJSON, _, err := marshalTaskSessionList(taskType, t.SessionList)
+	if err != nil {
+		return err
+	}
+
+	if _, err = tx.Exec(
+		"INSERT INTO tasks (id, gitlab_project_id, project_name, status, task_type, session_list, local_path, notes, project_config_id, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+		t.ID, t.GitLabProjectID, t.ProjectName, "Claimed", taskType, sessionListJSON, t.LocalPath, t.Notes, t.ProjectConfigID, now, now); err != nil {
+		return err
+	}
+
+	for _, run := range runs {
+		if _, err = tx.Exec(
+			"INSERT INTO model_runs (id, task_id, model_name, local_path, status) VALUES (?,?,?,?,?)",
+			run.ID, run.TaskID, run.ModelName, run.LocalPath, "pending"); err != nil {
+			return err
+		}
+	}
+
+	if err = tx.Commit(); err != nil {
+		return err
+	}
+	committed = true
+	return nil
+}
+
 func (s *Store) UpdateTaskStatus(id, status string) error {
 	now := time.Now().Unix()
 	res, err := s.DB.Exec("UPDATE tasks SET status=?, updated_at=? WHERE id=?", status, now, id)
@@ -398,13 +452,10 @@ func (s *Store) UpdateTaskType(id, nextTaskType string) error {
 			return err
 		}
 		if projectErr == nil {
-			quotas := make(map[string]int)
-			trimmed := strings.TrimSpace(quotaJSON)
-			if trimmed != "" && trimmed != "{}" {
-				if unmarshalErr := json.Unmarshal([]byte(trimmed), &quotas); unmarshalErr != nil {
-					err = fmt.Errorf("invalid task_type_quotas JSON: %w", unmarshalErr)
-					return err
-				}
+			quotas, parseQuotaErr := parseTaskTypeCountMap(quotaJSON)
+			if parseQuotaErr != nil {
+				err = parseQuotaErr
+				return err
 			}
 
 			if adjustErr := applyTaskSessionQuotaDelta(quotas, currentSessions, normalizedSessions, true); adjustErr != nil {
@@ -412,7 +463,7 @@ func (s *Store) UpdateTaskType(id, nextTaskType string) error {
 				return err
 			}
 
-			updatedQuotaJSON, marshalErr := json.Marshal(quotas)
+			updatedQuotaJSON, marshalErr := marshalTaskTypeCountMap(quotas)
 			if marshalErr != nil {
 				err = marshalErr
 				return err
@@ -499,19 +550,16 @@ func (s *Store) UpdateTaskSessionList(id string, sessionList []TaskSession) erro
 			return projectErr
 		}
 		if projectErr == nil {
-			quotas := make(map[string]int)
-			trimmed := strings.TrimSpace(quotaJSON)
-			if trimmed != "" && trimmed != "{}" {
-				if unmarshalErr := json.Unmarshal([]byte(trimmed), &quotas); unmarshalErr != nil {
-					return fmt.Errorf("invalid task_type_quotas JSON: %w", unmarshalErr)
-				}
+			quotas, parseQuotaErr := parseTaskTypeCountMap(quotaJSON)
+			if parseQuotaErr != nil {
+				return parseQuotaErr
 			}
 
 			if adjustErr := applyTaskSessionQuotaDelta(quotas, currentSessions, normalizedSessions, false); adjustErr != nil {
 				return adjustErr
 			}
 
-			updatedQuotaJSON, marshalQuotaErr := json.Marshal(quotas)
+			updatedQuotaJSON, marshalQuotaErr := marshalTaskTypeCountMap(quotas)
 			if marshalQuotaErr != nil {
 				return marshalQuotaErr
 			}
@@ -538,6 +586,149 @@ func (s *Store) UpdateTaskSessionList(id string, sessionList []TaskSession) erro
 	}
 	if rowsAffected == 0 {
 		return fmt.Errorf("task not found: %s", id)
+	}
+
+	if err = tx.Commit(); err != nil {
+		return err
+	}
+	committed = true
+	return nil
+}
+
+func latestTaskSessionSummary(sessions []TaskSession, now int64) (*string, int, *int64) {
+	conversationRounds := len(sessions)
+
+	var sessionID *string
+	for index := len(sessions) - 1; index >= 0; index -= 1 {
+		trimmed := strings.TrimSpace(sessions[index].SessionID)
+		if trimmed == "" {
+			continue
+		}
+		next := trimmed
+		sessionID = &next
+		break
+	}
+
+	var conversationDate *int64
+	if conversationRounds > 0 {
+		next := now
+		conversationDate = &next
+	}
+
+	return sessionID, conversationRounds, conversationDate
+}
+
+func (s *Store) UpdateModelRunSessionList(taskID, modelRunID string, sessionList []TaskSession) error {
+	tx, err := s.DB.Begin()
+	if err != nil {
+		return err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	var (
+		currentTaskType string
+		projectConfigID sql.NullString
+	)
+	if err = tx.QueryRow("SELECT task_type, project_config_id FROM tasks WHERE id = ?", taskID).
+		Scan(&currentTaskType, &projectConfigID); err != nil {
+		if err == sql.ErrNoRows {
+			return fmt.Errorf("task not found: %s", taskID)
+		}
+		return err
+	}
+
+	var rawSessionList string
+	if err = tx.QueryRow("SELECT session_list FROM model_runs WHERE id = ? AND task_id = ?", modelRunID, taskID).
+		Scan(&rawSessionList); err != nil {
+		if err == sql.ErrNoRows {
+			return fmt.Errorf("model run not found: %s", modelRunID)
+		}
+		return err
+	}
+
+	currentSessions, parseErr := parseOptionalTaskSessionList(rawSessionList, currentTaskType)
+	if parseErr != nil {
+		return parseErr
+	}
+
+	sessionListJSON, normalizedSessions, marshalErr := marshalTaskSessionList(currentTaskType, sessionList)
+	if marshalErr != nil {
+		return marshalErr
+	}
+	if validateErr := validateTaskSessionReviewFields(normalizedSessions); validateErr != nil {
+		return validateErr
+	}
+
+	nextTaskType := normalizedSessions[0].TaskType
+	now := time.Now().Unix()
+
+	if projectConfigID.Valid && strings.TrimSpace(projectConfigID.String) != "" {
+		var quotaJSON string
+		projectErr := tx.QueryRow("SELECT task_type_quotas FROM projects WHERE id = ?", projectConfigID.String).
+			Scan(&quotaJSON)
+		if projectErr != nil && projectErr != sql.ErrNoRows {
+			return projectErr
+		}
+		if projectErr == nil {
+			quotas, parseQuotaErr := parseTaskTypeCountMap(quotaJSON)
+			if parseQuotaErr != nil {
+				return parseQuotaErr
+			}
+
+			if adjustErr := applyTaskSessionQuotaDelta(quotas, currentSessions, normalizedSessions, false); adjustErr != nil {
+				return adjustErr
+			}
+
+			updatedQuotaJSON, marshalQuotaErr := marshalTaskTypeCountMap(quotas)
+			if marshalQuotaErr != nil {
+				return marshalQuotaErr
+			}
+
+			if _, execErr := tx.Exec(
+				"UPDATE projects SET task_type_quotas=?, updated_at=? WHERE id=?",
+				string(updatedQuotaJSON), now, projectConfigID.String,
+			); execErr != nil {
+				return execErr
+			}
+		}
+	}
+
+	sessionID, conversationRounds, conversationDate := latestTaskSessionSummary(normalizedSessions, now)
+	runRes, execErr := tx.Exec(
+		`UPDATE model_runs
+		    SET session_list=?, session_id=?, conversation_rounds=?, conversation_date=?
+		  WHERE id=? AND task_id=?`,
+		sessionListJSON, sessionID, conversationRounds, conversationDate, modelRunID, taskID,
+	)
+	if execErr != nil {
+		return execErr
+	}
+	runRowsAffected, runRowsErr := runRes.RowsAffected()
+	if runRowsErr != nil {
+		return runRowsErr
+	}
+	if runRowsAffected == 0 {
+		return fmt.Errorf("model run not found: %s", modelRunID)
+	}
+
+	taskRes, taskExecErr := tx.Exec(
+		"UPDATE tasks SET task_type=?, updated_at=? WHERE id=?",
+		nextTaskType, now, taskID,
+	)
+	if taskExecErr != nil {
+		return taskExecErr
+	}
+	taskRowsAffected, taskRowsErr := taskRes.RowsAffected()
+	if taskRowsErr != nil {
+		return taskRowsErr
+	}
+	if taskRowsAffected == 0 {
+		return fmt.Errorf("task not found: %s", taskID)
 	}
 
 	if err = tx.Commit(); err != nil {

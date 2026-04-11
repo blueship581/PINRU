@@ -6,7 +6,7 @@ import {
   type TaskSession,
   type ModelRunFromDB,
   type PromptGenerationStatus,
-} from './services/task';
+} from './api/task';
 import {
   DEFAULT_TASK_TYPE,
   getActiveProjectId,
@@ -16,9 +16,9 @@ import {
   normalizeTaskTypeName,
   type ProjectConfig,
   type TaskType,
-} from './services/config';
+} from './api/config';
 
-export type { TaskType } from './services/config';
+export type { TaskType } from './api/config';
 
 export type TaskStatus = 'Claimed' | 'Downloading' | 'Downloaded' | 'PromptReady' | 'Submitted' | 'Error';
 
@@ -48,18 +48,44 @@ function getExecutionRounds(dbTask: TaskFromDB): number {
   return Math.max(dbTask.sessionList?.length ?? 0, 1);
 }
 
-function mapDbTaskToTask(dbTask: TaskFromDB): Task {
+function buildPersistedTaskSessionList(
+  dbTask: TaskFromDB,
+  modelRuns: ModelRunFromDB[],
+): TaskSession[] {
+  const persistedModelSessions = modelRuns.flatMap((run) => run.sessionList ?? []);
+  if (persistedModelSessions.length > 0) {
+    return persistedModelSessions;
+  }
+  return dbTask.sessionList ?? [];
+}
+
+function getPersistedExecutionRounds(
+  dbTask: TaskFromDB,
+  modelRuns: ModelRunFromDB[],
+): number {
+  const maxModelRounds = modelRuns.reduce((maxRounds, run) => {
+    const roundCount = run.sessionList?.length ?? 0;
+    return roundCount > maxRounds ? roundCount : maxRounds;
+  }, 0);
+  if (maxModelRounds > 0) {
+    return maxModelRounds;
+  }
+  return getExecutionRounds(dbTask);
+}
+
+function mapDbTaskToTask(dbTask: TaskFromDB, modelRuns: ModelRunFromDB[]): Task {
+  const persistedSessionList = buildPersistedTaskSessionList(dbTask, modelRuns);
   return {
     id: dbTask.id,
     projectId: String(dbTask.gitlabProjectId),
     projectName: dbTask.projectName,
     status: dbTask.status as TaskStatus,
     taskType: normalizeTaskTypeName(dbTask.taskType) || DEFAULT_TASK_TYPE,
-    sessionList: dbTask.sessionList ?? [],
+    sessionList: persistedSessionList,
     promptGenerationStatus: dbTask.promptGenerationStatus,
     promptGenerationError: dbTask.promptGenerationError,
     createdAt: dbTask.createdAt,
-    executionRounds: getExecutionRounds(dbTask),
+    executionRounds: getPersistedExecutionRounds(dbTask, modelRuns),
     progress: 0,
     totalModels: 0,
     runningModels: 0,
@@ -131,9 +157,10 @@ export const useAppStore = create<AppState>((set) => ({
           );
           const progress = runs.filter((run) => run.status === 'done').length;
           const runningModels = runs.filter((run) => run.status === 'running').length;
+          const allRuns = runMap.get(dbTask.id) ?? [];
 
           return {
-            ...mapDbTaskToTask(dbTask),
+            ...mapDbTaskToTask(dbTask, allRuns),
             progress,
             totalModels: runs.length,
             runningModels,

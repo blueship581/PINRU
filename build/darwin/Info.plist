@@ -8,8 +8,10 @@
   <string>com.blueship581.pinru</string>
   <key>CFBundleName</key>
   <string>PINRU</string>
-  <key>CFBundleDisplayName</key>
+  <key>CFBundleDisplayName</key
   <string>PINRU</string>
+  <key>CFBundleIconFile</key>
+  <string>icons</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>

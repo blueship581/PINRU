@@ -13,6 +13,7 @@ const (
 	defaultProjectTaskTypes  = "[]"
 	defaultProjectQuotas     = "{}"
 	defaultProjectTotals     = "{}"
+	defaultProjectOverview   = ""
 )
 
 type Project struct {
@@ -20,6 +21,7 @@ type Project struct {
 	Name              string `json:"name"`
 	GitLabURL         string `json:"gitlabUrl"`
 	GitLabToken       string `json:"gitlabToken"`
+	HasGitLabToken    bool   `json:"hasGitLabToken"`
 	CloneBasePath     string `json:"cloneBasePath"`
 	Models            string `json:"models"`
 	SourceModelFolder string `json:"sourceModelFolder"`
@@ -27,6 +29,7 @@ type Project struct {
 	TaskTypes         string `json:"taskTypes"`
 	TaskTypeQuotas    string `json:"taskTypeQuotas"`
 	TaskTypeTotals    string `json:"taskTypeTotals"`
+	OverviewMarkdown  string `json:"overviewMarkdown"`
 	CreatedAt         int64  `json:"createdAt"`
 	UpdatedAt         int64  `json:"updatedAt"`
 }
@@ -41,6 +44,7 @@ type projectColumnSet struct {
 	TaskTypes         bool
 	TaskTypeQuotas    bool
 	TaskTypeTotals    bool
+	OverviewMarkdown  bool
 }
 
 func (s *Store) loadProjectColumnSet() (projectColumnSet, error) {
@@ -62,6 +66,9 @@ func (s *Store) loadProjectColumnSet() (projectColumnSet, error) {
 	if columns.TaskTypeTotals, err = s.columnExists("projects", "task_type_totals"); err != nil {
 		return columns, err
 	}
+	if columns.OverviewMarkdown, err = s.columnExists("projects", "overview_markdown"); err != nil {
+		return columns, err
+	}
 
 	return columns, nil
 }
@@ -80,12 +87,13 @@ func (s *Store) projectSelectQuery(suffix string) (string, error) {
 	}
 
 	query := fmt.Sprintf(
-		"SELECT id, name, gitlab_url, gitlab_token, clone_base_path, models, %s, %s, %s, %s, %s, created_at, updated_at FROM projects",
+		"SELECT id, name, gitlab_url, gitlab_token, clone_base_path, models, %s, %s, %s, %s, %s, %s, created_at, updated_at FROM projects",
 		projectSelectExpr(columns.SourceModelFolder, "source_model_folder", "'"+defaultSourceModelFolder+"'"),
 		projectSelectExpr(columns.DefaultSubmitRepo, "default_submit_repo", "''"),
 		projectSelectExpr(columns.TaskTypes, "task_types", "'"+defaultProjectTaskTypes+"'"),
 		projectSelectExpr(columns.TaskTypeQuotas, "task_type_quotas", "'"+defaultProjectQuotas+"'"),
 		projectSelectExpr(columns.TaskTypeTotals, "task_type_totals", "'"+defaultProjectTotals+"'"),
+		projectSelectExpr(columns.OverviewMarkdown, "overview_markdown", "'"+defaultProjectOverview+"'"),
 	)
 	if suffix != "" {
 		query += " " + suffix
@@ -107,6 +115,7 @@ func scanProject(scanner projectScanner) (*Project, error) {
 		&p.TaskTypes,
 		&p.TaskTypeQuotas,
 		&p.TaskTypeTotals,
+		&p.OverviewMarkdown,
 		&p.CreatedAt,
 		&p.UpdatedAt,
 	); err != nil {
@@ -115,34 +124,26 @@ func scanProject(scanner projectScanner) (*Project, error) {
 	return &p, nil
 }
 
-func normalizeProjectPayload(p Project) (string, string, string, string) {
+func normalizeProjectPayload(p Project) (string, string, string, string, string, error) {
 	sourceModelFolder := strings.TrimSpace(p.SourceModelFolder)
 	if sourceModelFolder == "" {
 		sourceModelFolder = defaultSourceModelFolder
 	}
 
-	taskTypes := strings.TrimSpace(p.TaskTypes)
-	if taskTypes == "" {
-		taskTypes = defaultProjectTaskTypes
+	taskConfig, err := parseProjectTaskConfig(p.TaskTypes, p.TaskTypeQuotas, p.TaskTypeTotals)
+	if err != nil {
+		return "", "", "", "", "", err
 	}
 
-	quotas := strings.TrimSpace(p.TaskTypeQuotas)
-	if quotas == "" {
-		quotas = defaultProjectQuotas
+	taskTypes, quotas, totals, err := taskConfig.Serialize()
+	if err != nil {
+		return "", "", "", "", "", err
 	}
 
-	totals := strings.TrimSpace(p.TaskTypeTotals)
-	if totals == "" {
-		totals = quotas
-	}
-	if totals == "" {
-		totals = defaultProjectTotals
-	}
-	if quotas == "" {
-		quotas = totals
-	}
+	overviewMarkdown := strings.ReplaceAll(p.OverviewMarkdown, "\r\n", "\n")
+	overviewMarkdown = strings.ReplaceAll(overviewMarkdown, "\r", "\n")
 
-	return sourceModelFolder, taskTypes, quotas, totals
+	return sourceModelFolder, taskTypes, quotas, totals, overviewMarkdown, nil
 }
 
 func parseTaskTypeCountMap(raw string) (map[string]int, error) {
@@ -155,10 +156,7 @@ func parseTaskTypeCountMap(raw string) (map[string]int, error) {
 	if err := json.Unmarshal([]byte(trimmed), &counts); err != nil {
 		return nil, fmt.Errorf("invalid task type count JSON: %w", err)
 	}
-	if counts == nil {
-		counts = make(map[string]int)
-	}
-	return counts, nil
+	return cloneTaskTypeCountMap(counts), nil
 }
 
 func marshalTaskTypeCountMap(counts map[string]int) (string, error) {
@@ -300,7 +298,10 @@ func (s *Store) GetProject(id string) (*Project, error) {
 
 func (s *Store) CreateProject(p Project) error {
 	now := time.Now().Unix()
-	sourceModelFolder, taskTypes, quotas, totals := normalizeProjectPayload(p)
+	sourceModelFolder, taskTypes, quotas, totals, overviewMarkdown, err := normalizeProjectPayload(p)
+	if err != nil {
+		return err
+	}
 
 	columns, err := s.loadProjectColumnSet()
 	if err != nil {
@@ -344,6 +345,10 @@ func (s *Store) CreateProject(p Project) error {
 		columnNames = append(columnNames, "task_type_totals")
 		values = append(values, totals)
 	}
+	if columns.OverviewMarkdown {
+		columnNames = append(columnNames, "overview_markdown")
+		values = append(values, overviewMarkdown)
+	}
 
 	columnNames = append(columnNames, "created_at", "updated_at")
 	values = append(values, now, now)
@@ -364,7 +369,10 @@ func (s *Store) CreateProject(p Project) error {
 
 func (s *Store) UpdateProject(p Project) error {
 	now := time.Now().Unix()
-	sourceModelFolder, taskTypes, quotas, totals := normalizeProjectPayload(p)
+	sourceModelFolder, taskTypes, quotas, totals, overviewMarkdown, err := normalizeProjectPayload(p)
+	if err != nil {
+		return err
+	}
 
 	columns, err := s.loadProjectColumnSet()
 	if err != nil {
@@ -428,6 +436,10 @@ func (s *Store) UpdateProject(p Project) error {
 		assignments = append(assignments, "task_type_totals=?")
 		values = append(values, totals)
 	}
+	if columns.OverviewMarkdown {
+		assignments = append(assignments, "overview_markdown=?")
+		values = append(values, overviewMarkdown)
+	}
 
 	assignments = append(assignments, "updated_at=?")
 	values = append(values, now, p.ID)
@@ -448,13 +460,9 @@ func (s *Store) ConsumeProjectQuota(projectID, taskType string) error {
 		return fmt.Errorf("project not found: %s", projectID)
 	}
 
-	var quotas map[string]int
-	if p.TaskTypeQuotas != "" && p.TaskTypeQuotas != "{}" {
-		if err := json.Unmarshal([]byte(p.TaskTypeQuotas), &quotas); err != nil {
-			return fmt.Errorf("invalid task_type_quotas JSON: %w", err)
-		}
-	} else {
-		quotas = make(map[string]int)
+	quotas, err := parseTaskTypeCountMap(p.TaskTypeQuotas)
+	if err != nil {
+		return err
 	}
 
 	current, ok := quotas[taskType]
@@ -463,13 +471,13 @@ func (s *Store) ConsumeProjectQuota(projectID, taskType string) error {
 	}
 	quotas[taskType] = current - 1
 
-	updated, err := json.Marshal(quotas)
+	updated, err := marshalTaskTypeCountMap(quotas)
 	if err != nil {
 		return err
 	}
 
 	now := time.Now().Unix()
-	_, err = s.DB.Exec("UPDATE projects SET task_type_quotas=?, updated_at=? WHERE id=?", string(updated), now, projectID)
+	_, err = s.DB.Exec("UPDATE projects SET task_type_quotas=?, updated_at=? WHERE id=?", updated, now, projectID)
 	return err
 }
 

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	_ "modernc.org/sqlite"
@@ -25,6 +26,8 @@ func TestOpenMigratesLegacyConfigsIntoNewTables(t *testing.T) {
 		readMigrationFile(t, "008_task_session_list.sql"),
 		readMigrationFile(t, "009_task_prompt_generation_status.sql"),
 		readMigrationFile(t, "010_project_task_type_totals.sql"),
+		readMigrationFile(t, "011_project_overview_markdown.sql"),
+		readMigrationFile(t, "012_model_run_session_list.sql"),
 	}
 
 	store, err := Open(dbPath, migrations...)
@@ -38,9 +41,12 @@ func TestOpenMigratesLegacyConfigsIntoNewTables(t *testing.T) {
 	assertColumnExists(t, store.DB, "tasks", "session_list")
 	assertColumnExists(t, store.DB, "tasks", "prompt_generation_status")
 	assertColumnExists(t, store.DB, "tasks", "prompt_generation_error")
+	assertColumnExists(t, store.DB, "model_runs", "session_list")
 	assertColumnExists(t, store.DB, "projects", "default_submit_repo")
 	assertColumnExists(t, store.DB, "projects", "task_types")
 	assertColumnExists(t, store.DB, "projects", "task_type_totals")
+	assertColumnExists(t, store.DB, "projects", "overview_markdown")
+	assertTableCount(t, store.DB, "schema_migrations", 12)
 
 	tasks, err := store.ListTasks(nil)
 	if err != nil {
@@ -89,6 +95,9 @@ func TestOpenMigratesLegacyConfigsIntoNewTables(t *testing.T) {
 	if project.DefaultSubmitRepo != "octo/demo-repo" {
 		t.Fatalf("unexpected default submit repo: %q", project.DefaultSubmitRepo)
 	}
+	if project.OverviewMarkdown != "" {
+		t.Fatalf("unexpected overview markdown: %q", project.OverviewMarkdown)
+	}
 
 	accounts, err := store.ListGitHubAccounts()
 	if err != nil {
@@ -132,6 +141,58 @@ func TestOpenMigratesLegacyConfigsIntoNewTables(t *testing.T) {
 	assertTableCount(t, reopened.DB, "projects", 1)
 	assertTableCount(t, reopened.DB, "github_accounts", 1)
 	assertTableCount(t, reopened.DB, "llm_providers", 1)
+	assertTableCount(t, reopened.DB, "schema_migrations", 12)
+	assertRepairCountAtLeast(t, reopened.DB, 1)
+}
+
+func TestOpenRejectsMigrationChecksumMismatch(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "pinru.db")
+	migrations := []string{
+		readMigrationFile(t, "001_init.sql"),
+		readMigrationFile(t, "002_model_runs_extend.sql"),
+	}
+
+	store, err := Open(dbPath, migrations...)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	store.Close()
+
+	_, err = Open(dbPath,
+		migrations[0],
+		migrations[1]+"\n-- changed",
+	)
+	if err == nil {
+		t.Fatalf("expected checksum mismatch error")
+	}
+	if !strings.Contains(err.Error(), "migration checksum mismatch") {
+		t.Fatalf("unexpected error = %v", err)
+	}
+}
+
+func TestSplitSQLStatementsHandlesQuotedSemicolonsAndComments(t *testing.T) {
+	sqlText := strings.Join([]string{
+		"-- leading comment should be ignored",
+		"CREATE TABLE demo (content TEXT DEFAULT 'a;b');",
+		"/* block comment; with semicolon */",
+		"INSERT INTO demo (content) VALUES ('x;y');",
+		`INSERT INTO demo (content) VALUES ("quoted;value");`,
+		"",
+	}, "\n")
+
+	got := splitSQLStatements(sqlText)
+	if len(got) != 3 {
+		t.Fatalf("splitSQLStatements() len = %d, want 3 (%v)", len(got), got)
+	}
+	if got[0] != "CREATE TABLE demo (content TEXT DEFAULT 'a;b')" {
+		t.Fatalf("first statement = %q", got[0])
+	}
+	if got[1] != "INSERT INTO demo (content) VALUES ('x;y')" {
+		t.Fatalf("second statement = %q", got[1])
+	}
+	if got[2] != `INSERT INTO demo (content) VALUES ("quoted;value")` {
+		t.Fatalf("third statement = %q", got[2])
+	}
 }
 
 func TestCreateTaskDefaultsToUncategorizedType(t *testing.T) {
@@ -165,6 +226,67 @@ func TestCreateTaskDefaultsToUncategorizedType(t *testing.T) {
 	}
 	if !created.SessionList[0].ConsumeQuota {
 		t.Fatalf("expected default session to consume quota")
+	}
+}
+
+func TestCreateTaskWithModelRunsRollsBackOnDuplicateModelName(t *testing.T) {
+	store := openTestStore(t)
+	defer store.Close()
+
+	task := Task{
+		ID:              "task-rollback",
+		GitLabProjectID: 2001,
+		ProjectName:     "Demo",
+		TaskType:        "Bug修复",
+	}
+	runs := []ModelRun{
+		{ID: "run-1", TaskID: task.ID, ModelName: "ORIGIN"},
+		{ID: "run-2", TaskID: task.ID, ModelName: "ORIGIN"},
+	}
+
+	if err := store.CreateTaskWithModelRuns(task, runs); err == nil {
+		t.Fatalf("expected CreateTaskWithModelRuns() to fail on duplicate model names")
+	}
+
+	savedTask, err := store.GetTask(task.ID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if savedTask != nil {
+		t.Fatalf("expected task insert to rollback, got %+v", savedTask)
+	}
+
+	savedRuns, err := store.ListModelRuns(task.ID)
+	if err != nil {
+		t.Fatalf("ListModelRuns() error = %v", err)
+	}
+	if len(savedRuns) != 0 {
+		t.Fatalf("expected model runs insert to rollback, got %d rows", len(savedRuns))
+	}
+}
+
+func TestModelRunsRequireUniqueTaskAndModel(t *testing.T) {
+	store := openTestStore(t)
+	defer store.Close()
+
+	task := Task{
+		ID:              "task-unique",
+		GitLabProjectID: 2002,
+		ProjectName:     "Demo",
+		TaskType:        "Bug修复",
+	}
+	if err := store.CreateTask(task); err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+
+	firstRun := ModelRun{ID: "run-a", TaskID: task.ID, ModelName: "ORIGIN"}
+	if err := store.CreateModelRun(firstRun); err != nil {
+		t.Fatalf("CreateModelRun(firstRun) error = %v", err)
+	}
+
+	duplicateRun := ModelRun{ID: "run-b", TaskID: task.ID, ModelName: "ORIGIN"}
+	if err := store.CreateModelRun(duplicateRun); err == nil {
+		t.Fatalf("expected duplicate model run insert to fail")
 	}
 }
 
@@ -293,6 +415,257 @@ func TestUpdateTaskSessionListAdjustsProjectQuota(t *testing.T) {
 		if gotTotals[taskType] != want {
 			t.Fatalf("TaskTypeTotals[%q] = %d, want %d", taskType, gotTotals[taskType], want)
 		}
+	}
+}
+
+func TestUpdateModelRunSessionListIsScopedPerModel(t *testing.T) {
+	store := openTestStore(t)
+	defer store.Close()
+
+	project := Project{
+		ID:             "proj-model-sessions",
+		Name:           "Demo",
+		GitLabURL:      "https://gitlab.example.com",
+		GitLabToken:    "glpat-test",
+		CloneBasePath:  "/tmp/demo",
+		Models:         "ORIGIN,model-a,model-b",
+		TaskTypes:      `["Feature迭代","Bug修复","代码生成"]`,
+		TaskTypeQuotas: `{"Feature迭代":10,"Bug修复":10,"代码生成":10}`,
+		TaskTypeTotals: `{"Feature迭代":10,"Bug修复":10,"代码生成":10}`,
+	}
+	if err := store.CreateProject(project); err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+
+	task := Task{
+		ID:              "task-model-sessions",
+		GitLabProjectID: 1002,
+		ProjectName:     "Demo Task",
+		TaskType:        "Feature迭代",
+		ProjectConfigID: &project.ID,
+	}
+	modelRuns := []ModelRun{
+		{ID: "run-model-a", TaskID: task.ID, ModelName: "model-a"},
+		{ID: "run-model-b", TaskID: task.ID, ModelName: "model-b"},
+	}
+	if err := store.CreateTaskWithModelRuns(task, modelRuns); err != nil {
+		t.Fatalf("CreateTaskWithModelRuns() error = %v", err)
+	}
+
+	modelASessions := []TaskSession{
+		{
+			SessionID:    "sess-a-1",
+			TaskType:     "Feature迭代",
+			ConsumeQuota: true,
+			IsCompleted:  boolPtr(true),
+			IsSatisfied:  boolPtr(true),
+			Evaluation:   "A 第一轮",
+		},
+		{
+			SessionID:    "sess-a-2",
+			TaskType:     "Bug修复",
+			ConsumeQuota: true,
+			IsCompleted:  boolPtr(false),
+			IsSatisfied:  boolPtr(false),
+			Evaluation:   "A 第二轮",
+		},
+	}
+	if err := store.UpdateModelRunSessionList(task.ID, "run-model-a", modelASessions); err != nil {
+		t.Fatalf("UpdateModelRunSessionList(model-a) error = %v", err)
+	}
+
+	modelBSessions := []TaskSession{
+		{
+			SessionID:    "sess-b-1",
+			TaskType:     "代码生成",
+			ConsumeQuota: true,
+			IsCompleted:  boolPtr(true),
+			IsSatisfied:  boolPtr(false),
+			Evaluation:   "B 第一轮",
+		},
+	}
+	if err := store.UpdateModelRunSessionList(task.ID, "run-model-b", modelBSessions); err != nil {
+		t.Fatalf("UpdateModelRunSessionList(model-b) error = %v", err)
+	}
+
+	runA, err := store.GetModelRun(task.ID, "model-a")
+	if err != nil {
+		t.Fatalf("GetModelRun(model-a) error = %v", err)
+	}
+	if runA == nil {
+		t.Fatalf("expected model-a run")
+	}
+	if len(runA.SessionList) != 2 {
+		t.Fatalf("model-a session list len = %d, want 2", len(runA.SessionList))
+	}
+	if runA.SessionList[0].SessionID != "sess-a-1" || runA.SessionList[1].SessionID != "sess-a-2" {
+		t.Fatalf("unexpected model-a session IDs: %+v", runA.SessionList)
+	}
+
+	runB, err := store.GetModelRun(task.ID, "model-b")
+	if err != nil {
+		t.Fatalf("GetModelRun(model-b) error = %v", err)
+	}
+	if runB == nil {
+		t.Fatalf("expected model-b run")
+	}
+	if len(runB.SessionList) != 1 {
+		t.Fatalf("model-b session list len = %d, want 1", len(runB.SessionList))
+	}
+	if runB.SessionList[0].SessionID != "sess-b-1" {
+		t.Fatalf("model-b first session = %q, want sess-b-1", runB.SessionList[0].SessionID)
+	}
+
+	reloadedRunA, err := store.GetModelRun(task.ID, "model-a")
+	if err != nil {
+		t.Fatalf("GetModelRun(model-a) reload error = %v", err)
+	}
+	if reloadedRunA == nil {
+		t.Fatalf("expected reloaded model-a run")
+	}
+	if len(reloadedRunA.SessionList) != 2 {
+		t.Fatalf("reloaded model-a session list len = %d, want 2", len(reloadedRunA.SessionList))
+	}
+}
+
+func TestCreateProjectNormalizesTaskTypePayload(t *testing.T) {
+	store := openTestStore(t)
+	defer store.Close()
+
+	project := Project{
+		ID:             "proj-normalized",
+		Name:           "Normalized Demo",
+		GitLabURL:      "https://gitlab.example.com",
+		GitLabToken:    "glpat-test",
+		CloneBasePath:  "/tmp/demo",
+		Models:         "ORIGIN,cotv21-pro",
+		TaskTypes:      "Feature迭代\nBug修复\nFeature迭代",
+		TaskTypeQuotas: `{"Feature迭代":2,"代码测试":1}`,
+	}
+	if err := store.CreateProject(project); err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+
+	updatedProject, err := store.GetProject(project.ID)
+	if err != nil {
+		t.Fatalf("GetProject() error = %v", err)
+	}
+	if updatedProject == nil {
+		t.Fatalf("expected normalized project")
+	}
+
+	gotTaskTypes, err := parseTaskTypeList(updatedProject.TaskTypes)
+	if err != nil {
+		t.Fatalf("parseTaskTypeList(TaskTypes) error = %v", err)
+	}
+	wantTaskTypes := []string{"Feature迭代", "Bug修复", "代码测试"}
+	if len(gotTaskTypes) != len(wantTaskTypes) {
+		t.Fatalf("TaskTypes length = %d, want %d", len(gotTaskTypes), len(wantTaskTypes))
+	}
+	for index, want := range wantTaskTypes {
+		if gotTaskTypes[index] != want {
+			t.Fatalf("TaskTypes[%d] = %q, want %q", index, gotTaskTypes[index], want)
+		}
+	}
+
+	gotQuotas, err := parseTaskTypeCountMap(updatedProject.TaskTypeQuotas)
+	if err != nil {
+		t.Fatalf("parseTaskTypeCountMap(TaskTypeQuotas) error = %v", err)
+	}
+	gotTotals, err := parseTaskTypeCountMap(updatedProject.TaskTypeTotals)
+	if err != nil {
+		t.Fatalf("parseTaskTypeCountMap(TaskTypeTotals) error = %v", err)
+	}
+
+	wantCounts := map[string]int{
+		"Feature迭代": 2,
+		"代码测试":      1,
+	}
+	if len(gotQuotas) != len(wantCounts) {
+		t.Fatalf("TaskTypeQuotas length = %d, want %d", len(gotQuotas), len(wantCounts))
+	}
+	if len(gotTotals) != len(wantCounts) {
+		t.Fatalf("TaskTypeTotals length = %d, want %d", len(gotTotals), len(wantCounts))
+	}
+	for taskType, want := range wantCounts {
+		if gotQuotas[taskType] != want {
+			t.Fatalf("TaskTypeQuotas[%q] = %d, want %d", taskType, gotQuotas[taskType], want)
+		}
+		if gotTotals[taskType] != want {
+			t.Fatalf("TaskTypeTotals[%q] = %d, want %d", taskType, gotTotals[taskType], want)
+		}
+	}
+}
+
+func TestCreateAndUpdateProjectPersistOverviewMarkdown(t *testing.T) {
+	store := openTestStore(t)
+	defer store.Close()
+
+	project := Project{
+		ID:               "proj-overview",
+		Name:             "Overview Demo",
+		GitLabURL:        "https://gitlab.example.com",
+		GitLabToken:      "glpat-test",
+		CloneBasePath:    "/tmp/demo",
+		Models:           "ORIGIN,cotv21-pro",
+		TaskTypes:        `["Bug修复"]`,
+		TaskTypeQuotas:   `{"Bug修复":2}`,
+		TaskTypeTotals:   `{"Bug修复":2}`,
+		OverviewMarkdown: "# 项目记录\r\n\r\n- 第一轮\r\n- 第二轮",
+	}
+	if err := store.CreateProject(project); err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+
+	savedProject, err := store.GetProject(project.ID)
+	if err != nil {
+		t.Fatalf("GetProject() error = %v", err)
+	}
+	if savedProject == nil {
+		t.Fatalf("expected saved project")
+	}
+	wantInitial := "# 项目记录\n\n- 第一轮\n- 第二轮"
+	if savedProject.OverviewMarkdown != wantInitial {
+		t.Fatalf("OverviewMarkdown = %q, want %q", savedProject.OverviewMarkdown, wantInitial)
+	}
+
+	project.OverviewMarkdown = "## 更新\n\n`已完成`"
+	if err := store.UpdateProject(project); err != nil {
+		t.Fatalf("UpdateProject() error = %v", err)
+	}
+
+	updatedProject, err := store.GetProject(project.ID)
+	if err != nil {
+		t.Fatalf("GetProject() error = %v", err)
+	}
+	if updatedProject == nil {
+		t.Fatalf("expected updated project")
+	}
+	if updatedProject.OverviewMarkdown != project.OverviewMarkdown {
+		t.Fatalf("OverviewMarkdown after update = %q, want %q", updatedProject.OverviewMarkdown, project.OverviewMarkdown)
+	}
+}
+
+func TestCreateProjectRejectsInvalidTaskTypePayload(t *testing.T) {
+	store := openTestStore(t)
+	defer store.Close()
+
+	project := Project{
+		ID:             "proj-invalid-task-types",
+		Name:           "Invalid Demo",
+		GitLabURL:      "https://gitlab.example.com",
+		GitLabToken:    "glpat-test",
+		CloneBasePath:  "/tmp/demo",
+		Models:         "ORIGIN",
+		TaskTypes:      `["Feature迭代",`,
+		TaskTypeQuotas: `{"Feature迭代":2}`,
+	}
+	err := store.CreateProject(project)
+	if err == nil {
+		t.Fatalf("expected CreateProject() to reject invalid task type payload")
+	}
+	if !strings.Contains(err.Error(), "invalid task type JSON") {
+		t.Fatalf("CreateProject() error = %v, want invalid task type JSON", err)
 	}
 }
 
@@ -619,6 +992,8 @@ func openTestStore(t *testing.T) *Store {
 		readMigrationFile(t, "008_task_session_list.sql"),
 		readMigrationFile(t, "009_task_prompt_generation_status.sql"),
 		readMigrationFile(t, "010_project_task_type_totals.sql"),
+		readMigrationFile(t, "011_project_overview_markdown.sql"),
+		readMigrationFile(t, "012_model_run_session_list.sql"),
 	}
 
 	store, err := Open(dbPath, migrations...)
@@ -817,5 +1192,17 @@ func assertTableCount(t *testing.T, db *sql.DB, table string, want int) {
 	}
 	if got != want {
 		t.Fatalf("table %s count = %d, want %d", table, got, want)
+	}
+}
+
+func assertRepairCountAtLeast(t *testing.T, db *sql.DB, minimum int) {
+	t.Helper()
+
+	var got int
+	if err := db.QueryRow("SELECT COUNT(*) FROM schema_repairs").Scan(&got); err != nil {
+		t.Fatalf("count schema_repairs error = %v", err)
+	}
+	if got < minimum {
+		t.Fatalf("schema_repairs count = %d, want >= %d", got, minimum)
 	}
 }

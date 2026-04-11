@@ -12,6 +12,7 @@ type LLMProvider struct {
 	Model        string  `json:"model"`
 	BaseURL      *string `json:"baseUrl"`
 	APIKey       string  `json:"apiKey"`
+	HasAPIKey    bool    `json:"hasApiKey"`
 	IsDefault    bool    `json:"isDefault"`
 	CreatedAt    int64   `json:"createdAt"`
 	UpdatedAt    int64   `json:"updatedAt"`

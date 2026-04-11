@@ -3,6 +3,7 @@ package prompt
 import (
 	"fmt"
 	"strings"
+	"unicode"
 
 	"github.com/blueship581/pinru/internal/analysis"
 )
@@ -63,6 +64,8 @@ const (
 	ScopeCrossModule = "跨模块多文件"
 	ScopeCrossSystem = "跨系统多模块"
 )
+
+const MaxPromptBodyRunes = 80
 
 // ── 任务类型到出题要点的精简指导 ──────────────────────────────────────────────
 
@@ -182,6 +185,7 @@ func BuildSystemPrompt() string {
 		"",
 		"3. 简短直接",
 		"   - 正文描述控制在 2-4 句话内，清晰表达「用户遇到了什么问题」或「需要什么新功能」",
+		"   - 正文部分总长度不得超过 80 个字（不含后续约束标签，空白字符不计入）",
 		"   - 去掉所有铺垫语、客套语和废话",
 		"",
 		"4. 约束标签格式（若有）",
@@ -192,6 +196,9 @@ func BuildSystemPrompt() string {
 		"5. 口语化、自然",
 		"   - 读起来要像真实开发者或产品经理发出的任务描述",
 		"   - 去除 AI 写作惯用的刻板措辞",
+		"",
+		"6. 输出前自检",
+		"   - 如果正文部分超过 80 个字，先自行压缩语言，再输出最终版本",
 		"",
 		"直接输出提示词正文，不要加任何前言、解释或标注。",
 	}, "\n")
@@ -298,6 +305,7 @@ func BuildUserPrompt(task TaskInfo, req PromptRequest, summary analysis.Summary,
 	if len(constraintLabels) > 0 {
 		sb.WriteString("正文后面追加约束标签，每个标签一行。")
 	}
+	sb.WriteString(fmt.Sprintf("输出前请自检：正文部分（不含约束标签）必须不超过 %d 个字。", MaxPromptBodyRunes))
 	sb.WriteString("直接输出提示词内容，不加任何前言或说明。")
 
 	return sb.String()
@@ -356,4 +364,88 @@ func buildScopeGuidance(scopes []string) string {
 		return ""
 	}
 	return "范围说明：" + strings.Join(hints, "；")
+}
+
+func SplitPromptSections(promptText string) (string, []string) {
+	lines := strings.Split(strings.ReplaceAll(strings.TrimSpace(promptText), "\r\n", "\n"), "\n")
+	bodyLines := make([]string, 0, len(lines))
+	constraintLines := make([]string, 0, len(lines))
+	inConstraintSection := false
+
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+
+		if isConstraintLine(trimmed) {
+			inConstraintSection = true
+			constraintLines = append(constraintLines, trimmed)
+			continue
+		}
+
+		if inConstraintSection {
+			constraintLines = append(constraintLines, trimmed)
+			continue
+		}
+
+		bodyLines = append(bodyLines, trimmed)
+	}
+
+	return strings.Join(bodyLines, "\n"), constraintLines
+}
+
+func PromptBodyRuneCount(promptText string) int {
+	body, _ := SplitPromptSections(promptText)
+
+	count := 0
+	for _, r := range body {
+		if unicode.IsSpace(r) {
+			continue
+		}
+		count++
+	}
+	return count
+}
+
+func PromptBodyExceedsLimit(promptText string) bool {
+	return PromptBodyRuneCount(promptText) > MaxPromptBodyRunes
+}
+
+func BuildShortenSystemPrompt(limit int) string {
+	return strings.Join([]string{
+		"你是一名中文产品需求文案编辑。",
+		fmt.Sprintf("请把给定提示词的正文压缩到 %d 个字以内。", limit),
+		"不要改变业务含义，不要引入技术实现，不要增加约束标签。",
+		"只输出精炼后的正文，不要输出解释、前言、标题、Markdown 或约束行。",
+	}, "\n")
+}
+
+func BuildShortenUserPrompt(body string, limit int) string {
+	var sb strings.Builder
+	sb.WriteString("请在不改变原意的前提下，把下面这段提示词正文压缩得更短、更自然。\n")
+	sb.WriteString(fmt.Sprintf("要求：最终正文不超过 %d 个字，保留业务场景、问题现象和目标结果。\n", limit))
+	sb.WriteString("正文如下：\n")
+	sb.WriteString(strings.TrimSpace(body))
+	return sb.String()
+}
+
+func isConstraintLine(line string) bool {
+	for _, prefix := range []string{
+		"技术栈约束：",
+		"技术栈约束:",
+		"架构约束：",
+		"架构约束:",
+		"代码规范约束：",
+		"代码规范约束:",
+		"非代码回复约束：",
+		"非代码回复约束:",
+		"业务逻辑约束：",
+		"业务逻辑约束:",
+	} {
+		if strings.HasPrefix(line, prefix) {
+			return true
+		}
+	}
+	return false
 }

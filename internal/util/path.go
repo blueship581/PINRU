@@ -86,3 +86,27 @@ func SamePath(a, b string) bool {
 	}
 	return filepath.Clean(ExpandTilde(trimmedA)) == filepath.Clean(ExpandTilde(trimmedB))
 }
+
+func IsWithinBasePath(basePath, targetPath string) bool {
+	trimmedBase := strings.TrimSpace(basePath)
+	trimmedTarget := strings.TrimSpace(targetPath)
+	if trimmedBase == "" || trimmedTarget == "" {
+		return false
+	}
+
+	base := filepath.Clean(ExpandTilde(trimmedBase))
+	target := filepath.Clean(ExpandTilde(trimmedTarget))
+	if base == target {
+		return true
+	}
+
+	rel, err := filepath.Rel(base, target)
+	if err != nil {
+		return false
+	}
+	if rel == "." {
+		return true
+	}
+
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator))
+}

@@ -7,7 +7,9 @@ import {
   createSessionDraft,
   formatBooleanSelection,
   hasCountedSessionForTaskType,
+  hasSessionDraftChanges,
   getSessionDecisionBadge,
+  getSessionDecisionValue,
   hasCountedSubmittedSession,
   hasSessionId,
   hydrateSessionDrafts,
@@ -17,8 +19,8 @@ import {
   parseBooleanSelection,
   summarizeCountedRounds,
   type EditableTaskSession,
-} from '../lib/sessionUtils';
-import type { ExtractTaskSessionCandidate } from '../services/task';
+} from '../shared/lib/sessionUtils';
+import type { ExtractTaskSessionCandidate } from '../api/task';
 
 function createEditableSession(
   overrides: Partial<EditableTaskSession> = {},
@@ -28,8 +30,8 @@ function createEditableSession(
     sessionId: overrides.sessionId ?? '',
     taskType: overrides.taskType ?? 'Feature迭代',
     consumeQuota: overrides.consumeQuota ?? false,
-    isCompleted: overrides.isCompleted ?? null,
-    isSatisfied: overrides.isSatisfied ?? null,
+    isCompleted: overrides.isCompleted ?? true,
+    isSatisfied: overrides.isSatisfied ?? true,
     evaluation: overrides.evaluation ?? '',
   };
 }
@@ -60,6 +62,8 @@ describe('sessionUtils', () => {
     const draft = createSessionDraft('', {});
 
     expect(draft.taskType).toBe('未归类');
+    expect(draft.isCompleted).toBe(true);
+    expect(draft.isSatisfied).toBe(true);
   });
 
   it('hydrates drafts and opens editors for empty session ids', () => {
@@ -79,6 +83,8 @@ describe('sessionUtils', () => {
     expect(drafts).toHaveLength(1);
     expect(drafts[0].taskType).toBe('代码测试');
     expect(drafts[0].consumeQuota).toBe(true);
+    expect(drafts[0].isCompleted).toBe(true);
+    expect(drafts[0].isSatisfied).toBe(true);
   });
 
   it('handles session id and counted-session checks', () => {
@@ -287,6 +293,10 @@ describe('sessionUtils', () => {
     expect(maskSessionId('1234567890')).toBe('1234567890');
     expect(maskSessionId('1234567890123')).toBe('1234...0123');
 
+    expect(getSessionDecisionValue(undefined)).toBe(true);
+    expect(getSessionDecisionValue(null)).toBe(true);
+    expect(getSessionDecisionValue(false)).toBe(false);
+
     expect(formatBooleanSelection(true)).toBe('true');
     expect(formatBooleanSelection(false)).toBe('false');
     expect(formatBooleanSelection(null)).toBe('');
@@ -294,6 +304,49 @@ describe('sessionUtils', () => {
     expect(parseBooleanSelection('true')).toBe(true);
     expect(parseBooleanSelection('false')).toBe(false);
     expect(parseBooleanSelection('')).toBeNull();
+  });
+
+  it('normalizes persisted empty decisions when checking draft changes', () => {
+    const drafts = hydrateSessionDrafts([
+      {
+        sessionId: 'sess-1',
+        taskType: 'Bug修复',
+        consumeQuota: true,
+        isCompleted: null,
+        isSatisfied: null,
+        evaluation: '',
+        userConversation: '',
+      },
+    ], 'Bug修复');
+
+    expect(hasSessionDraftChanges(drafts, [
+      {
+        sessionId: 'sess-1',
+        taskType: 'Bug修复',
+        consumeQuota: true,
+        isCompleted: null,
+        isSatisfied: null,
+        evaluation: '',
+        userConversation: '',
+      },
+    ], 'Bug修复')).toBe(false);
+
+    expect(hasSessionDraftChanges([
+      {
+        ...drafts[0],
+        isSatisfied: false,
+      },
+    ], [
+      {
+        sessionId: 'sess-1',
+        taskType: 'Bug修复',
+        consumeQuota: true,
+        isCompleted: null,
+        isSatisfied: null,
+        evaluation: '',
+        userConversation: '',
+      },
+    ], 'Bug修复')).toBe(true);
   });
 
   it('builds decision badges for true, false, and unset values', () => {
