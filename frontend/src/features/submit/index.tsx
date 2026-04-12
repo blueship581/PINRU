@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { Loader2, Rocket, ExternalLink, Check, Github, AlertCircle } from 'lucide-react';
 import {
@@ -7,7 +7,8 @@ import {
   type GitHubAccountConfig,
 } from '../../api/config';
 import { listModelRuns, type ModelRunFromDB } from '../../api/task';
-import { submitAll } from '../../api/submit';
+import { submitJob, type JobProgressEvent } from '../../api/job';
+import { Events } from '@wailsio/runtime';
 import { useAppStore } from '../../store';
 import { getPathBase } from '../../shared/lib/sourceFolders';
 import { CopyIconButton } from '../../shared/components/CopyIconButton';
@@ -30,6 +31,8 @@ export default function Submit() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [selectedModels, setSelectedModels] = useState<Set<string>>(new Set());
+  // 追踪当前提交 job 的 ID，用于在 job 完成时刷新结果
+  const pendingJobId = useRef<string | null>(null);
 
   const requestedTaskId = searchParams.get('taskId') ?? '';
   const task = tasks.find((t) => t.id === taskId) ?? null;
@@ -124,27 +127,52 @@ export default function Submit() {
     setSelectedModels(new Set(projectPrModelNames));
   }, [projectPrModelNames]);
 
+  // 监听 pr_submit job 的完成事件，完成后自动刷新 modelRuns
+  useEffect(() => {
+    const cancel = Events.On('job:progress', (event: { data: JobProgressEvent }) => {
+      const data = event.data;
+      if (data.jobType !== 'pr_submit') return;
+      if (pendingJobId.current && data.id !== pendingJobId.current) return;
+      if (data.status === 'done' || data.status === 'error') {
+        pendingJobId.current = null;
+        setBusy(false);
+        if (taskId) {
+          listModelRuns(taskId).then((r) => setModelRuns(r)).catch(() => {});
+          void loadTasks();
+        }
+        if (data.status === 'error' && data.errorMessage) {
+          setError(data.errorMessage);
+        }
+      }
+    });
+    return () => { cancel(); };
+  }, [taskId, loadTasks]);
+
   const handleSubmit = async () => {
     if (!task || !account || !repo || !sourceRun) return;
     setBusy(true);
     setError('');
     try {
-      await submitAll({
-        githubAccountId: account.id,
+      // 通过 JobService 在后台执行提交，BackgroundJobPanel 会实时显示进度
+      // job 完成后由 job:progress 监听器自动刷新 modelRuns 并将 busy 置 false
+      const job = await submitJob({
+        jobType: 'pr_submit',
         taskId,
-        models: [...selectedModels],
-        targetRepo: repo,
-        sourceModelName,
-        githubUsername: account.username,
-        githubToken: '',
+        inputPayload: JSON.stringify({
+          githubAccountId: account.id,
+          taskId,
+          models: [...selectedModels],
+          targetRepo: repo,
+          sourceModelName,
+          githubUsername: account.username,
+          githubToken: '',
+        }),
+        timeoutSeconds: 600,
       });
-      // Reload results from DB
-      const fresh = await listModelRuns(taskId);
-      setModelRuns(fresh);
-      await loadTasks();
+      pendingJobId.current = job.id;
+      // busy 保持 true，等待 job:progress 事件将其复位
     } catch (e) {
       setError(errStr(e));
-    } finally {
       setBusy(false);
     }
   };

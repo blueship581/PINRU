@@ -26,7 +26,6 @@ import {
   getSessionWithMessages,
   listSessions,
   renameSession,
-  saveMessageAsPrompt,
   sendMessage,
   type ChatSession,
 } from '../../api/chat';
@@ -36,13 +35,13 @@ import {
 } from '../../api/config';
 import { useAppStore } from '../../store';
 import { EmptyChat, MessageBubble } from './components/PromptPrimitives';
-import type { LiveMessage, TaskWorkspaceOption } from './types';
+import type { LiveMessage } from './types';
 import {
   buildTaskWorkspaceOptions,
   resolvePromptTaskTypeSelection,
 } from './utils/promptUtils';
 import {
-  PromptGenerationPanel,
+  PromptGenerationBar,
   PromptSidebar,
   PromptToolbar,
 } from './components/PromptPanels';
@@ -78,21 +77,12 @@ const TASK_TYPE_DESCRIPTIONS: Record<string, string> = {
   代码测试: '补充测试与验证链路',
 };
 
-const CONSTRAINT_TYPES = [
-  { value: '技术栈或依赖约束', label: '技术栈约束' },
-  { value: '架构或模式约束',   label: '架构约束'   },
-  { value: '代码风格或规范约束', label: '代码规范约束' },
-  { value: '非代码回复约束',   label: '非代码回复' },
-  { value: '业务逻辑约束',     label: '业务逻辑约束' },
-  { value: '无约束',           label: '无约束'     },
-] as const;
-
-const SCOPE_TYPES = [
-  { value: '单文件',       label: '单文件',     desc: '10%' },
-  { value: '模块内多文件', label: '模块内多文件', desc: '30%' },
-  { value: '跨模块多文件', label: '跨模块多文件', desc: '30%' },
-  { value: '跨系统多模块', label: '跨系统多模块', desc: '30%' },
-] as const;
+import {
+  CONSTRAINT_TYPES,
+  SCOPE_TYPES,
+  LS_KEY_CONSTRAINTS,
+  LS_KEY_SCOPE,
+} from '../../shared/lib/promptConstants';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -187,10 +177,19 @@ export default function Prompt() {
   const [inputCopied, setInputCopied] = useState(false);
 
   // ── Prompt-gen panel ──────────────────────────────────────────────────────
-  const [showGenPanel, setShowGenPanel] = useState(false);
   const [genTaskType, setGenTaskType] = useState('');
-  const [genConstraints, setGenConstraints] = useState<string[]>([]);
-  const [genScopes, setGenScopes] = useState<string[]>([]);
+  const [genConstraints, setGenConstraints] = useState<string[]>(() => {
+    try {
+      const raw = localStorage.getItem(LS_KEY_CONSTRAINTS);
+      return raw ? (JSON.parse(raw) as string[]) : [];
+    } catch { return []; }
+  });
+  const [genScope, setGenScope] = useState<string>(() => {
+    try {
+      return localStorage.getItem(LS_KEY_SCOPE) ?? '';
+    } catch { return ''; }
+  });
+  const [confirmingRegenerate, setConfirmingRegenerate] = useState(false);
 
   // ── Skills ────────────────────────────────────────────────────────────────
   const [skills, setSkills] = useState<SkillItem[]>([]);
@@ -214,6 +213,7 @@ export default function Prompt() {
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const inputCopyTimerRef = useRef<ReturnType<typeof window.setTimeout> | null>(null);
   const previousSelectedTaskIdRef = useRef('');
+  const selectedTaskIdRef = useRef('');
   // Refs for CLI event listener cleanup functions (replaces the old setInterval poll).
   const cliLineUnsubRef = useRef<(() => void) | null>(null);
   const cliDoneUnsubRef = useRef<(() => void) | null>(null);
@@ -232,10 +232,26 @@ export default function Prompt() {
     selectedTaskDetail?.taskType ??
     allTasks.find((task) => task.id === selectedTaskId)?.taskType ??
     '';
+  const syncTaskIdSearchParam = useCallback((taskId: string) => {
+    const nextTaskId = taskId.trim();
+    if (!nextTaskId) {
+      return;
+    }
+
+    const nextParams = new URLSearchParams(window.location.search);
+    if (nextParams.get('taskId') === nextTaskId) {
+      return;
+    }
+
+    nextParams.set('taskId', nextTaskId);
+    setSearchParams(nextParams, { replace: true });
+  }, [setSearchParams]);
 
   const refreshSelectedTaskDetail = useCallback(async (taskId: string) => {
     const task = await getTask(taskId);
-    setSelectedTaskDetail(task);
+    if (selectedTaskIdRef.current === taskId) {
+      setSelectedTaskDetail(task);
+    }
     return task;
   }, []);
 
@@ -301,6 +317,24 @@ export default function Prompt() {
     }
   }, []);
 
+  // Persist gen options to localStorage
+  useEffect(() => {
+    try { localStorage.setItem(LS_KEY_CONSTRAINTS, JSON.stringify(genConstraints)); } catch {}
+  }, [genConstraints]);
+
+  useEffect(() => {
+    try { localStorage.setItem(LS_KEY_SCOPE, genScope); } catch {}
+  }, [genScope]);
+
+  // Reset confirm state when task changes
+  useEffect(() => {
+    setConfirmingRegenerate(false);
+  }, [selectedTaskId]);
+
+  useEffect(() => {
+    selectedTaskIdRef.current = selectedTaskId;
+  }, [selectedTaskId]);
+
   // Close skill picker on outside click
   useEffect(() => {
     if (!skillPicker) return;
@@ -330,10 +364,8 @@ export default function Prompt() {
 
   useEffect(() => {
     if (!selectedTaskId || requestedTaskId === selectedTaskId) return;
-    const next = new URLSearchParams(searchParams);
-    next.set('taskId', selectedTaskId);
-    setSearchParams(next, { replace: true });
-  }, [requestedTaskId, searchParams, selectedTaskId, setSearchParams]);
+    syncTaskIdSearchParam(selectedTaskId);
+  }, [requestedTaskId, selectedTaskId, syncTaskIdSearchParam]);
 
   // Load task info when task changes
   useEffect(() => {
@@ -344,6 +376,10 @@ export default function Prompt() {
       return;
     }
     let cancelled = false;
+    setSelectedTaskDetail(null);
+    setModelRuns([]);
+    setSelectedWorkspaceId('');
+    setGlobalError('');
     (async () => {
       const [task, taskRuns] = await Promise.all([
         getTask(selectedTaskId),
@@ -366,12 +402,14 @@ export default function Prompt() {
       setSessions([]);
       setActiveSessionId(null);
       setMessages([]);
+      setLoadingSession(false);
       return;
     }
     let cancelled = false;
     setSessions([]);
     setActiveSessionId(null);
     setMessages([]);
+    setLoadingSession(false);
 
     (async () => {
       const sList = await listSessions(selectedTaskId, model);
@@ -535,17 +573,29 @@ export default function Prompt() {
     setPendingAutoSaveSessionId(null);
   };
 
-  const handleGenerate = () => {
-    if (!genTaskType || genScopes.length === 0) return;
+  const handleGenerateConfirmed = () => {
+    if (!genTaskType || !genScope) return;
     const constraints = genConstraints.length > 0 ? genConstraints.join(',') : '无约束';
     const prompt = [
       `[PINRU] /评审项目提示词生成`,
       `taskType: ${genTaskType}`,
       `constraints: ${constraints}`,
-      `scope: ${genScopes.join(',')}`,
+      `scope: ${genScope}`,
     ].join('\n');
-    setShowGenPanel(false);
     void handleSend(prompt, { autoSavePrompt: true });
+  };
+
+  const handleGenerateClick = () => {
+    if (promptGenerationStatus === 'done') {
+      setConfirmingRegenerate(true);
+      return;
+    }
+    handleGenerateConfirmed();
+  };
+
+  const handleGenerateConfirm = () => {
+    setConfirmingRegenerate(false);
+    handleGenerateConfirmed();
   };
 
   const handleSend = async (
@@ -753,13 +803,28 @@ export default function Prompt() {
   };
 
   const handleTaskSelect = useCallback((taskId: string) => {
+    if (taskId === selectedTaskIdRef.current) {
+      setShowTaskPicker(false);
+      return;
+    }
+    stopPolling();
+    setSelectedTaskDetail(null);
+    setModelRuns([]);
+    setSelectedWorkspaceId('');
+    setSessions([]);
+    setActiveSessionId(null);
+    setMessages([]);
+    setLoadingSession(false);
+    setGlobalError('');
     setSelectedTaskId(taskId);
     setShowTaskPicker(false);
-    stopPolling();
+    syncTaskIdSearchParam(taskId);
     setSending(false);
     setActiveCLISession(null);
     setPendingAutoSaveSessionId(null);
-  }, []);
+    setRenamingId(null);
+    setRenameValue('');
+  }, [syncTaskIdSearchParam]);
 
   // ── Skill helpers ─────────────────────────────────────────────────────────
 
@@ -870,50 +935,38 @@ export default function Prompt() {
           selectedThinking={thinking}
           mode={mode}
           cliAvailable={cliAvailable}
-          selectedTaskId={selectedTaskId}
-          promptGenerationMeta={promptGenerationMeta}
-          showGenPanel={showGenPanel}
-          taskLocalPath={taskLocalPath}
           sending={sending}
-          promptGenerationStatus={promptGenerationStatus}
           onModelChange={setModel}
           onWorkspaceChange={setSelectedWorkspaceId}
           onThinkingChange={setThinking}
           onModeChange={setMode}
-          onToggleGeneratePanel={() => setShowGenPanel((value) => !value)}
         />
 
-        {/* ── Prompt-gen panel ── */}
-        {showGenPanel && (
-          <PromptGenerationPanel
-            selectedWorkspace={selectedWorkspace}
-            promptTaskTypes={promptTaskTypes}
-            constraintTypes={CONSTRAINT_TYPES}
-            scopeTypes={SCOPE_TYPES}
-            genTaskType={genTaskType}
-            genConstraints={genConstraints}
-            genScopes={genScopes}
-            sending={sending}
-            promptGenerationStatus={promptGenerationStatus}
-            onClose={() => setShowGenPanel(false)}
-            onTaskTypeChange={setGenTaskType}
-            onConstraintToggle={(value) =>
-              setGenConstraints((prev) =>
-                prev.includes(value)
-                  ? prev.filter((item) => item !== value)
-                  : [...prev, value],
-              )
-            }
-            onScopeToggle={(value) =>
-              setGenScopes((prev) =>
-                prev.includes(value)
-                  ? prev.filter((item) => item !== value)
-                  : [...prev, value],
-              )
-            }
-            onGenerate={handleGenerate}
-          />
-        )}
+        {/* ── Prompt generation bar（常驻顶部）── */}
+        <PromptGenerationBar
+          promptTaskTypes={promptTaskTypes}
+          constraintTypes={CONSTRAINT_TYPES}
+          scopeTypes={SCOPE_TYPES}
+          genTaskType={genTaskType}
+          genConstraints={genConstraints}
+          genScope={genScope}
+          sending={sending}
+          promptGenerationStatus={promptGenerationStatus}
+          promptGenerationMeta={promptGenerationMeta}
+          confirming={confirmingRegenerate}
+          onTaskTypeChange={setGenTaskType}
+          onConstraintToggle={(value) =>
+            setGenConstraints((prev) =>
+              prev.includes(value)
+                ? prev.filter((item) => item !== value)
+                : [...prev, value],
+            )
+          }
+          onScopeChange={setGenScope}
+          onGenerateClick={handleGenerateClick}
+          onConfirm={handleGenerateConfirm}
+          onCancelConfirm={() => setConfirmingRegenerate(false)}
+        />
 
         {/* Global error */}
         {globalError && (

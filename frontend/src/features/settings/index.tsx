@@ -8,11 +8,9 @@ import {
 } from 'lucide-react';
 import { useAppStore } from '../../store';
 import {
-  getActiveProjectId,
   getGitHubAccounts,
   getGitLabSettings,
   getLlmProviders,
-  getProjects,
   createGitHubAccount,
   updateGitHubAccount,
   deleteGitHubAccount as deleteGitHubAccountApi,
@@ -22,13 +20,15 @@ import {
   saveGitLabSettings,
   testGitHubAccountConnection,
   testGitLabConnection,
+  getTraeSettings,
+  saveTraeSettings,
   type GitHubAccountConfig,
-  type ProjectConfig,
 } from '../../api/config';
 import { testLlmProvider, type LlmProviderConfig } from '../../api/llm';
 import {
   flashStatus,
   formatErrorMessage,
+  isAcpProvider,
   normalizeGitHubAccounts,
   normalizeProviders,
   validateGitLabSettings,
@@ -65,8 +65,6 @@ export default function Settings() {
   const [gitlabToken, setGitlabToken] = useState('');
   const [gitlabUsername, setGitlabUsername] = useState('');
   const [gitlabHasToken, setGitlabHasToken] = useState(false);
-  const [projects, setProjects] = useState<ProjectConfig[]>([]);
-  const [activeProjectId, setActiveProjectIdState] = useState('');
   const [githubAccounts, setGithubAccounts] = useState<GitHubAccountConfig[]>([]);
   const [llmProviders, setLlmProviders] = useState<LlmProviderConfig[]>([]);
 
@@ -83,9 +81,14 @@ export default function Settings() {
   const [providerTestStatus, setProviderTestStatus] = useState<Record<string, ProviderTestResult>>({});
   const [gitlabError, setGitlabError] = useState('');
   const [gitlabLoadError, setGitlabLoadError] = useState('');
-  const [projectLoadError, setProjectLoadError] = useState('');
   const [githubLoadError, setGithubLoadError] = useState('');
   const [llmLoadError, setLlmLoadError] = useState('');
+
+  const [traeWorkspaceStoragePath, setTraeWorkspaceStoragePath] = useState('');
+  const [traeLogsPath, setTraeLogsPath] = useState('');
+  const [traeDefaultWorkspaceStoragePath, setTraeDefaultWorkspaceStoragePath] = useState('');
+  const [traeDefaultLogsPath, setTraeDefaultLogsPath] = useState('');
+  const [traePathSaveStatus, setTraePathSaveStatus] = useState<'idle' | 'saved' | 'error'>('idle');
 
   const [showGithubModal, setShowGithubModal] = useState(false);
   const [githubForm, setGithubForm] = useState<GitHubAccountFormState>(EMPTY_GITHUB_FORM);
@@ -93,6 +96,7 @@ export default function Settings() {
   const [savingGithubAccount, setSavingGithubAccount] = useState(false);
 
   const [showProviderModal, setShowProviderModal] = useState(false);
+  const [providerModalAcpOnly, setProviderModalAcpOnly] = useState(false);
   const [providerForm, setProviderForm] = useState<ProviderFormState>(EMPTY_PROVIDER_FORM);
   const [providerError, setProviderError] = useState('');
   const [savingProvider, setSavingProvider] = useState(false);
@@ -113,23 +117,6 @@ export default function Settings() {
       } catch (error) {
         if (cancelled) return;
         setGitlabLoadError(formatErrorMessage(error, 'GitLab 配置加载失败'));
-      }
-    };
-
-    const loadProjectSettings = async () => {
-      try {
-        const [projectList, activeProject] = await Promise.all([
-          getProjects(),
-          getActiveProjectId(),
-        ]);
-        if (cancelled) return;
-
-        setProjects(projectList ?? []);
-        setActiveProjectIdState(activeProject ?? '');
-        setProjectLoadError('');
-      } catch (error) {
-        if (cancelled) return;
-        setProjectLoadError(formatErrorMessage(error, '项目配置加载失败'));
       }
     };
 
@@ -159,11 +146,24 @@ export default function Settings() {
       }
     };
 
+    const loadTraeSettings = async () => {
+      try {
+        const settings = await getTraeSettings();
+        if (cancelled) return;
+        setTraeWorkspaceStoragePath(settings.workspaceStoragePath ?? '');
+        setTraeLogsPath(settings.logsPath ?? '');
+        setTraeDefaultWorkspaceStoragePath(settings.defaultWorkspaceStoragePath ?? '');
+        setTraeDefaultLogsPath(settings.defaultLogsPath ?? '');
+      } catch {
+        // non-critical; silently ignore
+      }
+    };
+
     Promise.allSettled([
       loadGitLabSettings(),
-      loadProjectSettings(),
       loadGitHubSettings(),
       loadLLMSettings(),
+      loadTraeSettings(),
     ]).finally(() => {
       if (!cancelled) {
         setLoading(false);
@@ -175,8 +175,6 @@ export default function Settings() {
     };
   }, []);
 
-  const activeProject = projects.find((project) => project.id === activeProjectId) ?? projects[0] ?? null;
-  const defaultGithubAccount = githubAccounts.find((account) => account.isDefault) ?? githubAccounts[0] ?? null;
   const isGitLabConfigured = Boolean(gitlabUrl.trim()) && (Boolean(gitlabToken.trim()) || gitlabHasToken);
 
   const handleSaveGitlab = useCallback(async () => {
@@ -376,6 +374,18 @@ export default function Settings() {
       ...EMPTY_PROVIDER_FORM,
       isDefault: llmProviders.length === 0,
     });
+    setProviderModalAcpOnly(false);
+    setProviderError('');
+    setShowProviderModal(true);
+  };
+
+  const openCreateAcpProviderModal = () => {
+    setProviderForm({
+      ...EMPTY_PROVIDER_FORM,
+      providerType: 'claude_code_acp',
+      isDefault: llmProviders.length === 0,
+    });
+    setProviderModalAcpOnly(true);
     setProviderError('');
     setShowProviderModal(true);
   };
@@ -391,6 +401,7 @@ export default function Settings() {
       hasApiKey: Boolean(provider.hasApiKey),
       isDefault: provider.isDefault,
     });
+    setProviderModalAcpOnly(isAcpProvider(provider.providerType));
     setProviderError('');
     setShowProviderModal(true);
   };
@@ -398,6 +409,7 @@ export default function Settings() {
   const closeProviderModal = () => {
     if (savingProvider) return;
     setShowProviderModal(false);
+    setProviderModalAcpOnly(false);
     setProviderForm(EMPTY_PROVIDER_FORM);
     setProviderError('');
   };
@@ -413,6 +425,7 @@ export default function Settings() {
     const model = providerForm.model.trim();
     const apiKey = providerForm.apiKey.trim();
     const baseUrl = providerForm.baseUrl.trim();
+    const isAcp = isAcpProvider(providerForm.providerType);
 
     if (!name) {
       setProviderError('提供商名称不能为空');
@@ -422,7 +435,7 @@ export default function Settings() {
       setProviderError('模型名称不能为空');
       return;
     }
-    if (!apiKey && !(providerForm.id && providerForm.hasApiKey)) {
+    if (!isAcp && !apiKey && !(providerForm.id && providerForm.hasApiKey)) {
       setProviderError('API Key 不能为空');
       return;
     }
@@ -497,6 +510,16 @@ export default function Settings() {
       flashStatus(setLlmSaveStatus, 'error', 3000);
     }
   };
+
+  const handleSaveTraePaths = useCallback(async () => {
+    try {
+      await saveTraeSettings(traeWorkspaceStoragePath.trim(), traeLogsPath.trim());
+      flashStatus(setTraePathSaveStatus, 'saved');
+    } catch (error) {
+      console.error('Save Trae paths failed:', error);
+      flashStatus(setTraePathSaveStatus, 'error', 3000);
+    }
+  }, [traeWorkspaceStoragePath, traeLogsPath]);
 
   const handleTestProvider = async (provider: LlmProviderConfig) => {
     setTestingProviderId(provider.id);
@@ -610,6 +633,7 @@ export default function Settings() {
                 testingProviderId={testingProviderId}
                 providerTestStatus={providerTestStatus}
                 onCreateProvider={openCreateProviderModal}
+                onCreateAcpProvider={openCreateAcpProviderModal}
                 onSetDefaultProvider={handleSetDefaultProvider}
                 onTestProvider={handleTestProvider}
                 onEditProvider={openEditProviderModal}
@@ -619,12 +643,16 @@ export default function Settings() {
 
             {activeTab === 'general' && (
               <GeneralSettingsPanel
-                loading={loading}
-                projectLoadError={projectLoadError}
                 theme={theme}
                 onThemeChange={setTheme}
-                activeProject={activeProject}
-                defaultGithubAccount={defaultGithubAccount}
+                traeWorkspaceStoragePath={traeWorkspaceStoragePath}
+                traeLogsPath={traeLogsPath}
+                traeDefaultWorkspaceStoragePath={traeDefaultWorkspaceStoragePath}
+                traeDefaultLogsPath={traeDefaultLogsPath}
+                traePathSaveStatus={traePathSaveStatus}
+                onTraeWorkspaceStoragePathChange={setTraeWorkspaceStoragePath}
+                onTraeLogsPathChange={setTraeLogsPath}
+                onTraePathsSave={handleSaveTraePaths}
               />
             )}
 
@@ -660,6 +688,7 @@ export default function Settings() {
           form={providerForm}
           error={providerError}
           saving={savingProvider}
+          acpOnly={providerModalAcpOnly}
           onClose={closeProviderModal}
           onNameChange={(value) =>
             setProviderForm((current) => ({ ...current, name: value }))

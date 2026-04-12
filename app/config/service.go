@@ -6,7 +6,16 @@ import (
 	"github.com/blueship581/pinru/internal/github"
 	"github.com/blueship581/pinru/internal/gitlab"
 	"github.com/blueship581/pinru/internal/store"
+	"github.com/blueship581/pinru/internal/util"
 )
+
+// TraeSettings holds Trae IDE path configuration returned to the frontend.
+type TraeSettings struct {
+	WorkspaceStoragePath        string `json:"workspaceStoragePath"`
+	LogsPath                    string `json:"logsPath"`
+	DefaultWorkspaceStoragePath string `json:"defaultWorkspaceStoragePath"`
+	DefaultLogsPath             string `json:"defaultLogsPath"`
+}
 
 // Service manages application configuration, projects, LLM providers, and
 // GitHub accounts.
@@ -124,6 +133,7 @@ func (s *ConfigService) ListProjects() ([]store.Project, error) {
 	for _, project := range projects {
 		project.HasGitLabToken = strings.TrimSpace(project.GitLabToken) != ""
 		project.GitLabToken = ""
+		project.CloneBasePath = util.NormalizePath(project.CloneBasePath)
 		sanitized = append(sanitized, project)
 	}
 
@@ -131,10 +141,12 @@ func (s *ConfigService) ListProjects() ([]store.Project, error) {
 }
 
 func (s *ConfigService) CreateProject(p store.Project) error {
+	p.CloneBasePath = util.NormalizePath(p.CloneBasePath)
 	return s.store.CreateProject(p)
 }
 
 func (s *ConfigService) UpdateProject(p store.Project) error {
+	p.CloneBasePath = util.NormalizePath(p.CloneBasePath)
 	if strings.TrimSpace(p.GitLabToken) == "" {
 		existing, err := s.store.GetProject(p.ID)
 		if err != nil {
@@ -232,6 +244,34 @@ func (s *ConfigService) UpdateGitHubAccount(a store.GitHubAccount) error {
 
 func (s *ConfigService) DeleteGitHubAccount(id string) error {
 	return s.store.DeleteGitHubAccount(id)
+}
+
+// GetTraeSettings returns the stored Trae IDE path overrides and the
+// platform-appropriate defaults so the frontend can pre-fill fields.
+func (s *ConfigService) GetTraeSettings() (*TraeSettings, error) {
+	wsPath, err := s.store.GetConfig("trae_workspace_storage_path")
+	if err != nil {
+		wsPath = ""
+	}
+	logsPath, err := s.store.GetConfig("trae_logs_path")
+	if err != nil {
+		logsPath = ""
+	}
+	return &TraeSettings{
+		WorkspaceStoragePath:        strings.TrimSpace(wsPath),
+		LogsPath:                    strings.TrimSpace(logsPath),
+		DefaultWorkspaceStoragePath: util.DefaultTraeWorkspaceStoragePath(),
+		DefaultLogsPath:             util.DefaultTraeLogsPath(),
+	}, nil
+}
+
+// SaveTraeSettings persists the Trae IDE path overrides.
+// An empty string means "use platform default" and clears any stored override.
+func (s *ConfigService) SaveTraeSettings(workspaceStoragePath, logsPath string) error {
+	if err := s.store.SetConfig("trae_workspace_storage_path", strings.TrimSpace(workspaceStoragePath)); err != nil {
+		return err
+	}
+	return s.store.SetConfig("trae_logs_path", strings.TrimSpace(logsPath))
 }
 
 func isSensitiveConfigKey(key string) bool {

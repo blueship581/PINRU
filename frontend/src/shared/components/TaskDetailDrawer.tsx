@@ -1,10 +1,11 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import clsx from 'clsx';
-import { motion } from 'motion/react';
+import { AnimatePresence, motion } from 'motion/react';
 import {
   AlertCircle,
   Check,
   CheckCircle2,
+  ChevronDown,
   ChevronRight,
   CircleDashed,
   Copy,
@@ -21,10 +22,12 @@ import {
   ThumbsDown,
   ThumbsUp,
   Trash2,
+  Wand2,
   X,
 } from 'lucide-react';
 import type { Task, TaskStatus } from '../../store';
 import type { ModelRunFromDB, PromptGenerationStatus, TaskFromDB } from '../../api/task';
+import type { GeneratePromptRequest, LlmProviderConfig } from '../../api/llm';
 import {
   getTaskTypePresentation,
   getTaskTypeQuotaRawValue,
@@ -108,8 +111,10 @@ interface TaskDetailDrawerProps {
   onPromptReset: () => void;
   onPromptSave: () => void | Promise<void>;
   onSessionModelChange: (modelName: string) => void;
-  onOpenPrompt: () => void;
   onOpenSubmit: () => void;
+  llmProviders: LlmProviderConfig[];
+  promptGenerating: boolean;
+  onGeneratePrompt: (config: Omit<GeneratePromptRequest, 'taskId'>) => void | Promise<void>;
 }
 
 const TAB_ITEMS: Array<{ id: TaskDetailDrawerTab; label: string; icon: React.ComponentType<{ className?: string }> }> = [
@@ -166,9 +171,100 @@ export default function TaskDetailDrawer({
   onPromptReset,
   onPromptSave,
   onSessionModelChange,
-  onOpenPrompt,
   onOpenSubmit,
+  llmProviders,
+  promptGenerating,
+  onGeneratePrompt,
 }: TaskDetailDrawerProps) {
+  const CONSTRAINT_OPTIONS = ['技术栈约束', '架构约束', '代码风格约束', '非代码回复约束', '业务逻辑约束', '无约束'];
+  const SCOPE_OPTIONS = ['单文件', '模块内多文件', '跨模块多文件', '跨系统多模块'];
+  const THINKING_OPTIONS: Array<{ value: string; label: string }> = [
+    { value: '', label: '默认' },
+    { value: 'low', label: '低' },
+    { value: 'medium', label: '中' },
+    { value: 'high', label: '高' },
+  ];
+
+  const [genProviderId, setGenProviderId] = useState<string>('');
+  const [genThinking, setGenThinking] = useState('');
+  const [genTaskType, setGenTaskType] = useState(() =>
+    normalizeTaskTypeName(selected.taskType) || '',
+  );
+  const [genConstraints, setGenConstraints] = useState<Set<string>>(new Set());
+  const [genScopes, setGenScopes] = useState<Set<string>>(new Set());
+  const [genNotes, setGenNotes] = useState('');
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [showRegenForm, setShowRegenForm] = useState(false);
+  const [submitToast, setSubmitToast] = useState(false);
+  const promptLlmProviders = useMemo(
+    () => llmProviders.filter((provider) => provider.providerType === 'claude_code_acp'),
+    [llmProviders],
+  );
+
+  useEffect(() => {
+    if (promptLlmProviders.length === 0) {
+      if (genProviderId) {
+        setGenProviderId('');
+      }
+      return;
+    }
+    if (promptLlmProviders.some((provider) => provider.id === genProviderId)) {
+      return;
+    }
+
+    const defaultProvider =
+      promptLlmProviders.find((provider) => provider.isDefault) ?? promptLlmProviders[0];
+    if (defaultProvider) {
+      setGenProviderId(defaultProvider.id);
+    }
+  }, [promptLlmProviders, genProviderId]);
+
+  useEffect(() => {
+    if (sessionTaskTypeOptions.length === 0) return;
+    const normalized = normalizeTaskTypeName(selected.taskType);
+    const preferred = normalized && sessionTaskTypeOptions.includes(normalized)
+      ? normalized
+      : sessionTaskTypeOptions[0];
+    if (!genTaskType || !sessionTaskTypeOptions.includes(genTaskType)) {
+      setGenTaskType(preferred);
+    }
+  }, [sessionTaskTypeOptions, selected.taskType]);
+
+  const toggleGenConstraint = (c: string) => {
+    setGenConstraints(prev => {
+      const next = new Set(prev);
+      if (c === '无约束') {
+        return next.has(c) ? new Set() : new Set([c]);
+      }
+      next.delete('无约束');
+      next.has(c) ? next.delete(c) : next.add(c);
+      return next;
+    });
+  };
+
+  const toggleGenScope = (s: string) => {
+    setGenScopes(prev => {
+      const next = new Set(prev);
+      next.has(s) ? next.delete(s) : next.add(s);
+      return next;
+    });
+  };
+
+  const handleStartGenerate = () => {
+    if (!genTaskType || genScopes.size === 0) return;
+    void onGeneratePrompt({
+      providerId: genProviderId || null,
+      taskType: genTaskType,
+      scopes: [...genScopes],
+      constraints: genConstraints.size > 0 ? [...genConstraints] : ['无约束'],
+      additionalNotes: genNotes.trim() || null,
+      thinkingBudget: genThinking,
+    });
+    setShowRegenForm(false);
+    setSubmitToast(true);
+    setTimeout(() => setSubmitToast(false), 4000);
+  };
+
   const persistedSessionList = useMemo(() => {
     const persistedModelSessions = selectedModelRuns.flatMap(
       (run) => run.sessionList ?? [],
@@ -346,6 +442,8 @@ export default function TaskDetailDrawer({
     const isPendingCount = activeSessionIndex > 0 && isQuotaToggleOn && requiresSessionId;
     const isCompleted = getSessionDecisionValue(activeSession.isCompleted);
     const isSatisfied = getSessionDecisionValue(activeSession.isSatisfied);
+    const autoExtractLabel =
+      sessionModelOptions.length > 1 ? '提取当前模型 session' : '自动提取 session';
     const quotaHint =
       activeSessionIndex === 0
         ? '首个 session 固定扣减'
@@ -362,15 +460,29 @@ export default function TaskDetailDrawer({
                 <p className="text-[11px] font-semibold uppercase tracking-[0.24em] text-zinc-500">Session 列表</p>
                 <p className="mt-1 text-xs text-zinc-400">{summarizeCountedRounds(sessionListDraft)}</p>
               </div>
-              <button
-                type="button"
-                onClick={onAddSession}
-                disabled={sessionExtracting}
-                className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-700/70 bg-zinc-900 px-2.5 py-1.5 text-[11px] font-medium text-zinc-200 transition hover:border-zinc-600 hover:bg-zinc-800 disabled:opacity-60"
-              >
-                <Plus className="h-3.5 w-3.5" />
-                新增
-              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  aria-label={autoExtractLabel}
+                  title={autoExtractLabel}
+                  onClick={() => void onAutoExtractSessions()}
+                  disabled={sessionExtracting || drawerLoading || taskTypeChanging}
+                  className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-sky-500/20 bg-sky-500/10 text-sky-200 transition hover:bg-sky-500/15 disabled:opacity-60"
+                >
+                  <RefreshCw
+                    className={clsx('h-3.5 w-3.5', sessionExtracting && 'animate-spin')}
+                  />
+                </button>
+                <button
+                  type="button"
+                  onClick={onAddSession}
+                  disabled={sessionExtracting}
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-700/70 bg-zinc-900 px-2.5 py-1.5 text-[11px] font-medium text-zinc-200 transition hover:border-zinc-600 hover:bg-zinc-800 disabled:opacity-60"
+                >
+                  <Plus className="h-3.5 w-3.5" />
+                  新增
+                </button>
+              </div>
             </div>
             {sessionModelOptions.length > 0 && (
               <div className="mt-3 space-y-2">
@@ -692,82 +804,302 @@ export default function TaskDetailDrawer({
     );
   };
 
+  const renderPromptGenerationForm = () => (
+    <div className="space-y-5">
+      {selectedPromptGenerationStatus === 'error' && selectedPromptGenerationError && (
+        <StatusBanner tone="danger">上次生成失败：{selectedPromptGenerationError}</StatusBanner>
+      )}
+      {promptLlmProviders.length === 0 && (
+        <StatusBanner tone="warning">请先在设置中配置 Claude Code (ACP) 提供商。</StatusBanner>
+      )}
+
+      {/* 任务类型 - pill 选择器 */}
+      <fieldset className="space-y-2">
+        <legend className="text-[11px] font-semibold uppercase tracking-[0.18em] text-zinc-500">任务类型</legend>
+        <div className="flex flex-wrap gap-1.5">
+          {sessionTaskTypeOptions.map(t => (
+            <button
+              key={t}
+              type="button"
+              onClick={() => setGenTaskType(t)}
+              className={clsx(
+                'rounded-full border px-3.5 py-1.5 text-xs font-medium transition-all duration-150',
+                genTaskType === t
+                  ? 'border-indigo-500/60 bg-indigo-500/15 text-indigo-300 shadow-[0_0_12px_rgba(99,102,241,0.15)]'
+                  : 'border-zinc-700/60 bg-zinc-900/80 text-zinc-400 hover:border-zinc-600 hover:text-zinc-300',
+              )}
+            >
+              {t}
+            </button>
+          ))}
+        </div>
+      </fieldset>
+
+      {/* 约束类型 */}
+      <fieldset className="space-y-2">
+        <legend className="text-[11px] font-semibold uppercase tracking-[0.18em] text-zinc-500">约束类型</legend>
+        <div className="flex flex-wrap gap-1.5">
+          {CONSTRAINT_OPTIONS.map(c => (
+            <button
+              key={c}
+              type="button"
+              onClick={() => toggleGenConstraint(c)}
+              className={clsx(
+                'rounded-full border px-3.5 py-1.5 text-xs font-medium transition-all duration-150',
+                genConstraints.has(c)
+                  ? 'border-indigo-500/60 bg-indigo-500/15 text-indigo-300 shadow-[0_0_12px_rgba(99,102,241,0.15)]'
+                  : 'border-zinc-700/60 bg-zinc-900/80 text-zinc-400 hover:border-zinc-600 hover:text-zinc-300',
+              )}
+            >
+              {c}
+            </button>
+          ))}
+        </div>
+      </fieldset>
+
+      {/* 修改范围 */}
+      <fieldset className="space-y-2">
+        <legend className="text-[11px] font-semibold uppercase tracking-[0.18em] text-zinc-500">修改范围</legend>
+        <div className="flex flex-wrap gap-1.5">
+          {SCOPE_OPTIONS.map(s => (
+            <button
+              key={s}
+              type="button"
+              onClick={() => toggleGenScope(s)}
+              className={clsx(
+                'rounded-full border px-3.5 py-1.5 text-xs font-medium transition-all duration-150',
+                genScopes.has(s)
+                  ? 'border-indigo-500/60 bg-indigo-500/15 text-indigo-300 shadow-[0_0_12px_rgba(99,102,241,0.15)]'
+                  : 'border-zinc-700/60 bg-zinc-900/80 text-zinc-400 hover:border-zinc-600 hover:text-zinc-300',
+              )}
+            >
+              {s}
+            </button>
+          ))}
+        </div>
+      </fieldset>
+
+      {/* 高级选项 - 可折叠 */}
+      <div className="rounded-2xl border border-zinc-800/50 bg-zinc-900/30">
+        <button
+          type="button"
+          onClick={() => setAdvancedOpen(prev => !prev)}
+          className="flex w-full items-center justify-between px-4 py-3 text-xs font-medium text-zinc-400 transition hover:text-zinc-300"
+        >
+          <span className="flex items-center gap-2">
+            <Settings2 className="h-3.5 w-3.5" />
+            高级选项
+          </span>
+          <ChevronDown className={clsx('h-3.5 w-3.5 transition-transform duration-200', advancedOpen && 'rotate-180')} />
+        </button>
+        <AnimatePresence initial={false}>
+          {advancedOpen && (
+            <motion.div
+              initial={{ height: 0, opacity: 0 }}
+              animate={{ height: 'auto', opacity: 1 }}
+              exit={{ height: 0, opacity: 0 }}
+              transition={{ duration: 0.18, ease: [0.16, 1, 0.3, 1] }}
+              className="overflow-hidden"
+            >
+              <div className="space-y-4 border-t border-zinc-800/50 px-4 py-4">
+                <div className="grid gap-4 md:grid-cols-2">
+                  <label className="block space-y-1.5">
+                    <span className="text-[11px] font-semibold uppercase tracking-[0.18em] text-zinc-500">LLM 提供商</span>
+                    <select
+                      value={genProviderId}
+                      onChange={(e) => setGenProviderId(e.target.value)}
+                      className="w-full rounded-xl border border-zinc-700/70 bg-zinc-900 px-3 py-2 text-sm text-zinc-200 outline-none focus:border-indigo-500/60"
+                    >
+                      {promptLlmProviders.map(p => (
+                        <option key={p.id} value={p.id}>
+                          {p.name} ({p.model}){p.isDefault ? ' · 默认' : ''}
+                        </option>
+                      ))}
+                      {promptLlmProviders.length === 0 && <option value="">请先在设置中配置</option>}
+                    </select>
+                  </label>
+
+                  <label className="block space-y-1.5">
+                    <span className="text-[11px] font-semibold uppercase tracking-[0.18em] text-zinc-500">思考深度</span>
+                    <select
+                      value={genThinking}
+                      onChange={(e) => setGenThinking(e.target.value)}
+                      className="w-full rounded-xl border border-zinc-700/70 bg-zinc-900 px-3 py-2 text-sm text-zinc-200 outline-none focus:border-indigo-500/60"
+                    >
+                      {THINKING_OPTIONS.map(opt => (
+                        <option key={opt.value} value={opt.value}>{opt.label}</option>
+                      ))}
+                    </select>
+                  </label>
+                </div>
+
+                <label className="block space-y-1.5">
+                  <span className="text-[11px] font-semibold uppercase tracking-[0.18em] text-zinc-500">附加说明</span>
+                  <textarea
+                    value={genNotes}
+                    onChange={(e) => setGenNotes(e.target.value)}
+                    rows={2}
+                    placeholder="对出题方向的补充描述…"
+                    className="w-full rounded-xl border border-zinc-700/70 bg-zinc-900 px-3 py-2 text-sm text-zinc-200 outline-none placeholder:text-zinc-600 focus:border-indigo-500/60"
+                  />
+                </label>
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+      </div>
+
+      {/* 提交按钮 */}
+      <button
+        type="button"
+        onClick={handleStartGenerate}
+        disabled={promptGenerating || !genTaskType || genScopes.size === 0 || promptLlmProviders.length === 0}
+        className="w-full rounded-xl bg-indigo-600 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-indigo-500 disabled:opacity-50"
+      >
+        {promptGenerating ? '正在生成…' : '开始出题'}
+      </button>
+    </div>
+  );
+
+  const hasPromptText = !!(selectedTaskDetail?.promptText || promptDraft.trim());
+
   const renderPromptWorkspace = () => (
     <div className="h-full overflow-y-auto px-4 py-5 sm:px-6 lg:px-8">
-      <div className="mx-auto max-w-5xl space-y-6 pb-6">
-        <div className="grid gap-3 md:grid-cols-3">
-          <InfoTile label="项目 ID">{selected.projectId}</InfoTile>
-          <InfoTile label="创建时间">{createdAtText}</InfoTile>
-          <InfoTile label="后台状态">
-            <span className={clsx('inline-flex rounded-full px-2 py-0.5 text-[10px] font-semibold', promptStatusTone(selectedPromptGenerationStatus))}>
-              {selectedPromptGenerationMeta.label}
-            </span>
-          </InfoTile>
-        </div>
+      <div className="mx-auto max-w-3xl space-y-6 pb-6">
 
-        <SectionBlock
-          icon={Terminal}
-          title="提示词编辑"
-          description="这里保留最终可提交的提示词内容，支持手动修订和回写。"
-          badge={selectedTaskDetail?.promptText ? <WorkspaceBadge tone="success">已写入任务</WorkspaceBadge> : <WorkspaceBadge tone="neutral">尚未写入</WorkspaceBadge>}
-        >
-          <div className="space-y-3">
-            {selectedPromptGenerationStatus === 'running' && (
-              <StatusBanner tone="warning">提示词正在后台生成，完成后会自动写入当前任务。</StatusBanner>
-            )}
-            {selectedPromptGenerationStatus === 'error' && selectedPromptGenerationError && (
-              <StatusBanner tone="danger">最近一次后台生成失败：{selectedPromptGenerationError}</StatusBanner>
-            )}
+        {/* Toast 提示 */}
+        <AnimatePresence>
+          {submitToast && (
+            <motion.div
+              initial={{ opacity: 0, y: -12 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -12 }}
+              transition={{ duration: 0.2 }}
+              className="flex items-center gap-2.5 rounded-2xl border border-emerald-500/30 bg-emerald-500/10 px-4 py-3"
+            >
+              <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-400" />
+              <span className="text-sm text-emerald-300">已提交后台生成，可关闭面板继续其他操作</span>
+            </motion.div>
+          )}
+        </AnimatePresence>
 
-            <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-zinc-800/70 bg-zinc-900/40 px-4 py-3">
-              <div className="flex items-center gap-2 text-sm text-zinc-400">
-                <span>当前提示词</span>
-                <WorkspaceBadge tone={promptCopied ? 'success' : 'neutral'}>
-                  {promptCopied ? '已复制' : '可复制'}
-                </WorkspaceBadge>
-                <WorkspaceBadge tone={promptSaveState === 'saved' ? 'success' : 'neutral'}>
-                  {promptSaveState === 'saved' ? '已保存' : '未保存'}
-                </WorkspaceBadge>
-              </div>
-              <button
-                type="button"
-                onClick={() => void onPromptCopy()}
-                disabled={!promptDraft.trim()}
-                className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-700/70 bg-zinc-950 px-3 py-1.5 text-xs font-medium text-zinc-200 transition hover:border-zinc-600 hover:bg-zinc-800 disabled:opacity-40"
-              >
-                {promptCopied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
-                复制提示词
-              </button>
-            </div>
-
-            <textarea
-              value={promptDraft}
-              onChange={(event) => onPromptDraftChange(event.target.value)}
-              rows={18}
-              placeholder="在这里直接新增或修改提示词"
-              className="min-h-[420px] w-full rounded-[24px] border border-zinc-800 bg-zinc-950/70 px-4 py-4 font-mono text-xs leading-7 text-zinc-200 outline-none transition placeholder:text-zinc-600 focus:border-indigo-500/60 focus:ring-1 focus:ring-indigo-500/40"
-            />
-
-            <div className="sticky bottom-0 flex justify-end gap-2 rounded-2xl border border-zinc-800/70 bg-[#0b0b0e]/92 px-4 py-3 backdrop-blur-xl">
-              <button
-                type="button"
-                onClick={onPromptReset}
-                disabled={promptSaving}
-                className="rounded-xl border border-zinc-700/70 bg-zinc-900 px-4 py-2 text-xs font-medium text-zinc-300 transition hover:border-zinc-600 hover:bg-zinc-800 disabled:opacity-50"
-              >
-                还原
-              </button>
-              <button
-                type="button"
-                onClick={() => void onPromptSave()}
-                disabled={promptSaving || !promptDraft.trim()}
-                className="rounded-xl bg-indigo-600 px-4 py-2 text-xs font-semibold text-white transition hover:bg-indigo-500 disabled:opacity-50"
-              >
-                {promptSaving ? '保存中…' : '保存提示词'}
-              </button>
+        {/* 正在生成中 */}
+        {promptGenerating && (
+          <div className="flex items-center gap-3 rounded-2xl border border-amber-500/30 bg-amber-500/5 px-4 py-4">
+            <RefreshCw className="h-4 w-4 animate-spin text-amber-400" />
+            <div>
+              <span className="text-sm text-amber-300">正在后台生成提示词…</span>
+              <span className="ml-2 text-xs text-amber-300/60">可关闭面板，完成后自动写入</span>
             </div>
           </div>
-        </SectionBlock>
+        )}
+
+        {/* 状态 A: 无提示词 - 显示出题配置 */}
+        {!hasPromptText && !promptGenerating && (
+          <SectionBlock
+            icon={Wand2}
+            title="出题配置"
+            description="选择参数后一键生成评测提示词"
+          >
+            {renderPromptGenerationForm()}
+          </SectionBlock>
+        )}
+
+        {/* 状态 B: 有提示词 - 显示编辑区 + 重新生成 */}
+        {hasPromptText && (
+          <>
+            <SectionBlock
+              icon={Terminal}
+              title="提示词"
+              description="最终可提交的提示词内容，支持手动修订和回写"
+              badge={
+                <div className="flex items-center gap-2">
+                  <WorkspaceBadge tone={promptSaveState === 'saved' ? 'success' : 'neutral'}>
+                    {promptSaveState === 'saved' ? '已保存' : '未保存'}
+                  </WorkspaceBadge>
+                  <button
+                    type="button"
+                    onClick={() => setShowRegenForm(prev => !prev)}
+                    disabled={promptGenerating}
+                    className="inline-flex items-center gap-1 rounded-full border border-zinc-700/60 bg-zinc-900/80 px-2.5 py-0.5 text-[10px] font-medium text-zinc-400 transition hover:border-indigo-500/50 hover:text-indigo-300 disabled:opacity-50"
+                  >
+                    <RefreshCw className="h-3 w-3" />
+                    重新生成
+                  </button>
+                </div>
+              }
+            >
+              <div className="space-y-3">
+                {selectedPromptGenerationStatus === 'running' && !promptGenerating && (
+                  <StatusBanner tone="warning">提示词正在后台生成，完成后会自动写入。</StatusBanner>
+                )}
+
+                <textarea
+                  value={promptDraft}
+                  onChange={(event) => onPromptDraftChange(event.target.value)}
+                  rows={12}
+                  placeholder="在这里直接新增或修改提示词"
+                  className={clsx(
+                    'min-h-[280px] w-full rounded-2xl border bg-zinc-950/70 px-4 py-4 font-mono text-xs leading-7 text-zinc-200 outline-none transition placeholder:text-zinc-600 focus:border-indigo-500/60 focus:ring-1 focus:ring-indigo-500/40',
+                    promptGenerating ? 'border-zinc-800/40 opacity-50' : 'border-zinc-800',
+                  )}
+                  disabled={promptGenerating}
+                />
+
+                <div className="flex items-center justify-between gap-2">
+                  <button
+                    type="button"
+                    onClick={() => void onPromptCopy()}
+                    disabled={!promptDraft.trim()}
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-700/70 bg-zinc-950 px-3 py-1.5 text-xs font-medium text-zinc-200 transition hover:border-zinc-600 hover:bg-zinc-800 disabled:opacity-40"
+                  >
+                    {promptCopied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+                    {promptCopied ? '已复制' : '复制'}
+                  </button>
+                  <div className="flex gap-2">
+                    <button
+                      type="button"
+                      onClick={onPromptReset}
+                      disabled={promptSaving}
+                      className="rounded-xl border border-zinc-700/70 bg-zinc-900 px-4 py-2 text-xs font-medium text-zinc-300 transition hover:border-zinc-600 hover:bg-zinc-800 disabled:opacity-50"
+                    >
+                      还原
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void onPromptSave()}
+                      disabled={promptSaving || !promptDraft.trim()}
+                      className="rounded-xl bg-indigo-600 px-4 py-2 text-xs font-semibold text-white transition hover:bg-indigo-500 disabled:opacity-50"
+                    >
+                      {promptSaving ? '保存中…' : '保存'}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </SectionBlock>
+
+            {/* 重新生成表单 - 折叠展开 */}
+            <AnimatePresence>
+              {showRegenForm && (
+                <motion.div
+                  initial={{ opacity: 0, height: 0 }}
+                  animate={{ opacity: 1, height: 'auto' }}
+                  exit={{ opacity: 0, height: 0 }}
+                  transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}
+                  className="overflow-hidden"
+                >
+                  <SectionBlock
+                    icon={Wand2}
+                    title="重新生成配置"
+                    description="调整参数后重新生成将覆盖当前提示词"
+                  >
+                    {renderPromptGenerationForm()}
+                  </SectionBlock>
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </>
+        )}
       </div>
     </div>
   );
@@ -929,19 +1261,7 @@ export default function TaskDetailDrawer({
                       </button>
                     );
                   })}
-                </div>
-
-                {activeDrawerTab === 'sessions' && (
-                  <button
-                    type="button"
-                    onClick={() => void onAutoExtractSessions()}
-                    disabled={sessionExtracting || drawerLoading || taskTypeChanging}
-                    className="inline-flex items-center gap-1.5 rounded-xl border border-sky-500/20 bg-sky-500/10 px-3 py-2 text-xs font-medium text-sky-200 transition hover:bg-sky-500/15 disabled:opacity-60"
-                  >
-                    <RefreshCw className={clsx('h-3.5 w-3.5', sessionExtracting && 'animate-spin')} />
-                    {sessionExtracting ? '提取中…' : sessionModelOptions.length > 1 ? '提取当前模型' : '自动提取'}
-                  </button>
-                )}
+              </div>
 
                 <ActionIconButton label="关闭" onClick={onClose}>
                   <X className="h-4 w-4" />
@@ -985,17 +1305,10 @@ export default function TaskDetailDrawer({
             <div className="flex flex-col gap-2 sm:flex-row sm:justify-end">
               <button
                 type="button"
-                onClick={onOpenPrompt}
-                className="rounded-xl border border-zinc-700/70 bg-zinc-900 px-4 py-2.5 text-sm font-medium text-zinc-200 transition hover:border-zinc-600 hover:bg-zinc-800"
-              >
-                生成提示词
-              </button>
-              <button
-                type="button"
                 onClick={onOpenSubmit}
                 className="rounded-xl bg-indigo-600 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-indigo-500"
               >
-                提交 PR
+                提交代码
               </button>
             </div>
           </footer>

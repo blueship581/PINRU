@@ -290,6 +290,114 @@ func TestModelRunsRequireUniqueTaskAndModel(t *testing.T) {
 	}
 }
 
+func TestConsumeProjectQuotaAllowsOverdraft(t *testing.T) {
+	store := openTestStore(t)
+	defer store.Close()
+
+	project := Project{
+		ID:             "proj-overdraft-claim",
+		Name:           "Demo",
+		GitLabURL:      "https://gitlab.example.com",
+		GitLabToken:    "glpat-test",
+		CloneBasePath:  "/tmp/demo",
+		Models:         "ORIGIN,cotv21-pro",
+		TaskTypes:      `["Feature迭代"]`,
+		TaskTypeQuotas: `{"Feature迭代":0}`,
+		TaskTypeTotals: `{"Feature迭代":3}`,
+	}
+	if err := store.CreateProject(project); err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+
+	if err := store.ConsumeProjectQuota(project.ID, "Feature迭代"); err != nil {
+		t.Fatalf("ConsumeProjectQuota() error = %v", err)
+	}
+
+	updatedProject, err := store.GetProject(project.ID)
+	if err != nil {
+		t.Fatalf("GetProject() error = %v", err)
+	}
+	if updatedProject == nil {
+		t.Fatalf("expected updated project")
+	}
+
+	var gotQuotas map[string]int
+	if err := json.Unmarshal([]byte(updatedProject.TaskTypeQuotas), &gotQuotas); err != nil {
+		t.Fatalf("json.Unmarshal(TaskTypeQuotas) error = %v", err)
+	}
+	if gotQuotas["Feature迭代"] != -1 {
+		t.Fatalf("TaskTypeQuotas[%q] = %d, want -1", "Feature迭代", gotQuotas["Feature迭代"])
+	}
+}
+
+func TestUpdateTaskTypeAllowsOverdraft(t *testing.T) {
+	store := openTestStore(t)
+	defer store.Close()
+
+	project := Project{
+		ID:             "proj-task-type-overdraft",
+		Name:           "Demo",
+		GitLabURL:      "https://gitlab.example.com",
+		GitLabToken:    "glpat-test",
+		CloneBasePath:  "/tmp/demo",
+		Models:         "ORIGIN,cotv21-pro",
+		TaskTypes:      `["Feature迭代","Bug修复"]`,
+		TaskTypeQuotas: `{"Feature迭代":0,"Bug修复":0}`,
+		TaskTypeTotals: `{"Feature迭代":1,"Bug修复":15}`,
+	}
+	if err := store.CreateProject(project); err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+
+	task := Task{
+		ID:              "task-type-overdraft",
+		GitLabProjectID: 1004,
+		ProjectName:     "Task Type Overdraft",
+		TaskType:        "Feature迭代",
+		ProjectConfigID: &project.ID,
+	}
+	if err := store.CreateTask(task); err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+
+	if err := store.UpdateTaskType(task.ID, "Bug修复"); err != nil {
+		t.Fatalf("UpdateTaskType() error = %v", err)
+	}
+
+	updatedTask, err := store.GetTask(task.ID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if updatedTask == nil {
+		t.Fatalf("expected updated task")
+	}
+	if updatedTask.TaskType != "Bug修复" {
+		t.Fatalf("TaskType = %q, want %q", updatedTask.TaskType, "Bug修复")
+	}
+	if len(updatedTask.SessionList) == 0 || updatedTask.SessionList[0].TaskType != "Bug修复" {
+		t.Fatalf("SessionList[0].TaskType = %+v, want %q", updatedTask.SessionList, "Bug修复")
+	}
+
+	updatedProject, err := store.GetProject(project.ID)
+	if err != nil {
+		t.Fatalf("GetProject() error = %v", err)
+	}
+	if updatedProject == nil {
+		t.Fatalf("expected updated project")
+	}
+
+	var gotQuotas map[string]int
+	if err := json.Unmarshal([]byte(updatedProject.TaskTypeQuotas), &gotQuotas); err != nil {
+		t.Fatalf("json.Unmarshal(TaskTypeQuotas) error = %v", err)
+	}
+	if gotQuotas["Feature迭代"] != 1 {
+		t.Fatalf("TaskTypeQuotas[%q] = %d, want 1", "Feature迭代", gotQuotas["Feature迭代"])
+	}
+	if gotQuotas["Bug修复"] != -1 {
+		t.Fatalf("TaskTypeQuotas[%q] = %d, want -1", "Bug修复", gotQuotas["Bug修复"])
+	}
+}
+
 func TestUpdateTaskSessionListAdjustsProjectQuota(t *testing.T) {
 	store := openTestStore(t)
 	defer store.Close()

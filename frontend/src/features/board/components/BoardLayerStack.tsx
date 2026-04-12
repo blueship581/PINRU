@@ -31,11 +31,11 @@ export function BoardLayerStack({
   availableTaskTypes,
   statusOptions,
   localFolderOpening,
-  localFolderError,
+  actionError,
   onOpenLocalFolder,
-  onCloseTaskCardContextMenu,
   onTaskCardStatusChange,
   onTaskCardTaskTypeChange,
+  onTaskCardGeneratePrompt,
   showProjectOverview,
   activeProject,
   visibleProjectTaskSummaries,
@@ -54,7 +54,6 @@ export function BoardLayerStack({
   onCloseDetailDrawer,
   projectQuotas,
   sourceModelName,
-  onOpenPrompt,
   onOpenSubmit,
   showProjectPanel,
   onCloseProjectPanel,
@@ -65,11 +64,11 @@ export function BoardLayerStack({
   availableTaskTypes: string[];
   statusOptions: TaskStatus[];
   localFolderOpening: boolean;
-  localFolderError: string;
+  actionError: string;
   onOpenLocalFolder: () => void;
-  onCloseTaskCardContextMenu: () => void;
   onTaskCardStatusChange: (status: TaskStatus) => void;
   onTaskCardTaskTypeChange: (taskType: string) => void;
+  onTaskCardGeneratePrompt: (constraints: string[], scope: string) => void;
   showProjectOverview: boolean;
   activeProject: ProjectConfig | null;
   visibleProjectTaskSummaries: TaskTypeOverviewSummary[];
@@ -88,7 +87,6 @@ export function BoardLayerStack({
   onCloseDetailDrawer: () => void;
   projectQuotas: TaskTypeQuotas;
   sourceModelName: string;
-  onOpenPrompt: () => void;
   onOpenSubmit: () => void;
   showProjectPanel: boolean;
   onCloseProjectPanel: () => void;
@@ -106,10 +104,11 @@ export function BoardLayerStack({
           statusChanging={detail.statusChanging}
           taskTypeChanging={detail.taskTypeChanging}
           localFolderOpening={localFolderOpening}
-          localFolderError={localFolderError}
+          actionError={actionError}
           onOpenLocalFolder={onOpenLocalFolder}
           onStatusChange={onTaskCardStatusChange}
           onTaskTypeChange={onTaskCardTaskTypeChange}
+          onGeneratePrompt={onTaskCardGeneratePrompt}
         />
       )}
 
@@ -212,8 +211,10 @@ export function BoardLayerStack({
           onSessionModelChange={(modelName) =>
             void detail.handleSessionModelChange(modelName)
           }
-          onOpenPrompt={onOpenPrompt}
           onOpenSubmit={onOpenSubmit}
+          llmProviders={detail.llmProviders}
+          promptGenerating={detail.promptGenerating}
+          onGeneratePrompt={(config) => void detail.handleGeneratePrompt(config)}
         />
       )}
 

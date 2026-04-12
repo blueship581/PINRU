@@ -128,12 +128,18 @@ export function TaskCard({
   onClick,
   onContextMenu,
   onDelete,
+  selectionMode,
+  selected,
+  onToggleSelect,
 }: {
   task: Task;
   size: CardSize;
   onClick: () => void;
   onContextMenu: (event: MouseEvent) => void;
   onDelete: () => void;
+  selectionMode?: boolean;
+  selected?: boolean;
+  onToggleSelect?: () => void;
 }) {
   const cfg = STATUS[task.status];
   const typePresentation = getTaskTypePresentation(task.taskType);
@@ -146,12 +152,26 @@ export function TaskCard({
     return (
       <motion.div
         layout
-        onClick={onClick}
+        onClick={selectionMode ? onToggleSelect : onClick}
         onContextMenu={onContextMenu}
-        className="group bg-white dark:bg-stone-900 border border-stone-200 dark:border-stone-800 rounded-2xl p-3.5 hover:border-stone-300 dark:hover:border-stone-700 hover:shadow-sm transition-all cursor-default"
+        className={`group bg-white dark:bg-stone-900 border rounded-2xl p-3.5 hover:border-stone-300 dark:hover:border-stone-700 hover:shadow-sm transition-all cursor-default ${
+          selectionMode && selected
+            ? 'border-indigo-500 dark:border-indigo-500'
+            : 'border-stone-200 dark:border-stone-800'
+        }`}
       >
         <div className="flex items-start justify-between gap-2 mb-2.5">
-          <div className={`w-1.5 h-1.5 rounded-full flex-shrink-0 mt-1 ${cfg.dotCls}`} />
+          {selectionMode ? (
+            <input
+              type="checkbox"
+              checked={selected ?? false}
+              onChange={onToggleSelect}
+              onClick={(e) => e.stopPropagation()}
+              className="mt-0.5 h-3.5 w-3.5 rounded accent-indigo-500 cursor-default flex-shrink-0"
+            />
+          ) : (
+            <div className={`w-1.5 h-1.5 rounded-full flex-shrink-0 mt-1 ${cfg.dotCls}`} />
+          )}
           <div className="flex items-center gap-1.5 ml-auto">
             {showPromptBadge && (
               <span
@@ -163,15 +183,17 @@ export function TaskCard({
             <span className={`text-[10px] px-2 py-0.5 rounded-lg font-bold border ${cfg.badgeCls}`}>
               {cfg.label}
             </span>
-            <button
-              onClick={(event) => {
-                event.stopPropagation();
-                onDelete();
-              }}
-              className="opacity-0 group-hover:opacity-100 transition-opacity p-1 rounded-lg text-stone-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-500/10 cursor-default"
-            >
-              <Trash2 className="w-3 h-3" />
-            </button>
+            {!selectionMode && (
+              <button
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onDelete();
+                }}
+                className="opacity-0 group-hover:opacity-100 transition-opacity p-1 rounded-lg text-stone-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-500/10 cursor-default"
+              >
+                <Trash2 className="w-3 h-3" />
+              </button>
+            )}
           </div>
         </div>
         <p className="text-sm font-semibold text-stone-900 dark:text-stone-50 leading-snug line-clamp-1 mb-0.5">
@@ -212,13 +234,27 @@ export function TaskCard({
     return (
       <motion.div
         layout
-        onClick={onClick}
+        onClick={selectionMode ? onToggleSelect : onClick}
         onContextMenu={onContextMenu}
-        className="group bg-white dark:bg-stone-900 border border-stone-200 dark:border-stone-800 rounded-2xl p-5 hover:border-stone-300 dark:hover:border-stone-700 hover:shadow-sm transition-all cursor-default"
+        className={`group bg-white dark:bg-stone-900 border rounded-2xl p-5 hover:border-stone-300 dark:hover:border-stone-700 hover:shadow-sm transition-all cursor-default ${
+          selectionMode && selected
+            ? 'border-indigo-500 dark:border-indigo-500'
+            : 'border-stone-200 dark:border-stone-800'
+        }`}
       >
         <div className="flex items-center justify-between mb-3">
           <div className="flex items-center gap-2 flex-wrap">
-            <div className={`w-2 h-2 rounded-full ${cfg.dotCls}`} />
+            {selectionMode ? (
+              <input
+                type="checkbox"
+                checked={selected ?? false}
+                onChange={onToggleSelect}
+                onClick={(e) => e.stopPropagation()}
+                className="h-4 w-4 rounded accent-indigo-500 cursor-default flex-shrink-0"
+              />
+            ) : (
+              <div className={`w-2 h-2 rounded-full ${cfg.dotCls}`} />
+            )}
             <span className={`text-xs px-2.5 py-1 rounded-full font-bold border ${cfg.badgeCls}`}>
               {cfg.label}
             </span>
@@ -237,15 +273,17 @@ export function TaskCard({
             </span>
             <TaskRoundBadge rounds={task.executionRounds} />
           </div>
-          <button
-            onClick={(event) => {
-              event.stopPropagation();
-              onDelete();
-            }}
-            className="opacity-0 group-hover:opacity-100 transition-opacity p-1.5 rounded-lg text-stone-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-500/10 cursor-default"
-          >
-            <Trash2 className="w-3.5 h-3.5" />
-          </button>
+          {!selectionMode && (
+            <button
+              onClick={(event) => {
+                event.stopPropagation();
+                onDelete();
+              }}
+              className="opacity-0 group-hover:opacity-100 transition-opacity p-1.5 rounded-lg text-stone-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-500/10 cursor-default"
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+            </button>
+          )}
         </div>
         <p className="font-semibold text-base text-stone-900 dark:text-stone-50 leading-snug line-clamp-2 mb-1">
           {task.projectName}
@@ -286,26 +324,42 @@ export function TaskCard({
   return (
     <motion.div
       layout
-      onClick={onClick}
+      onClick={selectionMode ? onToggleSelect : onClick}
       onContextMenu={onContextMenu}
-      className="group bg-stone-50 dark:bg-stone-800/40 border border-stone-200 dark:border-stone-700 rounded-2xl p-4 hover:bg-white dark:hover:bg-stone-800 hover:border-stone-300 dark:hover:border-stone-600 hover:shadow-sm transition-all cursor-default"
+      className={`group bg-stone-50 dark:bg-stone-800/40 border rounded-2xl p-4 hover:bg-white dark:hover:bg-stone-800 hover:border-stone-300 dark:hover:border-stone-600 hover:shadow-sm transition-all cursor-default ${
+        selectionMode && selected
+          ? 'border-indigo-500 dark:border-indigo-500'
+          : 'border-stone-200 dark:border-stone-700'
+      }`}
     >
       <div className="flex items-center justify-between mb-3">
-        <div className={`w-1.5 h-1.5 rounded-full ${cfg.dotCls}`} />
+        {selectionMode ? (
+          <input
+            type="checkbox"
+            checked={selected ?? false}
+            onChange={onToggleSelect}
+            onClick={(e) => e.stopPropagation()}
+            className="h-4 w-4 rounded accent-indigo-500 cursor-default flex-shrink-0"
+          />
+        ) : (
+          <div className={`w-1.5 h-1.5 rounded-full ${cfg.dotCls}`} />
+        )}
         <div className="flex items-center gap-2">
           <span className="text-[11px] text-stone-400 dark:text-stone-500 flex items-center gap-1">
             <Clock className="w-3 h-3" />
             {new Date(task.createdAt * 1000).toLocaleDateString('zh-CN')}
           </span>
-          <button
-            onClick={(event) => {
-              event.stopPropagation();
-              onDelete();
-            }}
-            className="opacity-0 group-hover:opacity-100 transition-opacity p-1.5 rounded-lg text-stone-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-500/10 cursor-default"
-          >
-            <Trash2 className="w-3.5 h-3.5" />
-          </button>
+          {!selectionMode && (
+            <button
+              onClick={(event) => {
+                event.stopPropagation();
+                onDelete();
+              }}
+              className="opacity-0 group-hover:opacity-100 transition-opacity p-1.5 rounded-lg text-stone-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-500/10 cursor-default"
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+            </button>
+          )}
         </div>
       </div>
       <p className="font-semibold text-sm text-stone-900 dark:text-stone-50 mb-1 leading-snug line-clamp-2">
@@ -396,7 +450,9 @@ export function TaskTypeOverviewCard({
 }) {
   const presentation = getTaskTypePresentation(summary.taskType);
   const remainingLabel =
-    summary.remainingQuota === null ? '不限额' : `剩余 ${summary.remainingQuota}`;
+    summary.remainingToCompleteCount === null
+      ? '不限额'
+      : `待完成 ${summary.remainingToCompleteCount}`;
 
   return (
     <div className="rounded-2xl border border-stone-200 dark:border-stone-800 bg-stone-50/80 dark:bg-stone-950/40 px-4 py-4">
@@ -433,7 +489,7 @@ export function TaskTypeOverviewCard({
         <TaskGroupPreview
           label="待处理"
           tasks={summary.waitingTasks}
-          emptyText={summary.remainingQuota === 0 ? '当前没有待处理题卡' : '这个分类还没开始'}
+          emptyText={summary.remainingToCompleteCount === 0 ? '这个分类已经完成' : '这个分类还没开始'}
           onSelectTask={onSelectTask}
           onOpenTaskContextMenu={onOpenTaskContextMenu}
           tone="stone"

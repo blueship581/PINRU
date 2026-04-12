@@ -10,6 +10,7 @@ import type {
   GitHubAccountConfig,
   GitLabSettings,
   ProjectConfig,
+  TraeSettings,
 } from './config';
 import type {
   DirectoryInspectionResult,
@@ -17,6 +18,11 @@ import type {
   GitLabProjectLookupResult,
   NormalizeManagedSourceFoldersResult,
 } from './git';
+import type {
+  BackgroundJob,
+  JobFilter,
+  SubmitJobRequest,
+} from './job';
 import type {
   GeneratePromptRequest,
   LlmProviderConfig,
@@ -32,6 +38,8 @@ import type {
 } from './submit';
 import type {
   AddModelRunRequest,
+  BatchUpdateResult,
+  BatchUpdateTasksRequest,
   CreateTaskRequest,
   ExtractTaskSessionsResult,
   ModelRunFromDB,
@@ -88,6 +96,8 @@ export type WailsServiceContract = {
     CreateGitHubAccount: ServiceMethod<[account: GitHubAccountConfig], void>;
     UpdateGitHubAccount: ServiceMethod<[account: GitHubAccountConfig], void>;
     DeleteGitHubAccount: ServiceMethod<[id: string], void>;
+    GetTraeSettings: ServiceMethod<[], TraeSettings>;
+    SaveTraeSettings: ServiceMethod<[workspaceStoragePath: string, logsPath: string], void>;
   };
   GitService: {
     FetchGitLabProject: ServiceMethod<[projectRef: string, url: string, token: string], GitLabProject>;
@@ -126,6 +136,13 @@ export type WailsServiceContract = {
     SubmitModelRun: ServiceMethod<[request: SubmitModelRunRequest], SubmitModelRunResult>;
     SubmitAll: ServiceMethod<[request: SubmitAllRequest], SubmitAllResult>;
   };
+  JobService: {
+    SubmitJob: ServiceMethod<[request: SubmitJobRequest], BackgroundJob>;
+    ListJobs: ServiceMethod<[filter: JobFilter | null], BackgroundJob[]>;
+    GetJob: ServiceMethod<[id: string], BackgroundJob | null>;
+    RetryJob: ServiceMethod<[id: string], BackgroundJob>;
+    CancelJob: ServiceMethod<[id: string], void>;
+  };
   TaskService: {
     ListTasks: ServiceMethod<[projectConfigId: string | null], TaskFromDB[]>;
     GetTask: ServiceMethod<[id: string], TaskFromDB | null>;
@@ -141,5 +158,6 @@ export type WailsServiceContract = {
     UpdateModelRunSessionInfo: ServiceMethod<[request: UpdateModelRunSessionRequest], void>;
     AddModelRun: ServiceMethod<[request: AddModelRunRequest], void>;
     DeleteModelRun: ServiceMethod<[taskId: string, modelName: string], void>;
+    BatchUpdateTasks: ServiceMethod<[request: BatchUpdateTasksRequest], BatchUpdateResult>;
   };
 };

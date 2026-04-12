@@ -59,6 +59,42 @@ describe('taskTypeOverview helpers', () => {
       taskType: 'Bug修复',
       allocatedSessionCount: 1,
       remainingQuota: 9,
+      remainingToCompleteCount: 15,
+      totalTaskCount: 15,
+    }));
+  });
+
+  it('derives remaining work from submitted sessions when the allocation quota is depleted', () => {
+    const submittedTasks = Array.from({ length: 7 }, (_, index) =>
+      createTask({
+        id: `submitted-${index + 1}`,
+        status: 'Submitted',
+        taskType: 'Bug修复',
+        sessionList: [
+          {
+            sessionId: `sess-${index + 1}`,
+            taskType: 'Bug修复',
+            consumeQuota: true,
+            isCompleted: true,
+            isSatisfied: true,
+            evaluation: '',
+            userConversation: '',
+          },
+        ],
+      }),
+    );
+
+    const summaries = buildTaskTypeOverviewSummaries(
+      ['Bug修复'],
+      submittedTasks,
+      { Bug修复: 0 },
+      { Bug修复: 15 },
+    );
+
+    expect(summaries[0]).toEqual(expect.objectContaining({
+      remainingQuota: 0,
+      remainingToCompleteCount: 8,
+      submittedSessionCount: 7,
       totalTaskCount: 15,
     }));
   });
@@ -102,10 +138,12 @@ describe('taskTypeOverview helpers', () => {
 
     expect(bugSummary).toEqual(expect.objectContaining({
       allocatedSessionCount: 1,
+      remainingToCompleteCount: 15,
       totalTaskCount: 15,
     }));
     expect(featureSummary).toEqual(expect.objectContaining({
       allocatedSessionCount: 1,
+      remainingToCompleteCount: 8,
       totalTaskCount: 8,
     }));
   });

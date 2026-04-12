@@ -1,6 +1,7 @@
 import { Fragment, type MouseEvent } from 'react';
 import {
   AlignJustify,
+  CheckSquare,
   Grid2X2,
   LayoutGrid,
   Search,
@@ -57,6 +58,10 @@ export function BoardMainContent({
   onSelectTask,
   onOpenTaskContextMenu,
   onDeleteTask,
+  selectionMode,
+  selectedTaskIds,
+  onToggleSelectionMode,
+  onToggleTaskSelection,
 }: {
   search: string;
   sortBy: BoardSortOption;
@@ -88,6 +93,10 @@ export function BoardMainContent({
   onSelectTask: (task: Task) => void;
   onOpenTaskContextMenu: (event: MouseEvent, task: Task) => void;
   onDeleteTask: (task: Task) => void;
+  selectionMode: boolean;
+  selectedTaskIds: Set<string>;
+  onToggleSelectionMode: () => void;
+  onToggleTaskSelection: (taskId: string) => void;
 }) {
   return (
     <>
@@ -155,6 +164,18 @@ export function BoardMainContent({
             title="项目配置"
           >
             <Settings className="w-4 h-4" />
+          </button>
+
+          <button
+            onClick={onToggleSelectionMode}
+            className={`p-2 rounded-2xl border transition-colors cursor-default ${
+              selectionMode
+                ? 'bg-indigo-50 dark:bg-indigo-500/10 border-indigo-200 dark:border-indigo-500/20 text-indigo-600 dark:text-indigo-400'
+                : 'bg-white dark:bg-stone-900 border-stone-200 dark:border-stone-700 text-stone-500 dark:text-stone-400 hover:text-stone-700 dark:hover:text-stone-200'
+            }`}
+            title="多选模式"
+          >
+            <CheckSquare className="w-4 h-4" />
           </button>
 
           <button
@@ -325,6 +346,9 @@ export function BoardMainContent({
                           onClick={() => onSelectTask(task)}
                           onContextMenu={(event) => onOpenTaskContextMenu(event, task)}
                           onDelete={() => onDeleteTask(task)}
+                          selectionMode={selectionMode}
+                          selected={selectedTaskIds.has(task.id)}
+                          onToggleSelect={() => onToggleTaskSelection(task.id)}
                         />
                       </motion.div>
                     )}

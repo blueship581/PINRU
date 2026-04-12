@@ -12,6 +12,10 @@ import (
 	"github.com/blueship581/pinru/internal/util"
 )
 
+func strPtr(value string) *string {
+	return &value
+}
+
 func TestCreateTaskUsesProjectScopedIdentity(t *testing.T) {
 	testStore := testutil.OpenTestStore(t)
 	defer testStore.Close()
@@ -87,6 +91,53 @@ func TestCreateTaskRejectsDuplicateWithinSameProject(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "当前项目下题卡已存在") {
 		t.Fatalf("unexpected duplicate error = %q", err.Error())
+	}
+}
+
+func TestCreateTaskNormalizesStoredPaths(t *testing.T) {
+	testStore := testutil.OpenTestStore(t)
+	defer testStore.Close()
+
+	s := &TaskService{store: testStore}
+	localPath := "/tmp//pinru///label-01808-comparison"
+	sourcePath := "/tmp//pinru///label-01808-comparison////01808-comparison"
+
+	task, err := s.CreateTask(CreateTaskRequest{
+		GitLabProjectID: 1808,
+		ProjectName:     "label-01808",
+		TaskType:        "未归类",
+		LocalPath:       &localPath,
+		SourceModelName: strPtr("ORIGIN"),
+		SourceLocalPath: &sourcePath,
+		Models:          []string{"ORIGIN", "cotv21-pro"},
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+
+	if task.LocalPath == nil || *task.LocalPath != "/tmp/pinru/label-01808-comparison" {
+		t.Fatalf("task.LocalPath = %v, want normalized path", task.LocalPath)
+	}
+
+	runs, err := testStore.ListModelRuns(task.ID)
+	if err != nil {
+		t.Fatalf("ListModelRuns() error = %v", err)
+	}
+	if len(runs) != 2 {
+		t.Fatalf("ListModelRuns() count = %d, want 2", len(runs))
+	}
+
+	modelPaths := make(map[string]string, len(runs))
+	for _, run := range runs {
+		if run.LocalPath != nil {
+			modelPaths[run.ModelName] = *run.LocalPath
+		}
+	}
+	if modelPaths["ORIGIN"] != "/tmp/pinru/label-01808-comparison/01808-comparison" {
+		t.Fatalf("ORIGIN path = %q, want normalized source path", modelPaths["ORIGIN"])
+	}
+	if modelPaths["cotv21-pro"] != "/tmp/pinru/label-01808-comparison/cotv21-pro" {
+		t.Fatalf("cotv21-pro path = %q, want normalized model path", modelPaths["cotv21-pro"])
 	}
 }
 

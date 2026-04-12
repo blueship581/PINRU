@@ -17,6 +17,7 @@ import {
   type ProjectConfig,
   type TaskType,
 } from './api/config';
+import { listJobs, type BackgroundJob } from './api/job';
 
 export type { TaskType } from './api/config';
 
@@ -122,6 +123,9 @@ interface AppState {
   loadActiveProject: () => Promise<void>;
   setActiveProject: (project: ProjectConfig) => void;
   resetForNewProject: () => Promise<void>;
+  backgroundJobs: BackgroundJob[];
+  loadBackgroundJobs: () => Promise<void>;
+  updateBackgroundJob: (job: Partial<BackgroundJob> & { id: string }) => void;
 }
 
 export const useAppStore = create<AppState>((set) => ({
@@ -244,4 +248,47 @@ export const useAppStore = create<AppState>((set) => ({
     await loadCloneModels();
     await loadTasks();
   },
+  backgroundJobs: [],
+  loadBackgroundJobs: async () => {
+    try {
+      const jobs = await listJobs();
+      set({ backgroundJobs: jobs });
+    } catch (err) {
+      console.error('Failed to load background jobs:', err);
+    }
+  },
+  updateBackgroundJob: (update) => set((state) => {
+    const exists = state.backgroundJobs.some((j) => j.id === update.id);
+    if (exists) {
+      return {
+        backgroundJobs: state.backgroundJobs.map((j) =>
+          j.id === update.id ? { ...j, ...update } : j,
+        ),
+      };
+    }
+
+    return {
+      backgroundJobs: [
+        {
+          id: update.id,
+          jobType: 'unknown',
+          taskId: null,
+          status: 'pending',
+          progress: 0,
+          progressMessage: null,
+          errorMessage: null,
+          inputPayload: '{}',
+          outputPayload: null,
+          retryCount: 0,
+          maxRetries: 0,
+          timeoutSeconds: 0,
+          createdAt: Math.floor(Date.now() / 1000),
+          startedAt: null,
+          finishedAt: null,
+          ...update,
+        },
+        ...state.backgroundJobs,
+      ],
+    };
+  }),
 }));

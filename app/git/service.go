@@ -101,19 +101,45 @@ func (s *GitService) FetchConfiguredGitLabProjects(projectRefs []string) ([]GitL
 	return s.FetchGitLabProjects(projectRefs, url, token), nil
 }
 
+func (s *GitService) cloneProjectWithProgress(cloneURL, path, username, token string, onProgress func(string)) error {
+	progress := onProgress
+	if progress == nil {
+		progress = func(string) {}
+	}
+	return gitops.CloneWithProgress(cloneURL, path, username, token, progress)
+}
+
 func (s *GitService) CloneProject(cloneURL, path, username, token string) error {
 	app := application.Get()
-	return gitops.CloneWithProgress(cloneURL, path, username, token, func(msg string) {
+	return s.cloneProjectWithProgress(cloneURL, path, username, token, func(msg string) {
 		app.Event.Emit("clone-progress", msg)
 	})
 }
 
+func (s *GitService) CloneProjectWithProgress(
+	cloneURL,
+	path,
+	username,
+	token string,
+	onProgress func(string),
+) error {
+	return s.cloneProjectWithProgress(cloneURL, path, username, token, onProgress)
+}
+
 func (s *GitService) CloneConfiguredProject(cloneURL, path string) error {
+	return s.CloneConfiguredProjectWithProgress(cloneURL, path, nil)
+}
+
+func (s *GitService) CloneConfiguredProjectWithProgress(
+	cloneURL,
+	path string,
+	onProgress func(string),
+) error {
 	_, username, token, err := s.loadConfiguredGitLabCredentials()
 	if err != nil {
 		return err
 	}
-	return s.CloneProject(cloneURL, path, username, token)
+	return s.cloneProjectWithProgress(cloneURL, path, username, token, onProgress)
 }
 
 func (s *GitService) DownloadGitLabProject(projectID int64, url, token, destination string, sha *string) error {

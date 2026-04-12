@@ -3,7 +3,7 @@ import { Events } from '@wailsio/runtime';
 
 export type ThinkingDepth = '' | 'think' | 'think harder' | 'ultrathink';
 export type ExecMode = 'agent' | 'plan';
-export type PermissionMode = 'default' | 'yolo';
+export type PermissionMode = 'default' | 'yolo' | 'bypassPermissions';
 
 export interface StartClaudeRequest {
   workDir: string;
@@ -11,6 +11,8 @@ export interface StartClaudeRequest {
   model: string;
   thinkingDepth: ThinkingDepth;
   mode: ExecMode;
+  permissionMode?: PermissionMode;
+  additionalDirs?: string[];
 }
 
 export interface StartClaudeResponse {

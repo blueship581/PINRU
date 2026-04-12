@@ -5,11 +5,28 @@ import type { LlmProviderConfig, LlmProviderType } from '../../../api/llm';
 type SaveStatus = 'idle' | 'saved' | 'error';
 
 export function defaultBaseUrl(providerType: LlmProviderType) {
-  return providerType === 'anthropic' ? 'https://api.anthropic.com/v1' : 'https://api.openai.com/v1';
+  if (providerType === 'anthropic') return 'https://api.anthropic.com/v1';
+  if (providerType === 'claude_code_acp') return 'Claude Code CLI (本地)';
+  if (providerType === 'codex_acp') return 'Codex CLI (本地)';
+  return 'https://api.openai.com/v1';
 }
 
 export function providerTypeLabel(providerType: LlmProviderType) {
-  return providerType === 'anthropic' ? 'Anthropic' : 'OpenAI 兼容';
+  if (providerType === 'anthropic') return 'Anthropic';
+  if (providerType === 'claude_code_acp') return 'ACP';
+  if (providerType === 'codex_acp') return 'ACP';
+  return 'OpenAI 兼容';
+}
+
+export function isAcpProvider(providerType: LlmProviderType) {
+  return providerType === 'claude_code_acp' || providerType === 'codex_acp';
+}
+
+export function normalizeProviderType(providerType: string | null | undefined): LlmProviderType {
+  if (providerType === 'anthropic') return 'anthropic';
+  if (providerType === 'claude_code_acp') return 'claude_code_acp';
+  if (providerType === 'codex_acp') return 'codex_acp';
+  return 'openai_compatible';
 }
 
 export function normalizeProviders(providers: LlmProviderConfig[]) {
@@ -22,10 +39,6 @@ export function normalizeProviders(providers: LlmProviderConfig[]) {
     providerType: normalizeProviderType(provider.providerType),
     isDefault: hasDefault ? provider.isDefault : index === 0,
   }));
-}
-
-export function normalizeProviderType(providerType: string | null | undefined): LlmProviderType {
-  return providerType === 'anthropic' ? 'anthropic' : 'openai_compatible';
 }
 
 export function normalizeGitHubAccounts(accounts: GitHubAccountConfig[]) {

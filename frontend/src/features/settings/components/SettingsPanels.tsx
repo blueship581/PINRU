@@ -1,15 +1,21 @@
-import { type ReactNode } from 'react';
+import { type ReactNode, useState } from 'react';
 import {
+  Bot,
+  Check,
+  ChevronRight,
   Edit2,
   Github,
   Link2,
   Loader2,
   Plus,
+  Search,
   ShieldCheck,
+  Terminal,
   Trash2,
   X,
+  Zap,
 } from 'lucide-react';
-import type { GitHubAccountConfig, ProjectConfig } from '../../../api/config';
+import type { GitHubAccountConfig } from '../../../api/config';
 import type { LlmProviderConfig, LlmProviderType } from '../../../api/llm';
 import {
   EmptyState,
@@ -25,6 +31,7 @@ import {
 import {
   defaultBaseUrl,
   describeSecret,
+  isAcpProvider,
   providerTypeLabel,
 } from '../utils/settingsUtils';
 
@@ -332,6 +339,46 @@ export function GitHubAccountsPanel({
   );
 }
 
+// ---- Provider icon helpers ----
+function ProviderIcon({ providerType, name }: { providerType: LlmProviderType; name: string }) {
+  if (providerType === 'claude_code_acp') {
+    return (
+      <span className="flex items-center justify-center w-8 h-8 rounded-xl bg-[#CC785C]/10 text-[#CC785C] text-sm font-bold flex-shrink-0">
+        {'> _'}
+      </span>
+    );
+  }
+  if (providerType === 'codex_acp') {
+    return (
+      <span className="flex items-center justify-center w-8 h-8 rounded-xl bg-emerald-100 dark:bg-emerald-900/30 text-emerald-600 dark:text-emerald-400 flex-shrink-0">
+        <Terminal className="w-4 h-4" />
+      </span>
+    );
+  }
+  if (providerType === 'anthropic') {
+    return (
+      <span className="flex items-center justify-center w-8 h-8 rounded-xl bg-amber-100 dark:bg-amber-900/30 text-amber-600 dark:text-amber-400 flex-shrink-0">
+        <Bot className="w-4 h-4" />
+      </span>
+    );
+  }
+  // openai_compatible — derive color from name
+  const colors = [
+    'bg-blue-100 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400',
+    'bg-violet-100 dark:bg-violet-900/30 text-violet-600 dark:text-violet-400',
+    'bg-pink-100 dark:bg-pink-900/30 text-pink-600 dark:text-pink-400',
+    'bg-cyan-100 dark:bg-cyan-900/30 text-cyan-600 dark:text-cyan-400',
+  ];
+  const idx = name.charCodeAt(0) % colors.length;
+  return (
+    <span
+      className={`flex items-center justify-center w-8 h-8 rounded-xl ${colors[idx]} text-sm font-bold flex-shrink-0`}
+    >
+      {name.slice(0, 1).toUpperCase()}
+    </span>
+  );
+}
+
 export function LlmProvidersPanel({
   llmLoadError,
   llmSaveStatus,
@@ -339,6 +386,7 @@ export function LlmProvidersPanel({
   testingProviderId,
   providerTestStatus,
   onCreateProvider,
+  onCreateAcpProvider,
   onSetDefaultProvider,
   onTestProvider,
   onEditProvider,
@@ -350,198 +398,358 @@ export function LlmProvidersPanel({
   testingProviderId: string;
   providerTestStatus: Record<string, ProviderTestResult>;
   onCreateProvider: () => void;
+  onCreateAcpProvider: () => void;
   onSetDefaultProvider: (providerId: string) => void;
   onTestProvider: (provider: LlmProviderConfig) => void;
   onEditProvider: (provider: LlmProviderConfig) => void;
   onDeleteProvider: (providerId: string) => void;
 }) {
+  const [selectedId, setSelectedId] = useState<string | null>(
+    llmProviders.length > 0 ? llmProviders[0].id : null,
+  );
+  const [search, setSearch] = useState('');
+
+  const selected = llmProviders.find((p) => p.id === selectedId) ?? llmProviders[0] ?? null;
+
+  const filtered = search.trim()
+    ? llmProviders.filter(
+        (p) =>
+          p.name.toLowerCase().includes(search.toLowerCase()) ||
+          p.model.toLowerCase().includes(search.toLowerCase()),
+      )
+    : llmProviders;
+
+  const testResult = selected ? providerTestStatus[selected.id] : null;
+  const isTesting = selected ? testingProviderId === selected.id : false;
+
   return (
-    <section className="animate-in fade-in duration-150">
+    <section className="animate-in fade-in duration-150 h-full flex flex-col">
       <SectionHead
-        title="大语言模型提供商"
-        description="第二阶段的提示词工坊会直接读取这里的配置并调用对应接口"
+        title="提供商"
+        description="配置 AI 模型提供商，支持 ACP 协议和 OpenAI 兼容接口"
       />
 
-      <div className="max-w-3xl">
-        {llmLoadError && (
-          <div className="mb-5">
-            <ErrorMsg msg={llmLoadError} />
-          </div>
-        )}
+      {llmLoadError && (
+        <div className="mb-4">
+          <ErrorMsg msg={llmLoadError} />
+        </div>
+      )}
 
-        <div className="flex flex-wrap items-center justify-between gap-3 mb-5">
-          <div className="text-sm text-stone-500 dark:text-stone-400">
-            支持 OpenAI 兼容接口和 Anthropic。DeepSeek、OpenRouter、通义等兼容接口请选择 OpenAI 兼容。
+      {/* Top action bar */}
+      <div className="flex items-center justify-end gap-2 mb-4">
+        {llmSaveStatus === 'saved' && <StatusBadge ok>已保存</StatusBadge>}
+        {llmSaveStatus === 'error' && <StatusBadge>保存失败</StatusBadge>}
+        <button
+          onClick={onCreateAcpProvider}
+          className="px-4 py-2 rounded-xl border border-stone-300 dark:border-stone-700 bg-white dark:bg-stone-800 hover:bg-stone-50 dark:hover:bg-stone-700 text-stone-700 dark:text-stone-300 text-sm font-medium transition-colors flex items-center gap-1.5 cursor-default"
+        >
+          <Terminal className="w-3.5 h-3.5" />
+          添加 ACP 提供商
+        </button>
+        <button
+          onClick={onCreateProvider}
+          className="px-4 py-2 rounded-xl bg-[#111827] hover:bg-[#1F2937] dark:bg-[#E5EAF2] dark:hover:bg-[#F3F6FB] text-white dark:text-[#0D1117] text-sm font-medium transition-colors flex items-center gap-1.5 cursor-default shadow-sm"
+        >
+          <Plus className="w-3.5 h-3.5" />
+          添加自定义提供商
+        </button>
+      </div>
+
+      {/* Main split layout */}
+      <div className="flex-1 flex gap-0 border border-stone-200 dark:border-stone-700 rounded-2xl overflow-hidden min-h-0" style={{ height: '480px' }}>
+        {/* Left: provider list */}
+        <div className="w-56 flex-shrink-0 border-r border-stone-200 dark:border-stone-700 flex flex-col bg-stone-50 dark:bg-stone-900/50">
+          {/* Search */}
+          <div className="p-3 border-b border-stone-200 dark:border-stone-700">
+            <div className="relative">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-stone-400 pointer-events-none" />
+              <input
+                type="text"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder="搜索提供商..."
+                className="w-full pl-8 pr-3 py-1.5 text-xs bg-white dark:bg-stone-800 border border-stone-200 dark:border-stone-700 rounded-lg focus:outline-none focus:ring-1 focus:ring-slate-400/50 placeholder:text-stone-400 text-stone-700 dark:text-stone-300"
+              />
+            </div>
           </div>
-          <div className="flex items-center gap-3">
-            {llmSaveStatus === 'saved' && <StatusBadge ok>已保存</StatusBadge>}
-            {llmSaveStatus === 'error' && <StatusBadge>保存失败</StatusBadge>}
-            <button onClick={onCreateProvider} className={btnPrimary}>
-              <Plus className="w-4 h-4" />
-              添加提供商
-            </button>
+
+          {/* Provider list */}
+          <div className="flex-1 overflow-y-auto">
+            {filtered.length === 0 ? (
+              <p className="text-center text-xs text-stone-400 py-8">暂无提供商</p>
+            ) : (
+              filtered.map((provider) => (
+                <button
+                  key={provider.id}
+                  onClick={() => setSelectedId(provider.id)}
+                  className={`w-full flex items-center gap-2.5 px-3 py-3 text-left transition-colors cursor-default border-b border-stone-200/50 dark:border-stone-700/50 last:border-0 ${
+                    selected?.id === provider.id
+                      ? 'bg-white dark:bg-stone-800 shadow-sm'
+                      : 'hover:bg-white/60 dark:hover:bg-stone-800/40'
+                  }`}
+                >
+                  <ProviderIcon providerType={provider.providerType} name={provider.name} />
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-xs font-semibold text-stone-800 dark:text-stone-200 truncate">
+                        {provider.name}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-1 mt-0.5">
+                      {isAcpProvider(provider.providerType) && (
+                        <span className="text-[10px] font-bold uppercase tracking-wider text-violet-600 dark:text-violet-400 bg-violet-50 dark:bg-violet-900/30 px-1.5 py-0.5 rounded-full">
+                          ACP
+                        </span>
+                      )}
+                      {provider.isDefault && (
+                        <span className="text-[10px] font-bold uppercase tracking-wider text-emerald-600 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-900/30 px-1.5 py-0.5 rounded-full">
+                          默认
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                  {selected?.id === provider.id && (
+                    <ChevronRight className="w-3.5 h-3.5 text-stone-400 flex-shrink-0" />
+                  )}
+                </button>
+              ))
+            )}
           </div>
         </div>
 
-        {!llmProviders.length ? (
-          <EmptyState
-            title="还没有配置大语言模型"
-            description="添加至少一个提供商后，提示词工坊才能在第二阶段生成真实提示词。"
-          />
-        ) : (
-          <div className="space-y-3">
-            {llmProviders.map((provider) => (
-              <div
-                key={provider.id}
-                className="p-5 rounded-3xl bg-stone-50 dark:bg-stone-800/50 border border-stone-200 dark:border-stone-700"
-              >
-                <div className="flex items-start justify-between gap-4">
-                  <div className="min-w-0">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <span className="text-sm font-semibold text-stone-800 dark:text-stone-200">
-                        {provider.name}
-                      </span>
-                      {provider.isDefault && <MiniBadge ok>默认</MiniBadge>}
-                      <MiniBadge>{providerTypeLabel(provider.providerType)}</MiniBadge>
-                    </div>
-                    <p className="text-sm text-stone-500 dark:text-stone-400 mt-1">
-                      {provider.model}
-                    </p>
-                    <div className="mt-3 space-y-1 text-xs text-stone-500 dark:text-stone-400">
-                      <p>
-                        Base URL: {provider.baseUrl?.trim() || defaultBaseUrl(provider.providerType)}
-                      </p>
-                      <p>
-                        API Key: {describeSecret(Boolean(provider.hasApiKey), provider.apiKey)}
-                      </p>
-                    </div>
-                  </div>
-
-                  <div className="flex flex-wrap items-center justify-end gap-2">
-                    {!provider.isDefault && (
-                      <button
-                        onClick={() => onSetDefaultProvider(provider.id)}
-                        className={btnSecondary}
-                      >
-                        <ShieldCheck className="w-4 h-4" />
-                        设为默认
-                      </button>
-                    )}
-                    <button
-                      onClick={() => onTestProvider(provider)}
-                      disabled={testingProviderId === provider.id}
-                      className={btnSecondary}
-                    >
-                      {testingProviderId === provider.id ? (
-                        <Loader2 className="w-4 h-4 animate-spin" />
-                      ) : (
-                        <Link2 className="w-4 h-4" />
+        {/* Right: provider detail */}
+        <div className="flex-1 overflow-y-auto p-6">
+          {!selected ? (
+            <div className="h-full flex items-center justify-center">
+              <p className="text-sm text-stone-400">选择左侧的提供商查看详情</p>
+            </div>
+          ) : (
+            <div className="space-y-5">
+              {/* Header */}
+              <div className="flex items-start justify-between gap-4">
+                <div className="flex items-center gap-3">
+                  <ProviderIcon providerType={selected.providerType} name={selected.name} />
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <h3 className="text-base font-bold text-stone-900 dark:text-stone-50">
+                        {selected.name}
+                      </h3>
+                      {selected.isDefault && <MiniBadge ok>默认</MiniBadge>}
+                      {isAcpProvider(selected.providerType) && (
+                        <span className="text-[10px] font-bold uppercase tracking-wider text-violet-600 dark:text-violet-400 bg-violet-50 dark:bg-violet-900/30 px-2 py-0.5 rounded-full">
+                          ACP
+                        </span>
                       )}
-                      测试
-                    </button>
-                    <IconBtn title="编辑" onClick={() => onEditProvider(provider)}>
-                      <Edit2 className="w-3.5 h-3.5" />
-                    </IconBtn>
-                    <IconBtn
-                      title="删除"
-                      danger
-                      onClick={() => onDeleteProvider(provider.id)}
-                    >
-                      <Trash2 className="w-3.5 h-3.5" />
-                    </IconBtn>
+                    </div>
+                    <p className="text-xs text-stone-500 dark:text-stone-400 mt-0.5">
+                      {providerTypeLabel(selected.providerType)}
+                    </p>
                   </div>
                 </div>
 
-                {providerTestStatus[provider.id] && (
-                  <div className="mt-4 pt-4 border-t border-stone-200 dark:border-stone-700">
-                    {providerTestStatus[provider.id]?.status === 'success' ? (
-                      <StatusBadge ok>{providerTestStatus[provider.id]?.message}</StatusBadge>
-                    ) : (
-                      <ErrorMsg
-                        msg={providerTestStatus[provider.id]?.message || '连接失败'}
-                      />
-                    )}
+                {/* Connect / Test button */}
+                <button
+                  onClick={() => onTestProvider(selected)}
+                  disabled={isTesting}
+                  className={`px-4 py-2 rounded-xl text-sm font-semibold transition-colors flex items-center gap-1.5 cursor-default flex-shrink-0 ${
+                    testResult?.status === 'success'
+                      ? 'bg-emerald-50 dark:bg-emerald-900/20 text-emerald-700 dark:text-emerald-400 border border-emerald-200 dark:border-emerald-800'
+                      : testResult?.status === 'error'
+                        ? 'bg-red-50 dark:bg-red-900/20 text-red-700 dark:text-red-400 border border-red-200 dark:border-red-800'
+                        : 'bg-[#111827] hover:bg-[#1F2937] dark:bg-[#E5EAF2] dark:hover:bg-[#F3F6FB] text-white dark:text-[#0D1117] shadow-sm'
+                  }`}
+                >
+                  {isTesting ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  ) : testResult?.status === 'success' ? (
+                    <Check className="w-3.5 h-3.5" />
+                  ) : (
+                    <Zap className="w-3.5 h-3.5" />
+                  )}
+                  {isTesting
+                    ? '测试中...'
+                    : testResult?.status === 'success'
+                      ? '已连接'
+                      : testResult?.status === 'error'
+                        ? '连接失败'
+                        : '测试连接'}
+                </button>
+              </div>
+
+              {/* Connection error */}
+              {testResult?.status === 'error' && (
+                <div className="rounded-xl bg-red-50 dark:bg-red-900/10 border border-red-200 dark:border-red-900/30 px-4 py-3">
+                  <p className="text-xs text-red-600 dark:text-red-400">{testResult.message}</p>
+                </div>
+              )}
+
+              {/* Info grid */}
+              <div className="rounded-xl border border-stone-200 dark:border-stone-700 divide-y divide-stone-100 dark:divide-stone-800 overflow-hidden">
+                <div className="px-4 py-3 flex items-center justify-between">
+                  <span className="text-xs font-medium text-stone-500 dark:text-stone-400">模型</span>
+                  <span className="text-xs font-semibold text-stone-800 dark:text-stone-200 font-mono">
+                    {selected.model || '—'}
+                  </span>
+                </div>
+                <div className="px-4 py-3 flex items-center justify-between">
+                  <span className="text-xs font-medium text-stone-500 dark:text-stone-400">Base URL</span>
+                  <span className="text-xs text-stone-600 dark:text-stone-300 font-mono truncate max-w-[260px]">
+                    {selected.baseUrl?.trim() || defaultBaseUrl(selected.providerType)}
+                  </span>
+                </div>
+                {!isAcpProvider(selected.providerType) && (
+                  <div className="px-4 py-3 flex items-center justify-between">
+                    <span className="text-xs font-medium text-stone-500 dark:text-stone-400">API Key</span>
+                    <span className="text-xs text-stone-600 dark:text-stone-300 font-mono">
+                      {describeSecret(Boolean(selected.hasApiKey), selected.apiKey)}
+                    </span>
                   </div>
                 )}
+                <div className="px-4 py-3 flex items-center justify-between">
+                  <span className="text-xs font-medium text-stone-500 dark:text-stone-400">协议类型</span>
+                  <span className="text-xs font-semibold text-stone-800 dark:text-stone-200">
+                    {providerTypeLabel(selected.providerType)}
+                  </span>
+                </div>
               </div>
-            ))}
-          </div>
-        )}
+
+              {/* ACP description */}
+              {isAcpProvider(selected.providerType) && (
+                <div className="rounded-xl bg-violet-50 dark:bg-violet-900/10 border border-violet-200 dark:border-violet-900/30 px-4 py-3">
+                  <p className="text-xs text-violet-700 dark:text-violet-400 leading-relaxed">
+                    {selected.providerType === 'claude_code_acp'
+                      ? 'Claude Code ACP 通过本地 Claude Code CLI 调用，无需配置 API Key。请确保 Claude Code CLI 已安装并登录。'
+                      : 'Codex ACP 通过本地 OpenAI Codex CLI 调用，无需配置 API Key。请确保 Codex CLI 已安装并配置。'}
+                  </p>
+                </div>
+              )}
+
+              {/* Actions */}
+              <div className="flex items-center gap-2 pt-2 border-t border-stone-100 dark:border-stone-800">
+                {!selected.isDefault && (
+                  <button
+                    onClick={() => onSetDefaultProvider(selected.id)}
+                    className="px-4 py-2 rounded-xl border border-stone-300 dark:border-stone-700 bg-white dark:bg-stone-800 hover:bg-stone-50 dark:hover:bg-stone-700 text-stone-700 dark:text-stone-300 text-sm font-medium transition-colors flex items-center gap-1.5 cursor-default"
+                  >
+                    <ShieldCheck className="w-3.5 h-3.5" />
+                    设为默认
+                  </button>
+                )}
+                <button
+                  onClick={() => onEditProvider(selected)}
+                  className="px-4 py-2 rounded-xl border border-stone-300 dark:border-stone-700 bg-white dark:bg-stone-800 hover:bg-stone-50 dark:hover:bg-stone-700 text-stone-700 dark:text-stone-300 text-sm font-medium transition-colors flex items-center gap-1.5 cursor-default"
+                >
+                  <Edit2 className="w-3.5 h-3.5" />
+                  编辑
+                </button>
+                <button
+                  onClick={() => onDeleteProvider(selected.id)}
+                  className="px-4 py-2 rounded-xl border border-red-200 dark:border-red-900/40 bg-white dark:bg-stone-800 hover:bg-red-50 dark:hover:bg-red-900/10 text-red-600 dark:text-red-400 text-sm font-medium transition-colors flex items-center gap-1.5 cursor-default ml-auto"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                  删除
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
       </div>
     </section>
   );
 }
 
 export function GeneralSettingsPanel({
-  loading,
-  projectLoadError,
   theme,
   onThemeChange,
-  activeProject,
-  defaultGithubAccount,
+  traeWorkspaceStoragePath,
+  traeLogsPath,
+  traeDefaultWorkspaceStoragePath,
+  traeDefaultLogsPath,
+  traePathSaveStatus,
+  onTraeWorkspaceStoragePathChange,
+  onTraeLogsPathChange,
+  onTraePathsSave,
 }: {
-  loading: boolean;
-  projectLoadError: string;
   theme: 'light' | 'dark';
   onThemeChange: (theme: 'light' | 'dark') => void;
-  activeProject: ProjectConfig | null;
-  defaultGithubAccount: GitHubAccountConfig | null;
+  traeWorkspaceStoragePath: string;
+  traeLogsPath: string;
+  traeDefaultWorkspaceStoragePath: string;
+  traeDefaultLogsPath: string;
+  traePathSaveStatus: 'idle' | 'saved' | 'error';
+  onTraeWorkspaceStoragePathChange: (value: string) => void;
+  onTraeLogsPathChange: (value: string) => void;
+  onTraePathsSave: () => void;
 }) {
   return (
     <section className="max-w-lg animate-in fade-in duration-150">
-      <SectionHead
-        title="通用设置"
-        description="主题配置会立即生效；项目请在侧边栏顶部切换，在左下角入口新建"
-      />
+      <SectionHead title="通用设置" description="选择界面配色，切换后立即生效" />
 
-      {loading ? (
-        <Spinner />
-      ) : (
-        <div className="space-y-6">
-          {projectLoadError && <ErrorMsg msg={projectLoadError} />}
-
-          <Field label="主题">
-            <div className="flex gap-5">
-              {(['light', 'dark'] as const).map((nextTheme) => (
-                <label key={nextTheme} className="flex items-center gap-2.5 cursor-default">
-                  <input
-                    type="radio"
-                    name="theme"
-                    checked={theme === nextTheme}
-                    onChange={() => onThemeChange(nextTheme)}
-                    className="w-4 h-4 text-slate-700 dark:text-slate-300 focus:ring-slate-400/30 cursor-default"
-                  />
-                  <span className="text-sm font-medium text-stone-700 dark:text-stone-300">
-                    {nextTheme === 'light' ? '浅色' : '深色'}
-                  </span>
-                </label>
-              ))}
-            </div>
-          </Field>
-          <div className="rounded-2xl bg-stone-50 dark:bg-stone-800/50 border border-stone-200 dark:border-stone-700 px-4 py-3 text-sm text-stone-500 dark:text-stone-400">
-            当前项目可在侧边栏顶部直接切换；项目名称、项目目录、模型列表、源码模型和源码仓库请使用左下角“新建项目”入口或看板内的项目配置抽屉管理。
+      <div className="space-y-6">
+        <Field label="主题">
+          <div className="flex gap-5">
+            {(['light', 'dark'] as const).map((nextTheme) => (
+              <label key={nextTheme} className="flex items-center gap-2.5 cursor-default">
+                <input
+                  type="radio"
+                  name="theme"
+                  checked={theme === nextTheme}
+                  onChange={() => onThemeChange(nextTheme)}
+                  className="w-4 h-4 text-slate-700 dark:text-slate-300 focus:ring-slate-400/30 cursor-default"
+                />
+                <span className="text-sm font-medium text-stone-700 dark:text-stone-300">
+                  {nextTheme === 'light' ? '浅色' : '深色'}
+                </span>
+              </label>
+            ))}
           </div>
-          <div className="rounded-2xl bg-stone-50 dark:bg-stone-800/50 border border-stone-200 dark:border-stone-700 px-4 py-4 space-y-2">
-            <p className="text-sm font-semibold text-stone-800 dark:text-stone-200">
-              提交流程默认值
-            </p>
-            <InfoText label="当前项目">{activeProject?.name || '未设置'}</InfoText>
-            <InfoText label="源码模型">
-              {activeProject?.sourceModelFolder || 'ORIGIN'}
-            </InfoText>
-            <InfoText label="源码仓库">
-              {activeProject?.defaultSubmitRepo || '自动生成'}
-            </InfoText>
-            <InfoText label="默认 GitHub 账号">
-              {defaultGithubAccount
-                ? `${defaultGithubAccount.name} · @${defaultGithubAccount.username}`
-                : '未设置'}
-            </InfoText>
-            <InfoText label="默认 PR 标题">当前模型名称</InfoText>
-            <InfoText label="默认 PR 说明">空</InfoText>
+        </Field>
+
+        <div className="pt-4 border-t border-stone-100 dark:border-stone-800">
+          <p className="text-sm font-semibold text-stone-800 dark:text-stone-200 mb-1">
+            Trae IDE 路径配置
+          </p>
+          <p className="text-xs text-stone-500 dark:text-stone-400 mb-4">
+            用于从 Trae IDE 日志读取 session ID。留空则使用当前平台的默认路径。
+          </p>
+
+          <div className="space-y-4">
+            <Field
+              label="workspaceStorage 路径"
+              hint={traeDefaultWorkspaceStoragePath ? `默认：${traeDefaultWorkspaceStoragePath}` : undefined}
+            >
+              <input
+                type="text"
+                value={traeWorkspaceStoragePath}
+                onChange={(event) => onTraeWorkspaceStoragePathChange(event.target.value)}
+                placeholder={traeDefaultWorkspaceStoragePath || '留空使用平台默认路径'}
+                className={inputCls}
+              />
+            </Field>
+
+            <Field
+              label="logs 路径"
+              hint={traeDefaultLogsPath ? `默认：${traeDefaultLogsPath}` : undefined}
+            >
+              <input
+                type="text"
+                value={traeLogsPath}
+                onChange={(event) => onTraeLogsPathChange(event.target.value)}
+                placeholder={traeDefaultLogsPath || '留空使用平台默认路径'}
+                className={inputCls}
+              />
+            </Field>
+
+            <div className="flex items-center justify-end gap-3">
+              {traePathSaveStatus === 'saved' && <StatusBadge ok>已保存</StatusBadge>}
+              {traePathSaveStatus === 'error' && <StatusBadge>保存失败</StatusBadge>}
+              <button onClick={onTraePathsSave} className={btnPrimary}>
+                保存路径
+              </button>
+            </div>
           </div>
         </div>
-      )}
+      </div>
     </section>
   );
 }
@@ -749,6 +957,7 @@ export function ProviderModal({
   form,
   error,
   saving,
+  acpOnly,
   onClose,
   onNameChange,
   onProviderTypeChange,
@@ -761,6 +970,7 @@ export function ProviderModal({
   form: ProviderFormState;
   error: string;
   saving: boolean;
+  acpOnly?: boolean;
   onClose: () => void;
   onNameChange: (value: string) => void;
   onProviderTypeChange: (value: LlmProviderType) => void;
@@ -770,10 +980,11 @@ export function ProviderModal({
   onDefaultChange: (value: boolean) => void;
   onSave: () => void;
 }) {
+  const isAcp = isAcpProvider(form.providerType);
   return (
     <SettingsModalShell
-      title={form.id ? '编辑模型提供商' : '添加模型提供商'}
-      description="第二阶段提示词工坊会直接读取这里的配置"
+      title={form.id ? '编辑模型提供商' : acpOnly ? '添加 ACP 提供商' : '添加自定义提供商'}
+      description={acpOnly ? '通过本地 CLI 调用模型，无需 API Key' : '提示词工坊会直接读取这里的配置'}
       onClose={onClose}
     >
       <div className="space-y-4">
@@ -782,7 +993,7 @@ export function ProviderModal({
             type="text"
             value={form.name}
             onChange={(event) => onNameChange(event.target.value)}
-            placeholder="例如：OpenAI Production"
+            placeholder={acpOnly ? '例如：Claude Code ACP' : '例如：DeepSeek Production'}
             className={inputCls}
           />
         </Field>
@@ -793,12 +1004,21 @@ export function ProviderModal({
             onChange={(event) => onProviderTypeChange(event.target.value as LlmProviderType)}
             className={inputCls}
           >
-            <option value="openai_compatible">OpenAI 兼容</option>
-            <option value="anthropic">Anthropic</option>
+            {acpOnly ? (
+              <>
+                <option value="claude_code_acp">Claude Code (ACP)</option>
+                <option value="codex_acp">Codex CLI (ACP)</option>
+              </>
+            ) : (
+              <>
+                <option value="openai_compatible">OpenAI 兼容（DeepSeek、千问、豆包等）</option>
+                <option value="anthropic">Anthropic</option>
+              </>
+            )}
           </select>
         </Field>
 
-        <Field label="模型名称" hint="例如 gpt-4.1、deepseek-chat、claude-3-7-sonnet-20250219">
+        <Field label="模型名称" hint={isAcp ? '例如 claude-sonnet-4-5、codex-mini-latest' : '例如 deepseek-chat、qwen-max、gpt-4.1'}>
           <input
             type="text"
             value={form.model}
@@ -808,29 +1028,41 @@ export function ProviderModal({
           />
         </Field>
 
-        <Field label="Base URL" hint={`留空时默认使用 ${defaultBaseUrl(form.providerType)}`}>
-          <input
-            type="text"
-            value={form.baseUrl}
-            onChange={(event) => onBaseUrlChange(event.target.value)}
-            placeholder={defaultBaseUrl(form.providerType)}
-            className={inputCls}
-          />
-        </Field>
+        {!isAcp && (
+          <Field label="Base URL" hint={`留空时默认使用 ${defaultBaseUrl(form.providerType)}`}>
+            <input
+              type="text"
+              value={form.baseUrl}
+              onChange={(event) => onBaseUrlChange(event.target.value)}
+              placeholder={defaultBaseUrl(form.providerType)}
+              className={inputCls}
+            />
+          </Field>
+        )}
 
-        <Field
-          label="API Key"
-          required={!form.id || !form.hasApiKey}
-          hint={form.id && form.hasApiKey ? '已保存 API Key；留空则保留当前值' : undefined}
-        >
-          <input
-            type="password"
-            value={form.apiKey}
-            onChange={(event) => onApiKeyChange(event.target.value)}
-            placeholder={form.id && form.hasApiKey ? '留空则保留当前值' : 'sk-...'}
-            className={inputCls}
-          />
-        </Field>
+        {!isAcp && (
+          <Field
+            label="API Key"
+            required={!form.id || !form.hasApiKey}
+            hint={form.id && form.hasApiKey ? '已保存 API Key；留空则保留当前值' : undefined}
+          >
+            <input
+              type="password"
+              value={form.apiKey}
+              onChange={(event) => onApiKeyChange(event.target.value)}
+              placeholder={form.id && form.hasApiKey ? '留空则保留当前值' : 'sk-...'}
+              className={inputCls}
+            />
+          </Field>
+        )}
+
+        {isAcp && (
+          <div className="rounded-xl bg-violet-50 dark:bg-violet-900/10 border border-violet-200 dark:border-violet-900/30 px-4 py-3">
+            <p className="text-xs text-violet-700 dark:text-violet-400 leading-relaxed">
+              ACP 提供商通过本地 CLI 工具调用，无需配置 API Key。请确保对应 CLI 工具已安装并完成登录。
+            </p>
+          </div>
+        )}
 
         <label className="flex items-center gap-2.5 cursor-default">
           <input

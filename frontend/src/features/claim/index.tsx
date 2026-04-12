@@ -13,13 +13,17 @@ import {
 import { useNavigate } from 'react-router-dom';
 import { useAppStore } from '../../store';
 import {
-  copyProjectDirectory,
-  cloneConfiguredProject,
   checkPathsExist,
-  onCloneProgress,
   fetchConfiguredGitLabProjects,
   type GitLabProject,
 } from '../../api/git';
+import {
+  getJob,
+  submitJob,
+  type BackgroundJob,
+  type GitClonePayload,
+  type GitCloneResult,
+} from '../../api/job';
 import { createTask } from '../../api/task';
 import {
   consumeProjectQuota,
@@ -30,12 +34,15 @@ import {
   getProjectTaskSettings,
   getProjects,
   getTaskTypePresentation,
+  getTaskTypeQuotaRawValue,
   getTaskTypeQuotaValue,
   normalizeProjectModels,
   type ProjectConfig,
   type TaskType,
   type TaskTypeQuotas,
 } from '../../api/config';
+import { countCountedSessionsByTaskType } from '../../shared/lib/sessionUtils';
+import { getTaskTypeRemainingToCompleteCount } from '../../shared/lib/taskTypeOverview';
 import { DoneSummary, RunningRow } from './components/ClaimPrimitives';
 import type {
   ClaimResult,
@@ -59,6 +66,7 @@ import {
 
 export default function Claim() {
   const navigate = useNavigate();
+  const tasks = useAppStore((state) => state.tasks);
   const loadTasks = useAppStore((state) => state.loadTasks);
   const storeCloneModels = useAppStore((state) => state.cloneModels);
   const loadCloneModels = useAppStore((state) => state.loadCloneModels);
@@ -90,7 +98,7 @@ export default function Claim() {
 
   useEffect(() => {
     (async () => {
-      await loadCloneModels();
+      await Promise.all([loadCloneModels(), loadTasks()]);
       const [activeProjectId, projects] = await Promise.all([getActiveProjectId(), getProjects()]);
       const proj = projects.find((p) => p.id === activeProjectId) ?? projects[0];
       if (proj) {
@@ -113,22 +121,39 @@ export default function Claim() {
       const configuredRoot = await getConfig('default_clone_path');
       if (configuredRoot?.trim()) setDefaultCloneRoot(configuredRoot.trim());
     })();
-  }, [loadCloneModels]);
+  }, [loadCloneModels, loadTasks]);
 
-  const availableTaskTypes = useMemo(
-    () => getProjectTaskSettings(activeProject, selectedTaskType ? [selectedTaskType] : []).taskTypes,
+  const projectTaskSettings = useMemo(
+    () => getProjectTaskSettings(activeProject, selectedTaskType ? [selectedTaskType] : []),
     [activeProject, selectedTaskType],
   );
+  const availableTaskTypes = projectTaskSettings.taskTypes;
+  const projectTotals = projectTaskSettings.totals;
+  const submittedSessionsByTaskType = useMemo(
+    () =>
+      countCountedSessionsByTaskType(tasks, {
+        status: 'Submitted',
+        requireSessionId: true,
+      }),
+    [tasks],
+  );
+  const getTaskTypeRemaining = (taskType: TaskType): number | null =>
+    getTaskTypeRemainingToCompleteCount(
+      taskType,
+      quotas,
+      projectTotals,
+      submittedSessionsByTaskType[taskType] ?? 0,
+    );
   const defaultTaskType = useMemo(
     () =>
       availableTaskTypes.find((taskType) => {
-        const remaining = getTaskTypeQuotaValue(quotas, taskType);
+        const remaining = getTaskTypeRemaining(taskType);
         return remaining === null || remaining > 0;
       }) ?? availableTaskTypes[0] ?? DEFAULT_TASK_TYPE,
-    [availableTaskTypes, quotas],
+    [availableTaskTypes, projectTotals, quotas, submittedSessionsByTaskType],
   );
   const claimTaskType = selectedTaskType ?? defaultTaskType;
-  const claimTaskTypeRemaining = getTaskTypeQuotaValue(quotas, claimTaskType);
+  const claimTaskTypeRemaining = getTaskTypeRemaining(claimTaskType);
   const isClaimQuotaBlocked = claimTaskTypeRemaining !== null && claimTaskTypeRemaining <= 0;
   const preferredSourceModelName = activeProject?.sourceModelFolder?.trim() || 'ORIGIN';
 
@@ -141,7 +166,28 @@ export default function Claim() {
   const selectedModels = models.filter((m) => m.checked);
   const selectedModelNames = selectedModels.map((m) => m.name);
 
-  /* ─── Core clone logic (unchanged) ─── */
+  /* ─── Core clone logic ─── */
+
+  const waitForJobCompletion = async (
+    jobId: string,
+    onUpdate?: (job: BackgroundJob) => void,
+    timeoutMs = 900_000,
+  ): Promise<BackgroundJob> => {
+    const startedAt = Date.now();
+
+    while (Date.now() - startedAt < timeoutMs) {
+      const job = await getJob(jobId);
+      if (job) {
+        onUpdate?.(job);
+        if (job.status === 'done' || job.status === 'error' || job.status === 'cancelled') {
+          return job;
+        }
+      }
+      await new Promise((resolve) => window.setTimeout(resolve, 800));
+    }
+
+    throw new Error('等待拉取任务完成超时');
+  };
 
   const runClonePlan = async (
     currentProject: GitLabProject,
@@ -154,8 +200,6 @@ export default function Claim() {
     const normalizedBasePath = basePath.replace(/\/+$/, '');
     const sourceModel = pickSourceModel(checkedModels, preferredSourceModelName);
     const sourcePath = buildProjectSourcePath(projectNumber, taskType, normalizedBasePath);
-    const successfulModels: string[] = [];
-    const failedModels: Array<{ modelId: string; message: string }> = [];
 
     const allTargetPaths = checkedModels.map((model) =>
       model.id === sourceModel.id
@@ -172,35 +216,84 @@ export default function Claim() {
     if (!cloneUrl) throw new Error('该项目缺少 clone 地址 (http_url_to_repo)');
 
     setCloneProgressMsg('');
-    const unlisten = await onCloneProgress((msg) => setCloneProgressMsg(msg));
-
     onStatusChange?.(sourceModel.id, 'cloning');
-    try {
-      await cloneConfiguredProject(cloneUrl, sourcePath);
-      successfulModels.push(sourceModel.id);
-      onStatusChange?.(sourceModel.id, 'done');
-    } catch (error) {
+    const copyTargets = checkedModels
+      .filter((model) => model.id !== sourceModel.id)
+      .map((model) => ({
+        modelId: model.id,
+        path: `${normalizedBasePath}/${model.id}`,
+      }));
+
+    const payload: GitClonePayload = {
+      cloneUrl,
+      sourcePath,
+      sourceModelId: sourceModel.id,
+      copyTargets,
+    };
+
+    const job = await submitJob({
+      jobType: 'git_clone',
+      taskId: '',
+      inputPayload: JSON.stringify(payload),
+      timeoutSeconds: 900,
+    });
+    void useAppStore.getState().loadBackgroundJobs();
+
+    const finalJob = await waitForJobCompletion(job.id, (runningJob) => {
+      setCloneProgressMsg(runningJob.progressMessage ?? '');
+      if (runningJob.status !== 'running' && runningJob.status !== 'pending') {
+        return;
+      }
+
+      const inCopyPhase = runningJob.progress >= 50;
+      onStatusChange?.(sourceModel.id, inCopyPhase ? 'done' : 'cloning');
+      for (const model of checkedModels) {
+        if (model.id === sourceModel.id) continue;
+        onStatusChange?.(model.id, inCopyPhase ? 'copying' : 'pending');
+      }
+    });
+
+    setCloneProgressMsg('');
+    void useAppStore.getState().loadBackgroundJobs();
+
+    if (finalJob.status === 'error') {
       onStatusChange?.(sourceModel.id, 'error');
-      throw new Error(`${sourceModel.id}: ${toErrorMessage(error)}`);
-    } finally {
-      unlisten();
-      setCloneProgressMsg('');
+      throw new Error(finalJob.errorMessage || `${sourceModel.id}: 拉取失败`);
+    }
+    if (finalJob.status === 'cancelled') {
+      onStatusChange?.(sourceModel.id, 'error');
+      throw new Error('拉取任务已取消');
     }
 
-    for (const model of checkedModels) {
-      if (model.id === sourceModel.id) continue;
-      onStatusChange?.(model.id, 'copying');
+    let result: GitCloneResult = {
+      sourcePath,
+      successfulModels: checkedModels.map((model) => model.id),
+      failedModels: [],
+    };
+
+    if (finalJob.outputPayload) {
       try {
-        await copyProjectDirectory(sourcePath, `${normalizedBasePath}/${model.id}`);
-        successfulModels.push(model.id);
-        onStatusChange?.(model.id, 'done');
+        result = JSON.parse(finalJob.outputPayload) as GitCloneResult;
       } catch (error) {
-        onStatusChange?.(model.id, 'error');
-        failedModels.push({ modelId: model.id, message: toErrorMessage(error) });
+        throw new Error(`解析拉取结果失败: ${toErrorMessage(error)}`);
       }
     }
 
-    return { successfulModels, failedModels };
+    for (const model of checkedModels) {
+      const failed = result.failedModels.find((item) => item.modelId === model.id);
+      if (failed) {
+        onStatusChange?.(model.id, 'error');
+        continue;
+      }
+      if (result.successfulModels.includes(model.id)) {
+        onStatusChange?.(model.id, 'done');
+      }
+    }
+
+    return {
+      successfulModels: result.successfulModels,
+      failedModels: result.failedModels,
+    };
   };
 
   /* ─── Actions ─── */
@@ -314,13 +407,13 @@ export default function Claim() {
 
           // Consume quota if task type has a configured quota
           if (activeConfigId) {
-            const currentQuota = getTaskTypeQuotaValue(quotas, claimTaskType);
-            if (currentQuota !== null && currentQuota > 0) {
+            const currentQuota = getTaskTypeQuotaRawValue(quotas, claimTaskType);
+            if (currentQuota !== null) {
               try {
                 await consumeProjectQuota(activeConfigId, claimTaskType);
                 setQuotas((prev) => ({
                   ...prev,
-                  [claimTaskType]: Math.max(0, (getTaskTypeQuotaValue(prev, claimTaskType) ?? 0) - 1),
+                  [claimTaskType]: (getTaskTypeQuotaRawValue(prev, claimTaskType) ?? 0) - 1,
                 }));
               } catch {
                 // Non-fatal: quota decrement failed, continue
@@ -402,7 +495,7 @@ export default function Claim() {
   };
 
   const getQuotaRemaining = (type: TaskType): number | null => {
-    return getTaskTypeQuotaValue(quotas, type);
+    return getTaskTypeRemaining(type);
   };
 
   const hasAnyQuotaConfigured = availableTaskTypes.some(
@@ -549,7 +642,7 @@ export default function Claim() {
             )}
             {hasAnyQuotaConfigured && (
               <p className="mt-2 text-xs text-stone-400 dark:text-stone-500">
-                留空表示不限；显示为 0 的类型表示当前配额已用尽。
+                留空表示不限；数字按总计减已提交计算，显示为 0 表示该类型已经完成。
               </p>
             )}
           </section>
@@ -730,13 +823,13 @@ export default function Claim() {
                     领题
                     {claimTaskTypeRemaining !== null && (
                       <span className="ml-1 text-stone-400 dark:text-stone-500">
-                        剩余 {claimTaskTypeRemaining}
+                        待完成 {claimTaskTypeRemaining}
                       </span>
                     )}
                   </span>
                   {isClaimQuotaBlocked && (
                     <span className="text-red-500 dark:text-red-400">
-                      当前类型配额已用尽，请返回修改
+                      当前类型已经完成，请返回修改
                     </span>
                   )}
                 </div>

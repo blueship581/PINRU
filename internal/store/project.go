@@ -450,7 +450,8 @@ func (s *Store) UpdateProject(p Project) error {
 }
 
 // ConsumeProjectQuota decrements the quota for a given task type by 1.
-// Returns an error if the quota is already 0 or the project is not found.
+// When a fixed total exists, callers may continue claiming after the displayed quota reaches 0,
+// so the stored remaining quota is allowed to go negative to reflect over-allocation.
 func (s *Store) ConsumeProjectQuota(projectID, taskType string) error {
 	p, err := s.GetProject(projectID)
 	if err != nil {
@@ -466,8 +467,8 @@ func (s *Store) ConsumeProjectQuota(projectID, taskType string) error {
 	}
 
 	current, ok := quotas[taskType]
-	if !ok || current <= 0 {
-		return fmt.Errorf("任务类型 %q 的配额已用尽", taskType)
+	if !ok {
+		return fmt.Errorf("任务类型 %q 未配置配额", taskType)
 	}
 	quotas[taskType] = current - 1
 
@@ -487,9 +488,6 @@ func adjustProjectQuotaForTaskTypeChange(quotas map[string]int, previousTaskType
 	}
 
 	if current, ok := quotas[nextTaskType]; ok {
-		if current <= 0 {
-			return fmt.Errorf("任务类型 %q 的配额已用尽", nextTaskType)
-		}
 		quotas[nextTaskType] = current - 1
 	}
 

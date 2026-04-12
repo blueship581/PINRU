@@ -1,6 +1,7 @@
-import { useEffect, useRef, useState, type RefObject } from 'react';
+import { useState, type RefObject } from 'react';
+import { createPortal } from 'react-dom';
 import { AnimatePresence, motion } from 'motion/react';
-import { Check, ChevronRight, FolderOpen, X } from 'lucide-react';
+import { Check, ChevronRight, FolderOpen, Wand2, X } from 'lucide-react';
 import type { Task, TaskStatus } from '../../../store';
 import {
   getTaskTypePresentation,
@@ -14,9 +15,15 @@ import {
   matchKindLabel,
   resolveCandidateModelName,
 } from '../../../shared/lib/sessionCandidateUtils';
+import {
+  CONSTRAINT_TYPES,
+  SCOPE_TYPES,
+  LS_KEY_CONSTRAINTS,
+  LS_KEY_SCOPE,
+} from '../../../shared/lib/promptConstants';
 import { STATUS } from './BoardPresentation';
 
-type ContextMenuPanel = 'status' | 'taskType';
+type ContextMenuPanel = 'status' | 'taskType' | 'promptGen';
 
 export function SessionExtractCandidateModal({
   candidates,
@@ -162,10 +169,11 @@ export function TaskCardContextMenu({
   statusChanging,
   taskTypeChanging,
   localFolderOpening,
-  localFolderError,
+  actionError,
   onOpenLocalFolder,
   onStatusChange,
   onTaskTypeChange,
+  onGeneratePrompt,
 }: {
   menuRef: RefObject<HTMLDivElement | null>;
   task: Task;
@@ -178,88 +186,55 @@ export function TaskCardContextMenu({
   statusChanging: boolean;
   taskTypeChanging: boolean;
   localFolderOpening: boolean;
-  localFolderError: string;
+  actionError: string;
   onOpenLocalFolder: () => void;
   onStatusChange: (status: TaskStatus) => void;
   onTaskTypeChange: (taskType: string) => void;
+  onGeneratePrompt: (constraints: string[], scope: string) => void;
 }) {
   const [panel, setPanel] = useState<ContextMenuPanel | null>(null);
-  const openTimerRef = useRef<number | null>(null);
-  const closeTimerRef = useRef<number | null>(null);
+  const [menuConstraints, setMenuConstraints] = useState<string[]>(() => {
+    try {
+      const raw = localStorage.getItem(LS_KEY_CONSTRAINTS);
+      return raw ? (JSON.parse(raw) as string[]) : [];
+    } catch { return []; }
+  });
+  const [menuScope, setMenuScope] = useState<string>(() => {
+    try { return localStorage.getItem(LS_KEY_SCOPE) ?? ''; } catch { return ''; }
+  });
+
+  const toggleMenuConstraint = (value: string) => {
+    setMenuConstraints((prev) => {
+      const next = prev.includes(value) ? prev.filter((v) => v !== value) : [...prev, value];
+      try { localStorage.setItem(LS_KEY_CONSTRAINTS, JSON.stringify(next)); } catch {}
+      return next;
+    });
+  };
+
+  const handleMenuScopeChange = (value: string) => {
+    setMenuScope(value);
+    try { localStorage.setItem(LS_KEY_SCOPE, value); } catch {}
+  };
   const currentTaskType = normalizeTaskTypeName(task.taskType) || task.taskType;
   const currentStatusMeta = STATUS[task.status];
   const currentTaskTypePresentation = getTaskTypePresentation(currentTaskType);
-  const submenuOpensLeft = position.x + 256 + 8 + 256 > window.innerWidth - 12;
   const menuSurfaceClass =
-    'relative w-[256px] overflow-hidden rounded-2xl border border-stone-300/75 bg-[linear-gradient(180deg,rgba(252,250,247,0.985)_0%,rgba(244,241,236,0.985)_100%)] shadow-[0_24px_48px_-26px_rgba(120,113,108,0.55),0_16px_30px_-18px_rgba(15,23,42,0.28)] ring-1 ring-white/70 backdrop-blur-xl dark:border-stone-600/70 dark:bg-[linear-gradient(180deg,rgba(39,37,34,0.97)_0%,rgba(24,24,23,0.985)_100%)] dark:shadow-[0_24px_48px_-26px_rgba(0,0,0,0.72),0_16px_30px_-18px_rgba(0,0,0,0.42)] dark:ring-stone-500/20';
+    'relative w-[280px] overflow-hidden rounded-2xl border border-stone-300/75 bg-[linear-gradient(180deg,rgba(252,250,247,0.985)_0%,rgba(244,241,236,0.985)_100%)] shadow-[0_24px_48px_-26px_rgba(120,113,108,0.55),0_16px_30px_-18px_rgba(15,23,42,0.28)] ring-1 ring-white/70 backdrop-blur-xl dark:border-stone-600/70 dark:bg-[linear-gradient(180deg,rgba(39,37,34,0.97)_0%,rgba(24,24,23,0.985)_100%)] dark:shadow-[0_24px_48px_-26px_rgba(0,0,0,0.72),0_16px_30px_-18px_rgba(0,0,0,0.42)] dark:ring-stone-500/20';
   const dividerClass = 'border-stone-200/80 dark:border-stone-700/80';
   const hoverItemClass = 'hover:bg-stone-200/35 dark:hover:bg-stone-800/55';
   const activeItemClass = 'bg-stone-200/55 dark:bg-stone-800/72';
   const mutedLabelClass = 'text-[11px] leading-none text-stone-500 dark:text-stone-400 mb-0.5';
-
-  const clearOpenTimer = () => {
-    if (openTimerRef.current !== null) {
-      window.clearTimeout(openTimerRef.current);
-      openTimerRef.current = null;
-    }
+  const togglePanel = (nextPanel: ContextMenuPanel) => {
+    setPanel((currentPanel) =>
+      currentPanel === nextPanel ? null : nextPanel,
+    );
   };
-
-  const clearCloseTimer = () => {
-    if (closeTimerRef.current !== null) {
-      window.clearTimeout(closeTimerRef.current);
-      closeTimerRef.current = null;
-    }
-  };
-
-  const openPanelImmediately = (nextPanel: ContextMenuPanel) => {
-    clearOpenTimer();
-    clearCloseTimer();
-    setPanel(nextPanel);
-  };
-
-  const schedulePanelOpen = (nextPanel: ContextMenuPanel) => {
-    clearCloseTimer();
-    clearOpenTimer();
-    if (panel === nextPanel) {
-      return;
-    }
-    openTimerRef.current = window.setTimeout(() => {
-      setPanel(nextPanel);
-      openTimerRef.current = null;
-    }, panel === null ? 160 : 90);
-  };
-
-  const schedulePanelClose = () => {
-    clearOpenTimer();
-    clearCloseTimer();
-    closeTimerRef.current = window.setTimeout(() => {
-      setPanel(null);
-      closeTimerRef.current = null;
-    }, 140);
-  };
-
-  const closePanelImmediately = () => {
-    clearOpenTimer();
-    clearCloseTimer();
-    setPanel(null);
-  };
-
-  useEffect(() => () => {
-    clearOpenTimer();
-    clearCloseTimer();
-  }, []);
-
-  const submenuPositionClass = submenuOpensLeft ? 'right-[calc(100%+8px)]' : 'left-[calc(100%+8px)]';
-
-  const submenuTitle = panel === 'status' ? '切换任务状态' : '切换任务类型';
 
   return (
     <div
       ref={menuRef}
       style={{ left: position.x, top: position.y }}
       className="fixed z-40"
-      onMouseEnter={clearCloseTimer}
-      onMouseLeave={schedulePanelClose}
     >
       <motion.div
         initial={{ opacity: 0, scale: 0.93, y: -6 }}
@@ -288,10 +263,8 @@ export function TaskCardContextMenu({
             type="button"
             aria-haspopup="menu"
             aria-expanded={panel === 'status'}
-            onMouseEnter={() => schedulePanelOpen('status')}
-            onFocus={() => openPanelImmediately('status')}
-            onClick={() => openPanelImmediately('status')}
-            className={`flex w-full items-center gap-3 px-3.5 py-2.5 text-left transition-colors cursor-default ${
+            onClick={() => togglePanel('status')}
+            className={`flex w-full items-center gap-3 px-3.5 py-2.5 text-left transition-colors cursor-pointer ${
               panel === 'status'
                 ? activeItemClass
                 : hoverItemClass
@@ -310,8 +283,65 @@ export function TaskCardContextMenu({
                 {currentStatusMeta.label}
               </p>
             </div>
-            <ChevronRight className="h-3.5 w-3.5 shrink-0 text-stone-300 dark:text-stone-600" />
+            <ChevronRight
+              className={`h-3.5 w-3.5 shrink-0 text-stone-300 transition-transform dark:text-stone-600 ${
+                panel === 'status' ? 'rotate-90' : ''
+              }`}
+            />
           </button>
+
+          <AnimatePresence initial={false}>
+            {panel === 'status' && (
+              <motion.div
+                key="status-panel"
+                initial={{ height: 0, opacity: 0 }}
+                animate={{ height: 'auto', opacity: 1 }}
+                exit={{ height: 0, opacity: 0 }}
+                transition={{ duration: 0.16, ease: [0.16, 1, 0.3, 1] }}
+                className="overflow-hidden"
+              >
+                <div className="mx-3.5 mb-2 rounded-2xl border border-stone-200/80 bg-stone-100/60 p-1 dark:border-stone-700/80 dark:bg-stone-900/45">
+                  <p className="px-2.5 pb-1 pt-1 text-[11px] font-semibold text-stone-500 dark:text-stone-400">
+                    切换任务状态
+                  </p>
+                  <div className="max-h-56 overflow-y-auto">
+                    {statusOptions.map((status) => {
+                      const active = task.status === status;
+                      const meta = STATUS[status];
+
+                      return (
+                        <button
+                          key={status}
+                          type="button"
+                          disabled={statusChanging}
+                          onClick={() => onStatusChange(status)}
+                          className={`flex w-full items-center gap-3 rounded-xl px-2.5 py-2 text-left transition-colors cursor-pointer ${
+                            active
+                              ? activeItemClass
+                              : hoverItemClass
+                          } ${statusChanging ? 'opacity-50' : ''}`}
+                        >
+                          <span className={`h-2 w-2 shrink-0 rounded-full ${meta.dotCls}`} />
+                          <span
+                            className={`flex-1 truncate text-[13px] ${
+                              active
+                                ? 'font-semibold text-stone-800 dark:text-stone-100'
+                                : 'font-medium text-stone-600 dark:text-stone-300'
+                            }`}
+                          >
+                            {meta.label}
+                          </span>
+                          {active && (
+                            <Check className="h-3.5 w-3.5 shrink-0 text-stone-400 dark:text-stone-500" />
+                          )}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              </motion.div>
+            )}
+          </AnimatePresence>
 
           <div className={`mx-3.5 border-t ${dividerClass}`} />
 
@@ -319,10 +349,8 @@ export function TaskCardContextMenu({
             type="button"
             aria-haspopup="menu"
             aria-expanded={panel === 'taskType'}
-            onMouseEnter={() => schedulePanelOpen('taskType')}
-            onFocus={() => openPanelImmediately('taskType')}
-            onClick={() => openPanelImmediately('taskType')}
-            className={`flex w-full items-center gap-3 px-3.5 py-2.5 text-left transition-colors cursor-default ${
+            onClick={() => togglePanel('taskType')}
+            className={`flex w-full items-center gap-3 px-3.5 py-2.5 text-left transition-colors cursor-pointer ${
               panel === 'taskType'
                 ? activeItemClass
                 : hoverItemClass
@@ -341,18 +369,209 @@ export function TaskCardContextMenu({
                 {currentTaskTypePresentation.label}
               </p>
             </div>
-            <ChevronRight className="h-3.5 w-3.5 shrink-0 text-stone-300 dark:text-stone-600" />
+            <ChevronRight
+              className={`h-3.5 w-3.5 shrink-0 text-stone-300 transition-transform dark:text-stone-600 ${
+                panel === 'taskType' ? 'rotate-90' : ''
+              }`}
+            />
           </button>
+
+          <AnimatePresence initial={false}>
+            {panel === 'taskType' && (
+              <motion.div
+                key="task-type-panel"
+                initial={{ height: 0, opacity: 0 }}
+                animate={{ height: 'auto', opacity: 1 }}
+                exit={{ height: 0, opacity: 0 }}
+                transition={{ duration: 0.16, ease: [0.16, 1, 0.3, 1] }}
+                className="overflow-hidden"
+              >
+                <div className="mx-3.5 mb-2 rounded-2xl border border-stone-200/80 bg-stone-100/60 p-1 dark:border-stone-700/80 dark:bg-stone-900/45">
+                  <p className="px-2.5 pb-1 pt-1 text-[11px] font-semibold text-stone-500 dark:text-stone-400">
+                    切换任务类型
+                  </p>
+                  <div className="max-h-56 overflow-y-auto">
+                    {availableTaskTypes.map((taskType) => {
+                      const presentation = getTaskTypePresentation(taskType);
+                      const active = presentation.value === currentTaskType;
+
+                      return (
+                        <button
+                          key={presentation.value}
+                          type="button"
+                          disabled={taskTypeChanging}
+                          onClick={() => onTaskTypeChange(presentation.value)}
+                          className={`flex w-full items-center gap-3 rounded-xl px-2.5 py-2 text-left transition-colors cursor-pointer ${
+                            active
+                              ? activeItemClass
+                              : hoverItemClass
+                          } ${taskTypeChanging ? 'opacity-50' : ''}`}
+                        >
+                          <span className={`h-2 w-2 shrink-0 rounded-full ${presentation.dot}`} />
+                          <span
+                            className={`flex-1 truncate text-[13px] ${
+                              active
+                                ? 'font-semibold text-stone-800 dark:text-stone-100'
+                                : 'font-medium text-stone-600 dark:text-stone-300'
+                            }`}
+                          >
+                            {presentation.label}
+                          </span>
+                          {active && (
+                            <Check className="h-3.5 w-3.5 shrink-0 text-stone-400 dark:text-stone-500" />
+                          )}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              </motion.div>
+            )}
+          </AnimatePresence>
+
+          <div className={`mx-3.5 my-1 border-t ${dividerClass}`} />
+
+          {/* ── 生成提示词 ── */}
+          <button
+            type="button"
+            aria-haspopup="menu"
+            aria-expanded={panel === 'promptGen'}
+            onClick={() => togglePanel('promptGen')}
+            className={`flex w-full items-center gap-3 px-3.5 py-2.5 text-left transition-colors cursor-pointer ${
+              panel === 'promptGen' ? activeItemClass : hoverItemClass
+            }`}
+          >
+            <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border border-indigo-200/80 bg-indigo-50/85 text-indigo-600 dark:border-indigo-500/20 dark:bg-indigo-500/10 dark:text-indigo-300">
+              <Wand2 className="h-4 w-4" />
+            </div>
+            <div className="min-w-0 flex-1">
+              <p className="text-[13px] font-semibold leading-tight text-stone-700 dark:text-stone-200 truncate">
+                生成提示词
+              </p>
+            </div>
+            <ChevronRight
+              className={`h-3.5 w-3.5 shrink-0 text-stone-300 transition-transform dark:text-stone-600 ${
+                panel === 'promptGen' ? '-rotate-90' : ''
+              }`}
+            />
+          </button>
+
+          {/* Fly-out panel rendered via portal to avoid clipping / height inflation */}
+          {panel === 'promptGen' &&
+            createPortal(
+              (() => {
+                const flyW = 256;
+                const flyH = 364;
+                const mainMenuW = 280;
+                const gap = 8;
+                const leftX = position.x - flyW - gap;
+                const flyX = leftX >= 12 ? leftX : position.x + mainMenuW + gap;
+                const flyY = Math.min(
+                  Math.max(12, position.y),
+                  window.innerHeight - flyH - 12,
+                );
+                return (
+                  <AnimatePresence>
+                    <motion.div
+                      key="prompt-gen-flyout"
+                      initial={{ opacity: 0, x: leftX >= 12 ? 8 : -8, scale: 0.97 }}
+                      animate={{ opacity: 1, x: 0, scale: 1 }}
+                      exit={{ opacity: 0, x: leftX >= 12 ? 8 : -8, scale: 0.97 }}
+                      transition={{ duration: 0.15, ease: [0.16, 1, 0.3, 1] }}
+                      data-prompt-gen-flyout=""
+                      style={{ left: flyX, top: flyY, width: flyW }}
+                      className="fixed z-50 rounded-2xl border border-stone-300/75 bg-[linear-gradient(180deg,rgba(252,250,247,0.985)_0%,rgba(244,241,236,0.985)_100%)] shadow-[0_24px_48px_-26px_rgba(120,113,108,0.55),0_16px_30px_-18px_rgba(15,23,42,0.28)] ring-1 ring-white/70 backdrop-blur-xl dark:border-stone-600/70 dark:bg-[linear-gradient(180deg,rgba(39,37,34,0.97)_0%,rgba(24,24,23,0.985)_100%)] dark:shadow-[0_24px_48px_-26px_rgba(0,0,0,0.72),0_16px_30px_-18px_rgba(0,0,0,0.42)] dark:ring-stone-500/20"
+                    >
+                      <div className="pointer-events-none absolute inset-x-3 top-0 h-px bg-gradient-to-r from-indigo-300/60 via-stone-200/50 to-sky-200/50 dark:from-indigo-400/20 dark:via-stone-500/15 dark:to-sky-300/20" />
+                      <div className="px-3.5 pt-3 pb-2.5">
+                        <p className="text-[11px] font-semibold text-stone-500 dark:text-stone-400 mb-2">
+                          生成配置
+                        </p>
+
+                        {/* Task type (read-only) */}
+                        <div className="mb-2">
+                          <p className="text-[10px] text-stone-400 dark:text-stone-500 mb-0.5">任务类型</p>
+                          <p className="text-[12px] font-semibold text-stone-700 dark:text-stone-200">
+                            {normalizeTaskTypeName(task.taskType) || task.taskType || '未设置'}
+                          </p>
+                        </div>
+
+                        <div className="border-t border-stone-200/60 dark:border-stone-700/60 my-2" />
+
+                        {/* Constraint types (multi-select) */}
+                        <div className="mb-2">
+                          <p className="text-[10px] text-stone-400 dark:text-stone-500 mb-1.5">约束类型（可多选）</p>
+                          <div className="space-y-1.5">
+                            {CONSTRAINT_TYPES.map((opt) => (
+                              <label
+                                key={opt.value}
+                                className="flex items-center gap-2 cursor-default"
+                              >
+                                <input
+                                  type="checkbox"
+                                  checked={menuConstraints.includes(opt.value)}
+                                  onChange={() => toggleMenuConstraint(opt.value)}
+                                  className="w-3 h-3 accent-indigo-600 cursor-default shrink-0"
+                                />
+                                <span className="text-[12px] text-stone-600 dark:text-stone-300">
+                                  {opt.label}
+                                </span>
+                              </label>
+                            ))}
+                          </div>
+                        </div>
+
+                        <div className="border-t border-stone-200/60 dark:border-stone-700/60 my-2" />
+
+                        {/* Scope (single-select) */}
+                        <div className="mb-3">
+                          <p className="text-[10px] text-stone-400 dark:text-stone-500 mb-1.5">修改范围（单选）</p>
+                          <div className="space-y-1.5">
+                            {SCOPE_TYPES.map((opt) => (
+                              <label
+                                key={opt.value}
+                                className="flex items-center gap-2 cursor-default"
+                              >
+                                <input
+                                  type="radio"
+                                  name={`menu-scope-${task.id}`}
+                                  value={opt.value}
+                                  checked={menuScope === opt.value}
+                                  onChange={() => handleMenuScopeChange(opt.value)}
+                                  className="w-3 h-3 accent-indigo-600 cursor-default shrink-0"
+                                />
+                                <span className="text-[12px] text-stone-600 dark:text-stone-300">
+                                  {opt.label}
+                                </span>
+                              </label>
+                            ))}
+                          </div>
+                        </div>
+
+                        {/* Generate button */}
+                        <button
+                          type="button"
+                          disabled={!menuScope}
+                          onClick={() => onGeneratePrompt(menuConstraints, menuScope)}
+                          className="w-full py-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 disabled:opacity-40 text-white text-[12px] font-semibold transition-colors cursor-default"
+                        >
+                          开始生成
+                        </button>
+                      </div>
+                    </motion.div>
+                  </AnimatePresence>
+                );
+              })(),
+              document.body,
+            )}
 
           <div className={`mx-3.5 my-1 border-t ${dividerClass}`} />
 
           <button
             type="button"
             disabled={localFolderOpening}
-            onMouseEnter={closePanelImmediately}
-            onFocus={closePanelImmediately}
             onClick={onOpenLocalFolder}
-            className={`flex w-full items-center gap-3 px-3.5 py-2.5 text-left transition-colors cursor-default ${
+            className={`flex w-full items-center gap-3 px-3.5 py-2.5 text-left transition-colors cursor-pointer ${
               localFolderOpening
                 ? 'opacity-60'
                 : hoverItemClass
@@ -368,105 +587,13 @@ export function TaskCardContextMenu({
             </div>
           </button>
 
-          {localFolderError && (
+          {actionError && (
             <p className="px-3.5 pb-2 pt-1 text-[11px] leading-5 text-red-500">
-              {localFolderError}
+              {actionError}
             </p>
           )}
         </div>
       </motion.div>
-
-      <AnimatePresence>
-        {panel !== null && (
-          <motion.div
-            key={panel}
-            initial={{ opacity: 0, x: submenuOpensLeft ? 10 : -10, scale: 0.98 }}
-            animate={{ opacity: 1, x: 0, scale: 1 }}
-            exit={{ opacity: 0, x: submenuOpensLeft ? 10 : -10, scale: 0.98 }}
-            transition={{ duration: 0.12, ease: [0.16, 1, 0.3, 1] }}
-            className={`absolute top-0 ${submenuPositionClass} ${menuSurfaceClass}`}
-          >
-            <div className="pointer-events-none absolute inset-x-3 top-0 h-px bg-gradient-to-r from-sky-200/65 via-stone-200/70 to-amber-200/65 dark:from-sky-300/25 dark:via-stone-500/20 dark:to-amber-300/25" />
-            <div className={`border-b bg-stone-100/70 px-3.5 py-2.5 dark:bg-stone-800/30 ${dividerClass}`}>
-              <p className="text-[12px] font-semibold text-stone-600 dark:text-stone-300">
-                {submenuTitle}
-              </p>
-            </div>
-
-            {panel === 'status' ? (
-              <div className="max-h-[272px] overflow-y-auto py-1">
-                {statusOptions.map((status) => {
-                  const active = task.status === status;
-                  const meta = STATUS[status];
-
-                  return (
-                    <button
-                      key={status}
-                      type="button"
-                      disabled={statusChanging}
-                      onClick={() => onStatusChange(status)}
-                      className={`flex w-full items-center gap-3 px-3.5 py-2 text-left transition-colors cursor-default ${
-                        active
-                          ? activeItemClass
-                          : hoverItemClass
-                      } ${statusChanging ? 'opacity-50' : ''}`}
-                    >
-                      <span className={`h-2 w-2 shrink-0 rounded-full ${meta.dotCls}`} />
-                      <span
-                        className={`flex-1 truncate text-[13px] ${
-                          active
-                            ? 'font-semibold text-stone-800 dark:text-stone-100'
-                            : 'font-medium text-stone-600 dark:text-stone-300'
-                        }`}
-                      >
-                        {meta.label}
-                      </span>
-                      {active && (
-                        <Check className="h-3.5 w-3.5 shrink-0 text-stone-400 dark:text-stone-500" />
-                      )}
-                    </button>
-                  );
-                })}
-              </div>
-            ) : (
-              <div className="max-h-[272px] overflow-y-auto py-1">
-                {availableTaskTypes.map((taskType) => {
-                  const presentation = getTaskTypePresentation(taskType);
-                  const active = presentation.value === currentTaskType;
-
-                  return (
-                    <button
-                      key={presentation.value}
-                      type="button"
-                      disabled={taskTypeChanging}
-                      onClick={() => onTaskTypeChange(presentation.value)}
-                      className={`flex w-full items-center gap-3 px-3.5 py-2 text-left transition-colors cursor-default ${
-                        active
-                          ? activeItemClass
-                          : hoverItemClass
-                      } ${taskTypeChanging ? 'opacity-50' : ''}`}
-                    >
-                      <span className={`h-2 w-2 shrink-0 rounded-full ${presentation.dot}`} />
-                      <span
-                        className={`flex-1 truncate text-[13px] ${
-                          active
-                            ? 'font-semibold text-stone-800 dark:text-stone-100'
-                            : 'font-medium text-stone-600 dark:text-stone-300'
-                        }`}
-                      >
-                        {presentation.label}
-                      </span>
-                      {active && (
-                        <Check className="h-3.5 w-3.5 shrink-0 text-stone-400 dark:text-stone-500" />
-                      )}
-                    </button>
-                  );
-                })}
-              </div>
-            )}
-          </motion.div>
-        )}
-      </AnimatePresence>
     </div>
   );
 }

@@ -18,10 +18,6 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const (
-	traeWorkspaceStorageRelativePath = "Library/Application Support/Trae CN/User/workspaceStorage"
-	traeLogsRelativePath             = "Library/Application Support/Trae CN/logs"
-)
 
 var (
 	traeTraceIDPattern                = regexp.MustCompile(`trace_id(?:=|: )"?([a-f0-9]{32})"?`)
@@ -149,7 +145,11 @@ func (s *TaskService) ExtractTaskSessions(taskID string) (*ExtractTaskSessionsRe
 		}, nil
 	}
 
-	workspaces, err := discoverMatchedTraeWorkspaces(targetPaths)
+	// Read user-configured path overrides from config; fall back to platform defaults.
+	wsPathOverride, _ := s.store.GetConfig("trae_workspace_storage_path")
+	logsPathOverride, _ := s.store.GetConfig("trae_logs_path")
+
+	workspaces, err := discoverMatchedTraeWorkspaces(targetPaths, wsPathOverride)
 	if err != nil {
 		return nil, err
 	}
@@ -170,7 +170,7 @@ func (s *TaskService) ExtractTaskSessions(taskID string) (*ExtractTaskSessionsRe
 		}
 	}
 
-	traceRecordsByRaw, err := collectTraeTraceRecordsFromSystem(rawSessionIDs)
+	traceRecordsByRaw, err := collectTraeTraceRecordsFromSystem(rawSessionIDs, logsPathOverride)
 	if err != nil {
 		return nil, err
 	}
@@ -223,8 +223,8 @@ func normalizeTraePath(rawPath string) string {
 	return filepath.Clean(expanded)
 }
 
-func discoverMatchedTraeWorkspaces(targetPaths []string) ([]traeMatchedWorkspace, error) {
-	workspaceBase, err := traeWorkspaceStorageBase()
+func discoverMatchedTraeWorkspaces(targetPaths []string, wsPathOverride string) ([]traeMatchedWorkspace, error) {
+	workspaceBase, err := traeWorkspaceStorageBase(wsPathOverride)
 	if err != nil {
 		return nil, err
 	}
@@ -290,20 +290,26 @@ func discoverMatchedTraeWorkspaces(targetPaths []string) ([]traeMatchedWorkspace
 	return matches, nil
 }
 
-func traeWorkspaceStorageBase() (string, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", err
+func traeWorkspaceStorageBase(override string) (string, error) {
+	if trimmed := strings.TrimSpace(override); trimmed != "" {
+		return util.NormalizePath(trimmed), nil
 	}
-	return filepath.Join(home, traeWorkspaceStorageRelativePath), nil
+	p := util.DefaultTraeWorkspaceStoragePath()
+	if p == "" {
+		return "", fmt.Errorf("无法获取用户目录")
+	}
+	return p, nil
 }
 
-func traeLogsBase() (string, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", err
+func traeLogsBase(override string) (string, error) {
+	if trimmed := strings.TrimSpace(override); trimmed != "" {
+		return util.NormalizePath(trimmed), nil
 	}
-	return filepath.Join(home, traeLogsRelativePath), nil
+	p := util.DefaultTraeLogsPath()
+	if p == "" {
+		return "", fmt.Errorf("无法获取用户目录")
+	}
+	return p, nil
 }
 
 func fileExists(path string) bool {
@@ -689,8 +695,8 @@ func queryOptionalSQLiteString(db *sql.DB, query string, args ...any) (string, e
 	return value.String, nil
 }
 
-func collectTraeTraceRecordsFromSystem(rawSessionIDs map[string]struct{}) (map[string][]traeTraceRecord, error) {
-	logFiles, err := traeLogFiles()
+func collectTraeTraceRecordsFromSystem(rawSessionIDs map[string]struct{}, logsPathOverride string) (map[string][]traeTraceRecord, error) {
+	logFiles, err := traeLogFiles(logsPathOverride)
 	if err != nil {
 		return nil, err
 	}
@@ -700,8 +706,8 @@ func collectTraeTraceRecordsFromSystem(rawSessionIDs map[string]struct{}) (map[s
 	return collectTraeTraceRecords(logFiles, rawSessionIDs)
 }
 
-func traeLogFiles() ([]string, error) {
-	logsBase, err := traeLogsBase()
+func traeLogFiles(override string) ([]string, error) {
+	logsBase, err := traeLogsBase(override)
 	if err != nil {
 		return nil, err
 	}

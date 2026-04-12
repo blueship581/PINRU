@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os/exec"
 	"strings"
 	"time"
 )
@@ -20,24 +21,54 @@ type Provider interface {
 }
 
 type Config struct {
-	ID           string  `json:"id"`
-	Name         string  `json:"name"`
-	ProviderType string  `json:"providerType"`
-	Model        string  `json:"model"`
-	BaseURL      *string `json:"baseUrl"`
-	APIKey       string  `json:"apiKey"`
-	IsDefault    bool    `json:"isDefault"`
+	ID             string  `json:"id"`
+	Name           string  `json:"name"`
+	ProviderType   string  `json:"providerType"`
+	Model          string  `json:"model"`
+	BaseURL        *string `json:"baseUrl"`
+	APIKey         string  `json:"apiKey"`
+	IsDefault      bool    `json:"isDefault"`
+	ThinkingBudget string  `json:"thinkingBudget"` // "" | "low" | "medium" | "high"
+}
+
+func IsACPProvider(providerType string) bool {
+	return providerType == "claude_code_acp" || providerType == "codex_acp"
+}
+
+func thinkingBudgetTokens(budget string) int {
+	switch budget {
+	case "low":
+		return 1024
+	case "medium":
+		return 4096
+	case "high":
+		return 10240
+	default:
+		return 0
+	}
 }
 
 func BuildProvider(cfg Config) (Provider, error) {
-	if strings.TrimSpace(cfg.APIKey) == "" {
+	if !IsACPProvider(cfg.ProviderType) && strings.TrimSpace(cfg.APIKey) == "" {
 		return nil, fmt.Errorf("API Key 不能为空")
 	}
 	switch cfg.ProviderType {
 	case "openai_compatible":
-		return &openaiProvider{cfg: cfg, client: &http.Client{Timeout: 60 * time.Second}}, nil
+		timeout := 60 * time.Second
+		if cfg.ThinkingBudget != "" {
+			timeout = 180 * time.Second
+		}
+		return &openaiProvider{cfg: cfg, client: &http.Client{Timeout: timeout}}, nil
 	case "anthropic":
-		return &anthropicProvider{cfg: cfg, client: &http.Client{Timeout: 60 * time.Second}}, nil
+		timeout := 60 * time.Second
+		if cfg.ThinkingBudget != "" {
+			timeout = 180 * time.Second
+		}
+		return &anthropicProvider{cfg: cfg, client: &http.Client{Timeout: timeout}}, nil
+	case "claude_code_acp":
+		return &claudeCodeACPProvider{cfg: cfg}, nil
+	case "codex_acp":
+		return &codexACPProvider{cfg: cfg}, nil
 	default:
 		return nil, fmt.Errorf("unknown provider type: %s", cfg.ProviderType)
 	}
@@ -75,14 +106,18 @@ func (p *openaiProvider) TestConnection() error {
 }
 
 func (p *openaiProvider) Generate(systemPrompt, userPrompt string) (string, error) {
-	body, _ := json.Marshal(map[string]interface{}{
+	payload := map[string]interface{}{
 		"model":       p.cfg.Model,
 		"temperature": 0.2,
 		"messages": []map[string]string{
 			{"role": "system", "content": systemPrompt},
 			{"role": "user", "content": userPrompt},
 		},
-	})
+	}
+	if p.cfg.ThinkingBudget != "" {
+		payload["reasoning_effort"] = p.cfg.ThinkingBudget
+	}
+	body, _ := json.Marshal(payload)
 	resp, err := p.doRequest(body)
 	if err != nil {
 		return "", err
@@ -132,13 +167,26 @@ func (p *anthropicProvider) TestConnection() error {
 }
 
 func (p *anthropicProvider) Generate(systemPrompt, userPrompt string) (string, error) {
-	body, _ := json.Marshal(map[string]interface{}{
-		"model":       p.cfg.Model,
-		"max_tokens":  4096,
-		"temperature": 0.2,
-		"system":      systemPrompt,
-		"messages":    []map[string]string{{"role": "user", "content": userPrompt}},
-	})
+	budgetTokens := thinkingBudgetTokens(p.cfg.ThinkingBudget)
+	payload := map[string]interface{}{
+		"model":  p.cfg.Model,
+		"system": systemPrompt,
+		"messages": []map[string]interface{}{
+			{"role": "user", "content": userPrompt},
+		},
+	}
+	if budgetTokens > 0 {
+		payload["max_tokens"] = 16384
+		payload["temperature"] = 1
+		payload["thinking"] = map[string]interface{}{
+			"type":          "enabled",
+			"budget_tokens": budgetTokens,
+		}
+	} else {
+		payload["max_tokens"] = 4096
+		payload["temperature"] = 0.2
+	}
+	body, _ := json.Marshal(payload)
 	resp, err := p.doRequest(body)
 	if err != nil {
 		return "", err
@@ -207,4 +255,112 @@ func extractAnthropicText(resp *http.Response) (string, error) {
 		return "", fmt.Errorf("Anthropic 模型未返回可用的文本内容")
 	}
 	return strings.Join(texts, "\n\n"), nil
+}
+
+// --- Claude Code ACP Provider ---
+
+type claudeCodeACPProvider struct {
+	cfg Config
+}
+
+func (p *claudeCodeACPProvider) Name() string  { return p.cfg.Name }
+func (p *claudeCodeACPProvider) Model() string { return p.cfg.Model }
+
+func (p *claudeCodeACPProvider) TestConnection() error {
+	// 先检查 CLI 是否安装
+	if _, err := exec.LookPath("claude"); err != nil {
+		return fmt.Errorf("Claude Code CLI 未安装，请执行: npm install -g @anthropic-ai/claude-code")
+	}
+
+	// 真实发一次 API 请求，验证 ACP 代理可达且有可用账号
+	// 不传 --model，让全局配置决定模型，与提示词生成保持一致
+	args := []string{"-p", "respond with the single word: ok", "--dangerously-skip-permissions"}
+	cmd := exec.Command("claude", args...)
+
+	type result struct {
+		out []byte
+		err error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		out, err := cmd.CombinedOutput()
+		ch <- result{out, err}
+	}()
+
+	timer := time.NewTimer(60 * time.Second)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		_ = cmd.Process.Kill()
+		return fmt.Errorf("Claude Code ACP 连接超时（60s），请检查网络或 ACP 配置")
+	case r := <-ch:
+		output := strings.TrimSpace(string(r.out))
+		if r.err != nil {
+			if strings.Contains(output, "No available accounts") || strings.Contains(output, "no available accounts") {
+				return fmt.Errorf("ACP 账号池暂时耗尽（503），请稍后重试")
+			}
+			if strings.Contains(output, "模型配置不存在") {
+				return fmt.Errorf("ACP 代理不支持当前模型，请检查 ACP 配置")
+			}
+			if output != "" {
+				return fmt.Errorf("Claude Code ACP 调用失败: %s", output)
+			}
+			return fmt.Errorf("Claude Code ACP 调用失败: %v", r.err)
+		}
+		return nil
+	}
+}
+
+func (p *claudeCodeACPProvider) Generate(systemPrompt, userPrompt string) (string, error) {
+	prompt := systemPrompt + "\n\n" + userPrompt
+	args := []string{"--print", "--model", p.cfg.Model, prompt}
+	cmd := exec.Command("claude", args...)
+	cmd.Stdin = nil
+	out, err := cmd.Output()
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			return "", fmt.Errorf("Claude Code CLI 调用失败: %s", strings.TrimSpace(string(exitErr.Stderr)))
+		}
+		return "", fmt.Errorf("Claude Code CLI 调用失败: %w", err)
+	}
+	result := strings.TrimSpace(string(out))
+	if result == "" {
+		return "", fmt.Errorf("Claude Code CLI 未返回可用内容")
+	}
+	return result, nil
+}
+
+// --- Codex ACP Provider ---
+
+type codexACPProvider struct {
+	cfg Config
+}
+
+func (p *codexACPProvider) Name() string  { return p.cfg.Name }
+func (p *codexACPProvider) Model() string { return p.cfg.Model }
+
+func (p *codexACPProvider) TestConnection() error {
+	cmd := exec.Command("codex", "--version")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("Codex CLI 未安装或不可用: %v", strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+func (p *codexACPProvider) Generate(systemPrompt, userPrompt string) (string, error) {
+	prompt := systemPrompt + "\n\n" + userPrompt
+	args := []string{"--quiet", "--model", p.cfg.Model, prompt}
+	cmd := exec.Command("codex", args...)
+	out, err := cmd.Output()
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			return "", fmt.Errorf("Codex CLI 调用失败: %s", strings.TrimSpace(string(exitErr.Stderr)))
+		}
+		return "", fmt.Errorf("Codex CLI 调用失败: %w", err)
+	}
+	result := strings.TrimSpace(string(out))
+	if result == "" {
+		return "", fmt.Errorf("Codex CLI 未返回可用内容")
+	}
+	return result, nil
 }

@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	appcli "github.com/blueship581/pinru/app/cli"
+	appprompt "github.com/blueship581/pinru/app/prompt"
 	"github.com/blueship581/pinru/app/testutil"
 	"github.com/blueship581/pinru/internal/store"
 )
@@ -29,12 +30,12 @@ func TestExtractPromptFromCLIOutputPrefersJSON(t *testing.T) {
 		t.Fatalf("json.Marshal() error = %v", err)
 	}
 
-	got, err := extractPromptFromCLIOutput(string(jsonBody))
+	got, err := appprompt.ExtractPromptFromCLIOutput(string(jsonBody))
 	if err != nil {
-		t.Fatalf("extractPromptFromCLIOutput() error = %v", err)
+		t.Fatalf("appprompt.ExtractPromptFromCLIOutput() error = %v", err)
 	}
 	if got != expected {
-		t.Fatalf("extractPromptFromCLIOutput() = %q, want %q", got, expected)
+		t.Fatalf("appprompt.ExtractPromptFromCLIOutput() = %q, want %q", got, expected)
 	}
 }
 
@@ -46,18 +47,18 @@ func TestExtractPromptFromCLIOutputPrefersMarkers(t *testing.T) {
 
 	output := strings.Join([]string{
 		"已完成，结果如下：",
-		promptOutputStartMarker,
+		appprompt.PromptOutputStartMarker,
 		expected,
-		promptOutputEndMarker,
+		appprompt.PromptOutputEndMarker,
 		"已写入：/tmp/demo/任务提示词.md",
 	}, "\n")
 
-	got, err := extractPromptFromCLIOutput(output)
+	got, err := appprompt.ExtractPromptFromCLIOutput(output)
 	if err != nil {
-		t.Fatalf("extractPromptFromCLIOutput() error = %v", err)
+		t.Fatalf("appprompt.ExtractPromptFromCLIOutput() error = %v", err)
 	}
 	if got != expected {
-		t.Fatalf("extractPromptFromCLIOutput() = %q, want %q", got, expected)
+		t.Fatalf("appprompt.ExtractPromptFromCLIOutput() = %q, want %q", got, expected)
 	}
 }
 
@@ -75,12 +76,12 @@ func TestExtractPromptFromCLIOutputStripsLegacyStatusLines(t *testing.T) {
 		"已写入：/tmp/demo/任务提示词.md",
 	}, "\n")
 
-	got, err := extractPromptFromCLIOutput(output)
+	got, err := appprompt.ExtractPromptFromCLIOutput(output)
 	if err != nil {
-		t.Fatalf("extractPromptFromCLIOutput() error = %v", err)
+		t.Fatalf("appprompt.ExtractPromptFromCLIOutput() error = %v", err)
 	}
 	if got != expected {
-		t.Fatalf("extractPromptFromCLIOutput() = %q, want %q", got, expected)
+		t.Fatalf("appprompt.ExtractPromptFromCLIOutput() = %q, want %q", got, expected)
 	}
 }
 

@@ -11,9 +11,12 @@ import {
   deleteTask,
   openTaskLocalFolder,
 } from '../../api/task';
+import { generateTaskPrompt } from '../../api/llm';
+import {
+  BatchActionBar,
+} from './components/BatchActionBar';
 import {
   CardSize,
-  STATUS,
 } from './components/BoardPresentation';
 import {
   BoardMainContent,
@@ -73,6 +76,8 @@ export default function Board() {
   const [taskCardContextMenuError, setTaskCardContextMenuError] = useState('');
   const [taskCardFolderOpening, setTaskCardFolderOpening] = useState(false);
   const [drawerEscCloseHintVisible, setDrawerEscCloseHintVisible] = useState(false);
+  const [selectionMode, setSelectionMode] = useState(false);
+  const [selectedTaskIds, setSelectedTaskIds] = useState<Set<string>>(new Set());
   const taskCardContextMenuRef = useRef<HTMLDivElement | null>(null);
   const drawerEscCloseHintTimeoutRef = useRef<number | null>(null);
   const drawerEscLastPressedAtRef = useRef<number | null>(null);
@@ -173,7 +178,12 @@ export default function Board() {
     }
 
     const handlePointerDown = (event: PointerEvent) => {
-      if (taskCardContextMenuRef.current?.contains(event.target as Node)) {
+      const target = event.target as Node;
+      if (taskCardContextMenuRef.current?.contains(target)) {
+        return;
+      }
+      // Also allow clicks inside the prompt-gen fly-out portal
+      if ((target as Element).closest?.('[data-prompt-gen-flyout]')) {
         return;
       }
       setTaskCardContextMenu(null);
@@ -262,6 +272,60 @@ export default function Board() {
   useEffect(() => () => {
     clearDrawerEscCloseHintTimer();
   }, []);
+
+  useEffect(() => {
+    if (!selectionMode || detail.selected) return undefined;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        exitSelectionMode();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [selectionMode, detail.selected]);
+
+  const toggleSelectionMode = () => {
+    setSelectionMode((prev) => {
+      if (prev) setSelectedTaskIds(new Set());
+      return !prev;
+    });
+  };
+
+  const toggleTaskSelection = (taskId: string) => {
+    setSelectedTaskIds((prev) => {
+      const next = new Set(prev);
+      next.has(taskId) ? next.delete(taskId) : next.add(taskId);
+      return next;
+    });
+  };
+
+  const exitSelectionMode = () => {
+    setSelectionMode(false);
+    setSelectedTaskIds(new Set());
+  };
+
+  const handleGeneratePromptFromContextMenu = (constraints: string[], scope: string) => {
+    if (!taskCardContextMenu) return;
+    const { task } = taskCardContextMenu;
+    closeTaskCardContextMenu();
+
+    void (async () => {
+      try {
+        await generateTaskPrompt({
+          taskId: task.id,
+          taskType: task.taskType,
+          constraints: constraints.length > 0 ? constraints : ['无约束'],
+          scopes: scope ? [scope] : [],
+          thinkingBudget: '',
+        });
+      } finally {
+        void loadTasks();
+      }
+    })();
+
+    // Refresh quickly so the task card shows 'running' status
+    window.setTimeout(() => void loadTasks(), 400);
+  };
 
   const handleOpenTaskLocalFolder = async () => {
     if (!taskCardContextMenu || taskCardFolderOpening) {
@@ -388,6 +452,10 @@ export default function Board() {
           setDeleteError('');
           setPendingDelete(task);
         }}
+        selectionMode={selectionMode}
+        selectedTaskIds={selectedTaskIds}
+        onToggleSelectionMode={toggleSelectionMode}
+        onToggleTaskSelection={toggleTaskSelection}
       />
 
       <BoardLayerStack
@@ -396,20 +464,31 @@ export default function Board() {
         availableTaskTypes={availableTaskTypes}
         statusOptions={COLUMNS}
         localFolderOpening={taskCardFolderOpening}
-        localFolderError={taskCardContextMenuError}
+        actionError={taskCardContextMenuError}
         onOpenLocalFolder={() => {
           void handleOpenTaskLocalFolder();
         }}
-        onCloseTaskCardContextMenu={closeTaskCardContextMenu}
         onTaskCardStatusChange={(status) => {
           if (!taskCardContextMenu) return;
           closeTaskCardContextMenu();
           void detail.handleStatusChange(taskCardContextMenu.task.id, status);
         }}
-        onTaskCardTaskTypeChange={(taskType) => {
+        onTaskCardGeneratePrompt={handleGeneratePromptFromContextMenu}
+        onTaskCardTaskTypeChange={async (taskType) => {
           if (!taskCardContextMenu) return;
-          closeTaskCardContextMenu();
-          void detail.handleTaskTypeChange(taskCardContextMenu.task.id, taskType);
+          setTaskCardContextMenuError('');
+          const result = await detail.handleTaskTypeChange(
+            taskCardContextMenu.task.id,
+            taskType,
+            { skipConfirm: true },
+          );
+          if (result.ok) {
+            closeTaskCardContextMenu();
+            return;
+          }
+          if (result.error) {
+            setTaskCardContextMenuError(result.error);
+          }
         }}
         showProjectOverview={showProjectOverview}
         activeProject={activeProject}
@@ -435,11 +514,6 @@ export default function Board() {
         onCloseDetailDrawer={closeDetailDrawer}
         projectQuotas={projectQuotas}
         sourceModelName={sourceModelName}
-        onOpenPrompt={() => {
-          if (!detail.selected) return;
-          closeDetailDrawer();
-          navigate(`/prompt?taskId=${detail.selected.id}`);
-        }}
         onOpenSubmit={() => {
           if (!detail.selected) return;
           closeDetailDrawer();
@@ -452,6 +526,19 @@ export default function Board() {
           setShowProjectPanel(false);
         }}
       />
+
+      {selectionMode && selectedTaskIds.size > 0 && (
+        <BatchActionBar
+          selectedCount={selectedTaskIds.size}
+          selectedTaskIds={selectedTaskIds}
+          availableTaskTypes={availableTaskTypes}
+          onDone={() => {
+            void loadTasks();
+            exitSelectionMode();
+          }}
+          onCancel={exitSelectionMode}
+        />
+      )}
     </div>
   );
 }

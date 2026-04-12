@@ -1,6 +1,6 @@
 import { callService } from './wails';
 
-export type LlmProviderType = 'openai_compatible' | 'anthropic';
+export type LlmProviderType = 'openai_compatible' | 'anthropic' | 'claude_code_acp' | 'codex_acp';
 
 export interface LlmProviderConfig {
   id: string;
@@ -20,6 +20,7 @@ export interface GeneratePromptRequest {
   scopes: string[];
   constraints: string[];
   additionalNotes?: string | null;
+  thinkingBudget?: string;
 }
 
 export interface AnalyzedFileSnippet {

@@ -3,13 +3,18 @@ import type { TaskDetailDrawerTab } from '../../../shared/components/TaskDetailD
 import {
   buildTaskTypeChangeConfirmMessage,
   DEFAULT_TASK_TYPE,
+  getLlmProviders,
   getProjectTaskSettings,
   normalizeTaskTypeName,
   type ProjectConfig,
 } from '../../../api/config';
 import {
+  generateTaskPrompt,
   saveTaskPrompt,
+  type GeneratePromptRequest,
+  type LlmProviderConfig,
 } from '../../../api/llm';
+import { submitJob } from '../../../api/job';
 import {
   extractTaskSessions,
   getTask,
@@ -41,6 +46,8 @@ import {
   normalizePromptGenerationStatus,
 } from '../components/BoardPresentation';
 import { useAppStore, type Task, type TaskStatus } from '../../../store';
+
+const PROMPT_GENERATION_TIMEOUT_MS = 1_200_000;
 
 function getDefaultTaskDetailTab(status?: TaskStatus | null): TaskDetailDrawerTab {
   return status === 'Submitted' ? 'sessions' : 'prompt';
@@ -78,6 +85,10 @@ export function useBoardTaskDetail({
   const [promptSaving, setPromptSaving] = useState(false);
   const [promptSaveState, setPromptSaveState] = useState<'idle' | 'saved'>('idle');
   const [promptCopied, setPromptCopied] = useState(false);
+  const [promptGeneratingTaskIds, setPromptGeneratingTaskIds] = useState<Set<string>>(
+    new Set(),
+  );
+  const [llmProviders, setLlmProviders] = useState<LlmProviderConfig[]>([]);
   const [sessionListDraft, setSessionListDraft] = useState<EditableTaskSession[]>([]);
   const [sessionListSaving, setSessionListSaving] = useState(false);
   const [sessionSaveState, setSessionSaveState] = useState<'idle' | 'saved'>('idle');
@@ -91,6 +102,7 @@ export function useBoardTaskDetail({
   const [activeDrawerTab, setActiveDrawerTab] =
     useState<TaskDetailDrawerTab>('prompt');
   const sessionDraftVersionRef = useRef(0);
+  const selectedTaskIdRef = useRef<string | null>(null);
 
   const sessionTaskTypeOptions = useMemo(
     () =>
@@ -114,6 +126,10 @@ export function useBoardTaskDetail({
     selectedTaskDetail?.promptGenerationError ??
     selected?.promptGenerationError ??
     null;
+  const promptGenerating =
+    selected?.id !== undefined && selected?.id !== null
+      ? promptGeneratingTaskIds.has(selected.id)
+      : false;
   const sessionModelOptions = useMemo(
     () => buildSessionModelOptions(selectedModelRuns, sourceModelName),
     [selectedModelRuns, sourceModelName],
@@ -183,6 +199,33 @@ export function useBoardTaskDetail({
     setCopiedSessionId(null);
     setSessionSaveState('idle');
   };
+
+  const setTaskPromptGenerating = (taskId: string, isGenerating: boolean) => {
+    setPromptGeneratingTaskIds((prev) => {
+      const next = new Set(prev);
+      if (isGenerating) {
+        next.add(taskId);
+      } else {
+        next.delete(taskId);
+      }
+      return next;
+    });
+  };
+
+  const patchTaskSummaryState = (taskId: string, patch: Partial<Task>) => {
+    setSelected((prev) =>
+      prev?.id === taskId ? { ...prev, ...patch } : prev,
+    );
+    useAppStore.setState((state) => ({
+      tasks: state.tasks.map((task) =>
+        task.id === taskId ? { ...task, ...patch } : task,
+      ),
+    }));
+  };
+
+  useEffect(() => {
+    selectedTaskIdRef.current = selected?.id ?? null;
+  }, [selected?.id]);
 
   useEffect(() => {
     if (!selected || sessionModelOptions.length === 0) {
@@ -314,7 +357,13 @@ export function useBoardTaskDetail({
     );
   };
 
-  const handleTaskTypeChange = async (taskId: string, nextTaskType: string) => {
+  const handleTaskTypeChange = async (
+    taskId: string,
+    nextTaskType: string,
+    options?: {
+      skipConfirm?: boolean;
+    },
+  ) => {
     const normalizedTaskType = normalizeTaskTypeName(nextTaskType);
     const taskFromStore = tasks.find((task) => task.id === taskId);
     const isSelectedTask = selected?.id === taskId;
@@ -328,10 +377,14 @@ export function useBoardTaskDetail({
       !currentTaskType ||
       normalizedTaskType === currentTaskType
     ) {
-      return;
+      return {
+        ok: false,
+        error: '',
+      };
     }
 
     if (
+      !options?.skipConfirm &&
       !window.confirm(
         buildTaskTypeChangeConfirmMessage(
           currentTaskType,
@@ -339,7 +392,10 @@ export function useBoardTaskDetail({
         ),
       )
     ) {
-      return;
+      return {
+        ok: false,
+        error: '',
+      };
     }
 
     const previousTaskType = taskFromStore?.taskType ?? currentTaskType;
@@ -387,6 +443,10 @@ export function useBoardTaskDetail({
     setTaskTypeChanging(true);
     let updateError: unknown = null;
     let refreshError: unknown = null;
+    let result: { ok: boolean; error: string } = {
+      ok: true,
+      error: '',
+    };
 
     try {
       await updateTaskType(taskId, normalizedTaskType);
@@ -415,9 +475,14 @@ export function useBoardTaskDetail({
       if (isSelectedTask) {
         setDrawerError(message);
       } else {
-        window.alert(message);
         console.error('Failed to update task type:', updateError);
       }
+      result = {
+        ok: false,
+        error: message,
+      };
+      setTaskTypeChanging(false);
+      return result;
     } else if (refreshError) {
       console.error('Failed to refresh task type change state:', refreshError);
       if (isSelectedTask) {
@@ -425,9 +490,17 @@ export function useBoardTaskDetail({
           '任务类型已更新，但详情刷新失败，请重新打开题卡查看最新状态',
         );
       }
+      result = {
+        ok: true,
+        error:
+          '任务类型已更新，但详情刷新失败，请重新打开题卡查看最新状态',
+      };
+      setTaskTypeChanging(false);
+      return result;
     }
 
     setTaskTypeChanging(false);
+    return result;
   };
 
   const handlePromptSave = async () => {
@@ -496,6 +569,109 @@ export function useBoardTaskDetail({
   const handlePromptReset = () => {
     setPromptDraft(selectedTaskDetail?.promptText ?? '');
     setPromptSaveState('idle');
+  };
+
+  useEffect(() => {
+    getLlmProviders()
+      .then(setLlmProviders)
+      .catch(() => setLlmProviders([]));
+  }, []);
+
+  const handleGeneratePrompt = async (config: Omit<GeneratePromptRequest, 'taskId'>) => {
+    const taskId = selected?.id;
+    if (!taskId) return;
+
+    setTaskPromptGenerating(taskId, true);
+    setDrawerError('');
+
+    const inputPayload = JSON.stringify({ taskId, ...config });
+
+    try {
+      await submitJob({
+        jobType: 'prompt_generate',
+        taskId,
+        inputPayload,
+        timeoutSeconds: PROMPT_GENERATION_TIMEOUT_MS / 1000,
+      });
+      const now = Math.floor(Date.now() / 1000);
+      setSelectedTaskDetail((prev) =>
+        prev?.id === taskId
+          ? {
+              ...prev,
+              promptGenerationStatus: 'running',
+              promptGenerationError: null,
+              promptGenerationStartedAt: prev.promptGenerationStartedAt ?? now,
+              promptGenerationFinishedAt: null,
+            }
+          : prev,
+      );
+      patchTaskSummaryState(taskId, {
+        promptGenerationStatus: 'running',
+        promptGenerationError: null,
+      });
+      useAppStore.getState().loadBackgroundJobs();
+    } catch (submitErr) {
+      if (selectedTaskIdRef.current === taskId) {
+        setDrawerError(
+          submitErr instanceof Error ? submitErr.message : '提交后台任务失败',
+        );
+      }
+      setTaskPromptGenerating(taskId, false);
+      return;
+    }
+
+    // Poll task detail until prompt generation completes
+    let safetyTimeout = 0;
+    const pollInterval = window.setInterval(async () => {
+      try {
+        const taskDetail = await getTask(taskId);
+        if (!taskDetail) return;
+
+        const status = normalizePromptGenerationStatus(taskDetail.promptGenerationStatus);
+        if (status === 'done') {
+          window.clearInterval(pollInterval);
+          window.clearTimeout(safetyTimeout);
+          if (selectedTaskIdRef.current === taskId) {
+            setPromptDraft(taskDetail.promptText ?? '');
+            setSelectedTaskDetail(taskDetail);
+          }
+          patchTaskSummaryState(taskId, {
+            status: 'PromptReady' as TaskStatus,
+            promptGenerationStatus: 'done' as PromptGenerationStatus,
+            promptGenerationError: null,
+          });
+          updateTaskStatusInStore(taskId, 'PromptReady');
+          setTaskPromptGenerating(taskId, false);
+          await loadTasks();
+          useAppStore.getState().loadBackgroundJobs();
+        } else if (status === 'error') {
+          window.clearInterval(pollInterval);
+          window.clearTimeout(safetyTimeout);
+          if (selectedTaskIdRef.current === taskId) {
+            setSelectedTaskDetail(taskDetail);
+            setDrawerError(taskDetail.promptGenerationError ?? '提示词生成失败');
+          }
+          patchTaskSummaryState(taskId, {
+            promptGenerationStatus: 'error' as PromptGenerationStatus,
+            promptGenerationError: taskDetail.promptGenerationError,
+          });
+          setTaskPromptGenerating(taskId, false);
+          await loadTasks();
+          useAppStore.getState().loadBackgroundJobs();
+        }
+      } catch {
+        // ignore poll errors
+      }
+    }, 1500);
+
+    // Safety: stop polling after the background job timeout window.
+    safetyTimeout = window.setTimeout(() => {
+      window.clearInterval(pollInterval);
+      if (selectedTaskIdRef.current === taskId) {
+        setDrawerError('提示词生成等待超时，请查看后台任务面板或重试');
+      }
+      setTaskPromptGenerating(taskId, false);
+    }, PROMPT_GENERATION_TIMEOUT_MS);
   };
 
   const handleAddSession = () => {
@@ -888,6 +1064,9 @@ export function useBoardTaskDetail({
     handlePromptCopy,
     handlePromptReset,
     handlePromptSave,
+    promptGenerating,
+    llmProviders,
+    handleGeneratePrompt,
     applyExtractedSessionCandidate,
     closeSessionExtractCandidates,
   };

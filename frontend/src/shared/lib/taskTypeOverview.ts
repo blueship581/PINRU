@@ -5,6 +5,7 @@ import { countCountedSessionsByTaskType } from './sessionUtils';
 export type TaskTypeOverviewSummary = {
   taskType: string;
   remainingQuota: number | null;
+  remainingToCompleteCount: number | null;
   waitingTasks: Task[];
   processingTasks: Task[];
   submittedTasks: Task[];
@@ -15,6 +16,20 @@ export type TaskTypeOverviewSummary = {
 };
 
 const PROCESSING_STATUSES: TaskStatus[] = ['Downloading', 'Downloaded', 'PromptReady'];
+
+export function getTaskTypeRemainingToCompleteCount(
+  taskType: string,
+  projectQuotas: TaskTypeQuotas,
+  projectTotals: TaskTypeQuotas,
+  submittedSessionCount: number,
+) {
+  const fixedTotal = getTaskTypeQuotaValue(projectTotals, taskType);
+  if (fixedTotal !== null) {
+    return Math.max(0, fixedTotal - submittedSessionCount);
+  }
+
+  return getTaskTypeQuotaValue(projectQuotas, taskType);
+}
 
 export function buildTaskTypeOverviewSummaries(
   availableTaskTypes: string[],
@@ -40,15 +55,22 @@ export function buildTaskTypeOverviewSummaries(
     );
     const submittedTasks = matchingTasks.filter((task) => task.status === 'Submitted');
     const errorTasks = matchingTasks.filter((task) => task.status === 'Error');
+    const submittedSessionCount = submittedSessionsByTaskType[taskType] ?? 0;
 
     return {
       taskType,
       remainingQuota,
+      remainingToCompleteCount: getTaskTypeRemainingToCompleteCount(
+        taskType,
+        projectQuotas,
+        projectTotals,
+        submittedSessionCount,
+      ),
       waitingTasks,
       processingTasks,
       submittedTasks,
       errorTasks,
-      submittedSessionCount: submittedSessionsByTaskType[taskType] ?? 0,
+      submittedSessionCount,
       allocatedSessionCount: countedSessionsByTaskType[taskType] ?? 0,
       totalTaskCount:
         fixedTotal ??

@@ -1,13 +1,12 @@
+import { useEffect, useRef, useState } from 'react';
 import {
   ChevronDown,
-  FileText,
   MessageSquarePlus,
   Plus,
   Settings2,
   Sparkles,
   Terminal,
   TriangleAlert,
-  X,
   Zap,
 } from 'lucide-react';
 import type { ExecMode, ThinkingDepth } from '../../../api/cli';
@@ -30,16 +29,9 @@ type PromptTaskTypeOption = {
   desc: string;
 };
 
-type ConstraintOption = {
-  value: string;
-  label: string;
-};
+import type { ConstraintOption, ScopeOption } from '../../../shared/lib/promptConstants';
 
-type ScopeOption = {
-  value: string;
-  label: string;
-  desc: string;
-};
+// ── PromptSidebar ─────────────────────────────────────────────────────────────
 
 export function PromptSidebar({
   selectedTask,
@@ -177,6 +169,8 @@ export function PromptSidebar({
   );
 }
 
+// ── PromptToolbar ─────────────────────────────────────────────────────────────
+
 export function PromptToolbar({
   models,
   selectedModel,
@@ -186,17 +180,11 @@ export function PromptToolbar({
   selectedThinking,
   mode,
   cliAvailable,
-  selectedTaskId,
-  promptGenerationMeta,
-  showGenPanel,
-  taskLocalPath,
   sending,
-  promptGenerationStatus,
   onModelChange,
   onWorkspaceChange,
   onThinkingChange,
   onModeChange,
-  onToggleGeneratePanel,
 }: {
   models: Array<{ id: string; label: string }>;
   selectedModel: string;
@@ -206,17 +194,11 @@ export function PromptToolbar({
   selectedThinking: ThinkingDepth;
   mode: ExecMode;
   cliAvailable: boolean | null;
-  selectedTaskId: string;
-  promptGenerationMeta: PromptGenerationMeta;
-  showGenPanel: boolean;
-  taskLocalPath: string | null;
   sending: boolean;
-  promptGenerationStatus: PromptGenerationStatus;
   onModelChange: (value: string) => void;
   onWorkspaceChange: (value: string) => void;
   onThinkingChange: (value: ThinkingDepth) => void;
   onModeChange: (value: ExecMode) => void;
-  onToggleGeneratePanel: () => void;
 }) {
   return (
     <div className="flex-shrink-0 flex items-center gap-2 px-5 py-2.5 border-b border-stone-200 dark:border-stone-800 bg-white dark:bg-stone-900">
@@ -320,183 +302,218 @@ export function PromptToolbar({
         默认权限
       </button>
 
-      <div className="ml-auto flex items-center gap-2">
-        {cliAvailable === false && (
-          <div className="flex items-center gap-1.5 text-[11px] text-amber-600 dark:text-amber-400">
-            <TriangleAlert className="w-3.5 h-3.5" />
-            <span>claude CLI 未安装</span>
-          </div>
-        )}
-
-        {selectedTaskId && (
-          <span className={`px-2.5 py-1 rounded-full text-[11px] font-semibold ${promptGenerationMeta.badgeCls}`}>
-            提示词 {promptGenerationMeta.label}
-          </span>
-        )}
-
-        <button
-          onClick={onToggleGeneratePanel}
-          disabled={!taskLocalPath || sending || promptGenerationStatus === 'running'}
-          title="出题"
-          className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-[11px] font-medium transition-colors cursor-default disabled:opacity-40 ${
-            showGenPanel
-              ? 'bg-indigo-600 text-white'
-              : 'text-stone-500 dark:text-stone-400 hover:bg-stone-100 dark:hover:bg-stone-800 hover:text-stone-700 dark:hover:text-stone-200'
-          }`}
-        >
-          <FileText className="w-3.5 h-3.5" />
-          出题
-        </button>
-      </div>
+      {cliAvailable === false && (
+        <div className="ml-auto flex items-center gap-1.5 text-[11px] text-amber-600 dark:text-amber-400">
+          <TriangleAlert className="w-3.5 h-3.5" />
+          <span>claude CLI 未安装</span>
+        </div>
+      )}
     </div>
   );
 }
 
-export function PromptGenerationPanel({
-  selectedWorkspace,
+// ── MultiSelectDropdown ───────────────────────────────────────────────────────
+
+function MultiSelectDropdown({
+  label,
+  options,
+  selected,
+  disabled,
+  onToggle,
+}: {
+  label: string;
+  options: Array<{ value: string; label: string }>;
+  selected: string[];
+  disabled?: boolean;
+  onToggle: (value: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const handler = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) {
+        setOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [open]);
+
+  const displayText =
+    selected.length === 0
+      ? label
+      : selected.length === options.length
+        ? `${label}（全选）`
+        : `${label}（${selected.length}）`;
+
+  return (
+    <div className="relative" ref={ref}>
+      <button
+        type="button"
+        onClick={() => !disabled && setOpen((v) => !v)}
+        disabled={disabled}
+        className={`flex items-center gap-1 px-3 py-1.5 rounded-lg text-[11px] font-medium border transition-colors cursor-default disabled:opacity-50 ${
+          selected.length > 0
+            ? 'border-indigo-300 bg-indigo-50 text-indigo-700 dark:border-indigo-700 dark:bg-indigo-950/40 dark:text-indigo-300'
+            : 'border-stone-200 dark:border-stone-700 text-stone-500 dark:text-stone-400 hover:border-stone-300 dark:hover:border-stone-600 bg-white dark:bg-stone-900'
+        }`}
+      >
+        {displayText}
+        <ChevronDown className={`w-3 h-3 transition-transform ${open ? 'rotate-180' : ''}`} />
+      </button>
+      {open && (
+        <div className="absolute top-full mt-1 left-0 z-30 min-w-[160px] rounded-xl border border-stone-200 dark:border-stone-700 bg-white dark:bg-stone-900 shadow-xl overflow-hidden">
+          {options.map((opt) => {
+            const checked = selected.includes(opt.value);
+            return (
+              <label
+                key={opt.value}
+                className="flex items-center gap-2.5 px-3 py-2 hover:bg-stone-50 dark:hover:bg-stone-800 cursor-default"
+              >
+                <input
+                  type="checkbox"
+                  checked={checked}
+                  onChange={() => onToggle(opt.value)}
+                  className="w-3.5 h-3.5 accent-indigo-600 cursor-default"
+                />
+                <span className="text-xs text-stone-600 dark:text-stone-300">{opt.label}</span>
+              </label>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── PromptGenerationBar ───────────────────────────────────────────────────────
+
+export function PromptGenerationBar({
   promptTaskTypes,
   constraintTypes,
   scopeTypes,
   genTaskType,
   genConstraints,
-  genScopes,
+  genScope,
   sending,
   promptGenerationStatus,
-  onClose,
+  promptGenerationMeta,
+  confirming,
   onTaskTypeChange,
   onConstraintToggle,
-  onScopeToggle,
-  onGenerate,
+  onScopeChange,
+  onGenerateClick,
+  onConfirm,
+  onCancelConfirm,
 }: {
-  selectedWorkspace: TaskWorkspaceOption | null;
   promptTaskTypes: PromptTaskTypeOption[];
   constraintTypes: readonly ConstraintOption[];
   scopeTypes: readonly ScopeOption[];
   genTaskType: string;
   genConstraints: string[];
-  genScopes: string[];
+  genScope: string;
   sending: boolean;
   promptGenerationStatus: PromptGenerationStatus;
-  onClose: () => void;
+  promptGenerationMeta: PromptGenerationMeta;
+  confirming: boolean;
   onTaskTypeChange: (value: string) => void;
   onConstraintToggle: (value: string) => void;
-  onScopeToggle: (value: string) => void;
-  onGenerate: () => void;
+  onScopeChange: (value: string) => void;
+  onGenerateClick: () => void;
+  onConfirm: () => void;
+  onCancelConfirm: () => void;
 }) {
-  return (
-    <div className="flex-shrink-0 border-b border-indigo-100 dark:border-indigo-900/40 bg-indigo-50/60 dark:bg-indigo-950/20 px-5 py-4">
-      <div className="max-w-3xl mx-auto space-y-4">
-        <div className="flex items-center justify-between">
-          <span className="text-xs font-semibold text-indigo-700 dark:text-indigo-400 uppercase tracking-wider">
-            出题配置
-          </span>
-          <button
-            onClick={onClose}
-            className="text-stone-400 hover:text-stone-600 cursor-default"
-          >
-            <X className="w-3.5 h-3.5" />
-          </button>
-        </div>
+  const isRunning = promptGenerationStatus === 'running';
+  const canGenerate = !!genTaskType && !!genScope;
+  const isDisabled = sending || isRunning;
 
-        {selectedWorkspace && (
-          <div className="rounded-xl border border-indigo-100 bg-white/70 px-3 py-2 dark:border-indigo-900/40 dark:bg-stone-900/40">
-            <p className="text-[10px] font-medium uppercase tracking-wider text-stone-500 dark:text-stone-400">
-              当前模型目录
-            </p>
-            <p className="mt-1 text-xs font-medium text-stone-700 dark:text-stone-200">
-              {formatWorkspaceOptionLabel(selectedWorkspace)}
-            </p>
-            <p className="mt-1 break-all font-mono text-[11px] text-stone-500 dark:text-stone-400">
-              {selectedWorkspace.path}
-            </p>
-          </div>
+  return (
+    <div className="flex-shrink-0 flex items-center gap-2.5 px-5 py-2 border-b border-stone-200 dark:border-stone-800 bg-stone-50/80 dark:bg-stone-900/60 flex-wrap">
+      {/* Task type */}
+      <select
+        value={genTaskType}
+        onChange={(e) => onTaskTypeChange(e.target.value)}
+        disabled={isDisabled}
+        className="rounded-lg border border-stone-200 dark:border-stone-700 bg-white dark:bg-stone-900 px-3 py-1.5 text-[11px] font-medium text-stone-600 dark:text-stone-300 outline-none transition hover:border-stone-300 disabled:opacity-50 cursor-default"
+      >
+        <option value="">任务类型</option>
+        {promptTaskTypes.map((t) => (
+          <option key={t.value} value={t.value} title={t.desc}>
+            {t.label}
+          </option>
+        ))}
+      </select>
+
+      {/* Constraints multi-select */}
+      <MultiSelectDropdown
+        label="约束种类"
+        options={constraintTypes as Array<{ value: string; label: string }>}
+        selected={genConstraints}
+        disabled={isDisabled}
+        onToggle={onConstraintToggle}
+      />
+
+      {/* Scope single-select */}
+      <select
+        value={genScope}
+        onChange={(e) => onScopeChange(e.target.value)}
+        disabled={isDisabled}
+        className={`rounded-lg border px-3 py-1.5 text-[11px] font-medium outline-none transition disabled:opacity-50 cursor-default ${
+          genScope
+            ? 'border-indigo-300 bg-indigo-50 text-indigo-700 dark:border-indigo-700 dark:bg-indigo-950/40 dark:text-indigo-300'
+            : 'border-stone-200 dark:border-stone-700 text-stone-500 dark:text-stone-400 bg-white dark:bg-stone-900 hover:border-stone-300 dark:hover:border-stone-600'
+        }`}
+      >
+        <option value="">修改范围</option>
+        {scopeTypes.map((s) => (
+          <option key={s.value} value={s.value}>{s.label}</option>
+        ))}
+      </select>
+
+      <div className="ml-auto flex items-center gap-2">
+        {/* Status badge */}
+        <span className={`px-2.5 py-1 rounded-full text-[11px] font-semibold ${promptGenerationMeta.badgeCls}`}>
+          {promptGenerationMeta.label}
+        </span>
+
+        {/* Confirm warning */}
+        {confirming && (
+          <span className="text-[11px] text-amber-600 dark:text-amber-400 font-medium">
+            将覆盖现有提示词，确认？
+          </span>
         )}
 
-        <div>
-          <p className="text-[10px] font-medium text-stone-500 dark:text-stone-400 mb-1.5 uppercase tracking-wider">
-            任务类型
-          </p>
-          <div className="flex flex-wrap gap-1.5">
-            {promptTaskTypes.map((taskType) => (
-              <button
-                key={taskType.value}
-                onClick={() => onTaskTypeChange(taskType.value)}
-                title={taskType.desc}
-                className={`px-2.5 py-1 rounded-lg text-[11px] font-medium transition-colors cursor-default border ${
-                  genTaskType === taskType.value
-                    ? 'bg-indigo-600 text-white border-indigo-600'
-                    : 'border-stone-200 dark:border-stone-700 text-stone-600 dark:text-stone-300 hover:border-indigo-400 hover:text-indigo-600'
-                }`}
-              >
-                {taskType.label}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        <div className="flex gap-6">
-          <div className="flex-1">
-            <p className="text-[10px] font-medium text-stone-500 dark:text-stone-400 mb-1.5 uppercase tracking-wider">
-              约束种类（多选）
-            </p>
-            <div className="flex flex-wrap gap-1.5">
-              {constraintTypes.map((constraint) => {
-                const active = genConstraints.includes(constraint.value);
-
-                return (
-                  <button
-                    key={constraint.value}
-                    onClick={() => onConstraintToggle(constraint.value)}
-                    className={`px-2.5 py-1 rounded-lg text-[11px] font-medium transition-colors cursor-default border ${
-                      active
-                        ? 'bg-emerald-600 text-white border-emerald-600'
-                        : 'border-stone-200 dark:border-stone-700 text-stone-600 dark:text-stone-300 hover:border-emerald-400 hover:text-emerald-600'
-                    }`}
-                  >
-                    {constraint.label}
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-
-          <div className="flex-1">
-            <p className="text-[10px] font-medium text-stone-500 dark:text-stone-400 mb-1.5 uppercase tracking-wider">
-              修改范围（多选）
-            </p>
-            <div className="flex flex-wrap gap-1.5">
-              {scopeTypes.map((scope) => {
-                const active = genScopes.includes(scope.value);
-
-                return (
-                  <button
-                    key={scope.value}
-                    onClick={() => onScopeToggle(scope.value)}
-                    title={scope.desc}
-                    className={`px-2.5 py-1 rounded-lg text-[11px] font-medium transition-colors cursor-default border ${
-                      active
-                        ? 'bg-amber-500 text-white border-amber-500'
-                        : 'border-stone-200 dark:border-stone-700 text-stone-600 dark:text-stone-300 hover:border-amber-400 hover:text-amber-600'
-                    }`}
-                  >
-                    {scope.label}
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-        </div>
-
-        <div className="flex justify-end">
+        {/* Cancel button */}
+        {confirming && (
           <button
-            onClick={onGenerate}
-            disabled={!genTaskType || genScopes.length === 0 || sending || promptGenerationStatus === 'running'}
-            className="flex items-center gap-2 px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-semibold transition-colors cursor-default disabled:opacity-40"
+            type="button"
+            onClick={onCancelConfirm}
+            className="px-3 py-1.5 rounded-lg text-[11px] font-medium text-stone-500 dark:text-stone-400 border border-stone-200 dark:border-stone-700 hover:bg-stone-100 dark:hover:bg-stone-800 transition-colors cursor-default"
           >
-            <Sparkles className="w-3.5 h-3.5" />
-            开始出题
+            取消
           </button>
-        </div>
+        )}
+
+        {/* Generate / Confirm button */}
+        <button
+          type="button"
+          onClick={confirming ? onConfirm : onGenerateClick}
+          disabled={!canGenerate || isDisabled}
+          className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-semibold transition-colors cursor-default disabled:opacity-40 ${
+            confirming
+              ? 'bg-amber-500 hover:bg-amber-600 text-white'
+              : 'bg-indigo-600 hover:bg-indigo-700 text-white'
+          }`}
+        >
+          <Sparkles className="w-3 h-3" />
+          {confirming
+            ? '确认重新出题'
+            : promptGenerationStatus === 'done'
+              ? '重新出题'
+              : '开始出题'}
+        </button>
       </div>
     </div>
   );

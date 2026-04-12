@@ -14,14 +14,17 @@ type ServiceResult<S extends ServiceName, M extends MethodName<S>> =
   ServiceMethodDef<S, M> extends { result: infer Result } ? Result : never;
 
 const servicePrefixes: Record<ServiceName, readonly string[]> = {
-  ChatService: ['main', 'github.com/blueship581/pinru/app/chat'],
-  CliService: ['main', 'github.com/blueship581/pinru/app/cli'],
-  ConfigService: ['main', 'github.com/blueship581/pinru/app/config'],
-  GitService: ['main', 'github.com/blueship581/pinru/app/git'],
-  PromptService: ['main', 'github.com/blueship581/pinru/app/prompt'],
-  SubmitService: ['main', 'github.com/blueship581/pinru/app/submit'],
-  TaskService: ['main', 'github.com/blueship581/pinru/app/task'],
+  ChatService: ['github.com/blueship581/pinru/app/chat', 'main'],
+  CliService: ['github.com/blueship581/pinru/app/cli', 'main'],
+  ConfigService: ['github.com/blueship581/pinru/app/config', 'main'],
+  GitService: ['github.com/blueship581/pinru/app/git', 'main'],
+  JobService: ['github.com/blueship581/pinru/app/job', 'main'],
+  PromptService: ['github.com/blueship581/pinru/app/prompt', 'main'],
+  SubmitService: ['github.com/blueship581/pinru/app/submit', 'main'],
+  TaskService: ['github.com/blueship581/pinru/app/task', 'main'],
 };
+
+const resolvedServicePrefixes = new Map<ServiceName, string>();
 
 function normalizeServiceError(error: unknown) {
   const rawMessage =
@@ -60,10 +63,19 @@ export async function callService<S extends ServiceName, M extends MethodName<S>
   ...args: ServiceArgs<S, M>
 ): Promise<ServiceResult<S, M>> {
   let lastError: unknown = null;
+  const cachedPrefix = resolvedServicePrefixes.get(serviceName);
+  const candidatePrefixes = cachedPrefix
+    ? [
+        cachedPrefix,
+        ...servicePrefixes[serviceName].filter((prefix) => prefix !== cachedPrefix),
+      ]
+    : servicePrefixes[serviceName];
 
-  for (const prefix of servicePrefixes[serviceName]) {
+  for (const prefix of candidatePrefixes) {
     try {
-      return await Call.ByName(`${prefix}.${serviceName}.${methodName}`, ...args);
+      const result = await Call.ByName(`${prefix}.${serviceName}.${methodName}`, ...args);
+      resolvedServicePrefixes.set(serviceName, prefix);
+      return result;
     } catch (error) {
       lastError = error;
       if (!isUnknownBoundMethodError(error)) {

@@ -10,11 +10,11 @@ import {
   Plus,
   Settings,
   Terminal,
-  Wand2,
   X,
 } from 'lucide-react';
 import { Dialogs } from '@wailsio/runtime';
 import { useEffect, useMemo, useRef, useState } from 'react';
+import BackgroundJobPanel from './BackgroundJobPanel';
 import TaskTypeQuotaEditor from './TaskTypeQuotaEditor';
 import { useAppStore } from '../../store';
 import { inspectDirectory } from '../../api/git';
@@ -32,7 +32,6 @@ import {
 const NAV_ITEMS: Array<{ to: string; label: string; icon: typeof FolderDown; end?: boolean }> = [
   { to: '/', icon: Home, label: '主页', end: true },
   { to: '/claim', icon: FolderDown, label: '领题' },
-  { to: '/prompt', icon: Wand2, label: '操作台' },
   { to: '/submit', icon: GitPullRequest, label: '提交' },
 ];
 
@@ -532,6 +531,8 @@ export default function Layout() {
           <Outlet />
         </div>
       </main>
+
+      <BackgroundJobPanel />
 
       {showProjectModal && (
         <div className="fixed inset-0 z-50 flex items-start justify-center p-4 pt-6 md:items-center md:p-6">

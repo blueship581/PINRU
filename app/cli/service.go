@@ -3,6 +3,7 @@ package cli
 import (
 	"bufio"
 	"context"
+	"embed"
 	"fmt"
 	"io"
 	"os"
@@ -13,9 +14,13 @@ import (
 	"sync"
 	"time"
 
+	"github.com/blueship581/pinru/internal/util"
 	"github.com/google/uuid"
 	"github.com/wailsapp/wails/v3/pkg/application"
 )
+
+//go:embed manuals/*
+var manualFS embed.FS
 
 // Service executes the local claude CLI and streams output back via polling.
 type CliService struct {
@@ -100,6 +105,10 @@ type StartClaudeRequest struct {
 	PermissionMode string `json:"permissionMode"`
 	// AdditionalDirs grants Claude access to paths outside WorkDir when needed.
 	AdditionalDirs []string `json:"additionalDirs"`
+	// EnvOverrides sets additional environment variables for the claude process.
+	// These are applied on top of the current process environment.
+	// Use this instead of --model to bypass CLI argument normalization (e.g. 4-6 → 4.6).
+	EnvOverrides map[string]string `json:"envOverrides,omitempty"`
 }
 
 // StartClaudeResponse holds the session ID for output polling.
@@ -160,6 +169,9 @@ func (s *CliService) StartClaude(req StartClaudeRequest) (*StartClaudeResponse, 
 
 	cmd := exec.CommandContext(ctx, claudePath, args...)
 	cmd.Dir = req.WorkDir
+	if len(req.EnvOverrides) > 0 {
+		cmd.Env = applyEnvOverrides(os.Environ(), req.EnvOverrides)
+	}
 
 	stdoutPipe, err := cmd.StdoutPipe()
 	if err != nil {
@@ -337,19 +349,46 @@ func parseSkillFrontmatter(content, dirName string) (name, description string) {
 
 // InstallBuiltinSkills writes all skills bundled with PINRU to ~/.claude/skills/.
 // Always overwrites to keep the installed version in sync with the binary.
+// Manual dir placeholders ({{MANUAL_DIR}}) in skill content are replaced with
+// the platform-appropriate path before writing.
 func (s *CliService) InstallBuiltinSkills() {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return
 	}
+	manualDir := util.PinruManualDir()
 	for dirName, content := range builtinSkills {
 		skillDir := filepath.Join(home, ".claude", "skills", dirName)
 		skillFile := filepath.Join(skillDir, "SKILL.md")
 		if err := os.MkdirAll(skillDir, 0o755); err != nil {
 			continue
 		}
-		_ = os.WriteFile(skillFile, []byte(content), 0o644)
-		_ = skillFile // written
+		resolved := strings.ReplaceAll(content, "{{MANUAL_DIR}}", manualDir)
+		_ = os.WriteFile(skillFile, []byte(resolved), 0o644)
+	}
+}
+
+// InstallBuiltinManuals extracts the bundled execution manuals to the
+// platform data directory (~/.pinru/manuals/). Always overwrites to keep
+// the installed version in sync with the binary.
+func (s *CliService) InstallBuiltinManuals() {
+	destDir := util.PinruManualDir()
+	if err := os.MkdirAll(destDir, 0o755); err != nil {
+		return
+	}
+	entries, err := manualFS.ReadDir("manuals")
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		data, err := manualFS.ReadFile("manuals/" + entry.Name())
+		if err != nil {
+			continue
+		}
+		_ = os.WriteFile(filepath.Join(destDir, entry.Name()), data, 0o644)
 	}
 }
 
@@ -364,7 +403,7 @@ func validatePermissionMode(mode string) error {
 	case "acceptEdits", "auto", "dontAsk", "plan":
 		return nil
 	case "yolo", "bypassPermissions":
-		return fmt.Errorf("YOLO 权限模式已禁用，请使用默认权限模式")
+		return nil
 	}
 	return fmt.Errorf("不支持的权限模式: %s", trimmed)
 }
@@ -381,9 +420,13 @@ func buildClaudeArgs(req StartClaudeRequest) ([]string, error) {
 		args = append(args, "--model", req.Model)
 	}
 
-	permissionMode := strings.TrimSpace(req.PermissionMode)
-	if permissionMode != "" && permissionMode != "default" {
+	permissionMode := normalizePermissionMode(req.PermissionMode)
+	if permissionMode != "" {
 		args = append(args, "--permission-mode", permissionMode)
+	}
+
+	if shouldSkipPermissions(req.PermissionMode) {
+		args = append(args, "--dangerously-skip-permissions")
 	}
 
 	additionalDirs := uniqueNonEmptyStrings(req.AdditionalDirs)
@@ -398,6 +441,23 @@ func buildClaudeArgs(req StartClaudeRequest) ([]string, error) {
 	}
 
 	return args, nil
+}
+
+func normalizePermissionMode(mode string) string {
+	trimmed := strings.TrimSpace(mode)
+	switch trimmed {
+	case "", "default":
+		return ""
+	case "yolo":
+		return "bypassPermissions"
+	default:
+		return trimmed
+	}
+}
+
+func shouldSkipPermissions(mode string) bool {
+	trimmed := strings.TrimSpace(mode)
+	return trimmed == "" || trimmed == "default" || trimmed == "yolo" || trimmed == "bypassPermissions"
 }
 
 func uniqueNonEmptyStrings(values []string) []string {
@@ -416,6 +476,31 @@ func uniqueNonEmptyStrings(values []string) []string {
 		result = append(result, trimmed)
 	}
 
+	return result
+}
+
+// applyEnvOverrides merges overrides into base environment slice.
+// Each entry in the returned slice has the form "KEY=VALUE".
+// Override keys replace any existing entries for the same key.
+func applyEnvOverrides(base []string, overrides map[string]string) []string {
+	// Build a set of keys to override so we can skip duplicates from base.
+	skip := make(map[string]struct{}, len(overrides))
+	for k := range overrides {
+		skip[strings.ToUpper(k)] = struct{}{}
+	}
+	result := make([]string, 0, len(base)+len(overrides))
+	for _, entry := range base {
+		key := entry
+		if idx := strings.IndexByte(entry, '='); idx >= 0 {
+			key = entry[:idx]
+		}
+		if _, shouldOverride := skip[strings.ToUpper(key)]; !shouldOverride {
+			result = append(result, entry)
+		}
+	}
+	for k, v := range overrides {
+		result = append(result, k+"="+v)
+	}
 	return result
 }
 

@@ -21,9 +21,9 @@ function TaskTypeOverviewBarCard({
             <span className="truncate">{presentation.label}</span>
           </span>
         </div>
-        {summary.remainingQuota !== null && (
+        {summary.remainingToCompleteCount !== null && (
           <span className="shrink-0 text-[11px] font-semibold text-stone-500 dark:text-stone-400 tabular-nums">
-            剩余 {summary.remainingQuota}
+            待完成 {summary.remainingToCompleteCount}
           </span>
         )}
       </div>

@@ -6,6 +6,7 @@ import (
 	"unicode"
 
 	"github.com/blueship581/pinru/internal/analysis"
+	"github.com/blueship581/pinru/internal/util"
 )
 
 // ── 任务类型 ──────────────────────────────────────────────────────────────────
@@ -449,3 +450,7 @@ func isConstraintLine(line string) bool {
 	}
 	return false
 }
+
+// DefaultManualDir 返回执行手册的平台对应存放目录，供 CLI Agent 的 additionalDirs 使用。
+func DefaultManualDir() string { return util.PinruManualDir() }
+

@@ -173,3 +173,19 @@ export async function addModelRun(req: AddModelRunRequest): Promise<void> {
 export async function deleteModelRun(taskId: string, modelName: string): Promise<void> {
   return callService('TaskService', 'DeleteModelRun', taskId, modelName);
 }
+
+export interface BatchUpdateTasksRequest {
+  taskIds: string[];
+  field: 'status' | 'taskType';
+  value: string;
+}
+
+export interface BatchUpdateResult {
+  total: number;
+  succeeded: number;
+  failed: Array<{ taskId: string; error: string }>;
+}
+
+export async function batchUpdateTasks(req: BatchUpdateTasksRequest): Promise<BatchUpdateResult> {
+  return callService('TaskService', 'BatchUpdateTasks', req);
+}

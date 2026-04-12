@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
@@ -25,6 +26,14 @@ func ExpandTilde(path string) string {
 		}
 	}
 	return path
+}
+
+func NormalizePath(path string) string {
+	trimmed := strings.TrimSpace(path)
+	if trimmed == "" {
+		return ""
+	}
+	return filepath.Clean(ExpandTilde(trimmed))
 }
 
 func normalizeManagedFolderToken(value string) string {
@@ -78,13 +87,60 @@ func BuildManagedSourceFolderPath(basePath string, projectID int64, taskType str
 	return filepath.Join(trimmedBase, folderName)
 }
 
+// PinruManualDir returns the platform-appropriate directory for PINRU's
+// bundled execution manuals. Mirrors the DB location (~/.pinru/).
+func PinruManualDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".pinru", "manuals")
+}
+
+// DefaultTraeWorkspaceStoragePath returns the platform-default Trae CN
+// workspaceStorage directory relative to the user's home. Returns empty
+// string when the home directory cannot be determined.
+func DefaultTraeWorkspaceStoragePath() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	var rel string
+	switch runtime.GOOS {
+	case "windows":
+		rel = filepath.Join("AppData", "Roaming", "Trae CN", "User", "workspaceStorage")
+	default: // darwin / linux
+		rel = filepath.Join("Library", "Application Support", "Trae CN", "User", "workspaceStorage")
+	}
+	return filepath.Join(home, rel)
+}
+
+// DefaultTraeLogsPath returns the platform-default Trae CN logs directory
+// relative to the user's home. Returns empty string when the home directory
+// cannot be determined.
+func DefaultTraeLogsPath() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	var rel string
+	switch runtime.GOOS {
+	case "windows":
+		rel = filepath.Join("AppData", "Roaming", "Trae CN", "logs")
+	default: // darwin / linux
+		rel = filepath.Join("Library", "Application Support", "Trae CN", "logs")
+	}
+	return filepath.Join(home, rel)
+}
+
+
 func SamePath(a, b string) bool {
 	trimmedA := strings.TrimSpace(a)
 	trimmedB := strings.TrimSpace(b)
 	if trimmedA == "" || trimmedB == "" {
 		return trimmedA == trimmedB
 	}
-	return filepath.Clean(ExpandTilde(trimmedA)) == filepath.Clean(ExpandTilde(trimmedB))
+	return NormalizePath(trimmedA) == NormalizePath(trimmedB)
 }
 
 func IsWithinBasePath(basePath, targetPath string) bool {
@@ -94,8 +150,8 @@ func IsWithinBasePath(basePath, targetPath string) bool {
 		return false
 	}
 
-	base := filepath.Clean(ExpandTilde(trimmedBase))
-	target := filepath.Clean(ExpandTilde(trimmedTarget))
+	base := NormalizePath(trimmedBase)
+	target := NormalizePath(trimmedTarget)
 	if base == target {
 		return true
 	}

@@ -83,6 +83,13 @@ export interface GitLabSettings {
   hasToken: boolean;
 }
 
+export interface TraeSettings {
+  workspaceStoragePath: string;
+  logsPath: string;
+  defaultWorkspaceStoragePath: string;
+  defaultLogsPath: string;
+}
+
 export async function getConfig(key: string): Promise<string> {
   return callService('ConfigService', 'GetConfig', key);
 }
@@ -113,6 +120,14 @@ export async function getGitLabSettings(): Promise<GitLabSettings> {
 
 export async function saveGitLabSettings(url: string, username: string, token: string): Promise<void> {
   return callService('ConfigService', 'SaveGitLabSettings', url, username, token);
+}
+
+export async function getTraeSettings(): Promise<TraeSettings> {
+  return callService('ConfigService', 'GetTraeSettings');
+}
+
+export async function saveTraeSettings(workspaceStoragePath: string, logsPath: string): Promise<void> {
+  return callService('ConfigService', 'SaveTraeSettings', workspaceStoragePath, logsPath);
 }
 
 // Project CRUD — now backed by dedicated DB table

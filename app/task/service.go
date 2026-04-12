@@ -74,14 +74,24 @@ type AddModelRunRequest struct {
 var taskIdentityTokenPattern = regexp.MustCompile(`[^a-zA-Z0-9]+`)
 
 func (s *TaskService) ListTasks(projectConfigID *string) ([]store.Task, error) {
-	return s.store.ListTasks(projectConfigID)
+	tasks, err := s.store.ListTasks(projectConfigID)
+	if err != nil {
+		return nil, err
+	}
+	return normalizeTaskPaths(tasks), nil
 }
 
 func (s *TaskService) GetTask(id string) (*store.Task, error) {
-	return s.store.GetTask(id)
+	task, err := s.store.GetTask(id)
+	if err != nil || task == nil {
+		return task, err
+	}
+	normalized := normalizeTaskPath(*task)
+	return &normalized, nil
 }
 
 func (s *TaskService) CreateTask(req CreateTaskRequest) (*store.Task, error) {
+	req = normalizeCreateTaskRequestPaths(req)
 	taskID := buildTaskID(req)
 
 	if existing, err := s.findExistingTask(req); err != nil {
@@ -150,7 +160,11 @@ func (s *TaskService) UpdateTaskSessionList(req UpdateTaskSessionListRequest) er
 }
 
 func (s *TaskService) ListModelRuns(taskID string) ([]store.ModelRun, error) {
-	return s.store.ListModelRuns(taskID)
+	runs, err := s.store.ListModelRuns(taskID)
+	if err != nil {
+		return nil, err
+	}
+	return normalizeModelRunPaths(runs), nil
 }
 
 func (s *TaskService) UpdateModelRun(req UpdateModelRunRequest) error {
@@ -166,6 +180,10 @@ func (s *TaskService) AddModelRun(req AddModelRunRequest) error {
 	if req.TaskID == "" || req.ModelName == "" {
 		return fmt.Errorf("taskId 和 modelName 不能为空")
 	}
+	if req.LocalPath != nil {
+		normalized := util.NormalizePath(*req.LocalPath)
+		req.LocalPath = &normalized
+	}
 	existing, err := s.store.GetModelRun(req.TaskID, req.ModelName)
 	if err != nil {
 		return err
@@ -180,6 +198,52 @@ func (s *TaskService) AddModelRun(req AddModelRunRequest) error {
 		LocalPath: req.LocalPath,
 	}
 	return s.store.CreateModelRun(run)
+}
+
+func normalizeCreateTaskRequestPaths(req CreateTaskRequest) CreateTaskRequest {
+	if req.LocalPath != nil {
+		normalized := util.NormalizePath(*req.LocalPath)
+		req.LocalPath = &normalized
+	}
+	if req.SourceLocalPath != nil {
+		normalized := util.NormalizePath(*req.SourceLocalPath)
+		req.SourceLocalPath = &normalized
+	}
+	return req
+}
+
+func normalizeTaskPaths(tasks []store.Task) []store.Task {
+	if len(tasks) == 0 {
+		return tasks
+	}
+	normalized := make([]store.Task, len(tasks))
+	for i := range tasks {
+		normalized[i] = normalizeTaskPath(tasks[i])
+	}
+	return normalized
+}
+
+func normalizeTaskPath(task store.Task) store.Task {
+	if task.LocalPath != nil {
+		normalized := util.NormalizePath(*task.LocalPath)
+		task.LocalPath = &normalized
+	}
+	return task
+}
+
+func normalizeModelRunPaths(runs []store.ModelRun) []store.ModelRun {
+	if len(runs) == 0 {
+		return runs
+	}
+	normalized := make([]store.ModelRun, len(runs))
+	for i := range runs {
+		normalized[i] = runs[i]
+		if runs[i].LocalPath != nil {
+			path := util.NormalizePath(*runs[i].LocalPath)
+			normalized[i].LocalPath = &path
+		}
+	}
+	return normalized
 }
 
 func (s *TaskService) DeleteModelRun(taskID, modelName string) error {
@@ -413,4 +477,48 @@ func normalizeTaskIdentityToken(value string) string {
 	trimmed = strings.TrimPrefix(trimmed, "project-")
 	normalized := taskIdentityTokenPattern.ReplaceAllString(trimmed, "-")
 	return strings.Trim(normalized, "-")
+}
+
+// BatchUpdateTasksRequest carries parameters for bulk-updating tasks.
+type BatchUpdateTasksRequest struct {
+	TaskIDs []string `json:"taskIds"`
+	Field   string   `json:"field"` // "status" | "taskType"
+	Value   string   `json:"value"`
+}
+
+// BatchUpdateFailure records a single failed update.
+type BatchUpdateFailure struct {
+	TaskID string `json:"taskId"`
+	Error  string `json:"error"`
+}
+
+// BatchUpdateResult summarises the outcome of a bulk update.
+type BatchUpdateResult struct {
+	Total     int                  `json:"total"`
+	Succeeded int                  `json:"succeeded"`
+	Failed    []BatchUpdateFailure `json:"failed"`
+}
+
+func (s *TaskService) BatchUpdateTasks(req BatchUpdateTasksRequest) (*BatchUpdateResult, error) {
+	result := &BatchUpdateResult{
+		Total:  len(req.TaskIDs),
+		Failed: []BatchUpdateFailure{},
+	}
+	for _, id := range req.TaskIDs {
+		var err error
+		switch req.Field {
+		case "status":
+			err = s.UpdateTaskStatus(id, req.Value)
+		case "taskType":
+			err = s.UpdateTaskType(id, req.Value)
+		default:
+			err = fmt.Errorf("不支持的字段: %s", req.Field)
+		}
+		if err != nil {
+			result.Failed = append(result.Failed, BatchUpdateFailure{TaskID: id, Error: err.Error()})
+		} else {
+			result.Succeeded++
+		}
+	}
+	return result, nil
 }

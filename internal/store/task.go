@@ -458,7 +458,7 @@ func (s *Store) UpdateTaskType(id, nextTaskType string) error {
 				return err
 			}
 
-			if adjustErr := applyTaskSessionQuotaDelta(quotas, currentSessions, normalizedSessions, true); adjustErr != nil {
+			if adjustErr := applyTaskSessionQuotaDelta(quotas, currentSessions, normalizedSessions, false); adjustErr != nil {
 				err = adjustErr
 				return err
 			}

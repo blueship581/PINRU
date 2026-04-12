@@ -29,7 +29,7 @@ export interface SendMessageRequest {
   thinkingDepth: string;
   mode: string;
   workDir: string;
-  permissionMode?: string; // "" | "yolo"
+  permissionMode?: string; // "" | "default" | "yolo" | "bypassPermissions"
   autoSavePrompt?: boolean;
 }
 

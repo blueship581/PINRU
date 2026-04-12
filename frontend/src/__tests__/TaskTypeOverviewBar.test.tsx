@@ -27,6 +27,7 @@ describe('TaskTypeOverviewBar', () => {
     const summary: TaskTypeOverviewSummary = {
       taskType: 'Bug修复',
       remainingQuota: 4,
+      remainingToCompleteCount: 7,
       waitingTasks: [],
       processingTasks: [createTask({ id: 'processing-1', status: 'PromptReady' })],
       submittedTasks: [createTask({ id: 'submitted-1', status: 'Submitted' })],
@@ -38,6 +39,7 @@ describe('TaskTypeOverviewBar', () => {
 
     render(<TaskTypeOverviewBar summaries={[summary]} />);
 
+    expect(screen.getByText('待完成 7')).toBeInTheDocument();
     expect(screen.getByText('已提交 3 / 总计 10')).toBeInTheDocument();
     expect(screen.getByText('30%')).toBeInTheDocument();
   });

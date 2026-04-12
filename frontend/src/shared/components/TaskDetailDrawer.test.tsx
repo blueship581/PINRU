@@ -116,8 +116,10 @@ function renderDrawer() {
       onPromptReset={() => {}}
       onPromptSave={() => {}}
       onSessionModelChange={() => {}}
-      onOpenPrompt={() => {}}
       onOpenSubmit={() => {}}
+      llmProviders={[]}
+      promptGenerating={false}
+      onGeneratePrompt={() => {}}
     />,
   );
 
@@ -150,5 +152,13 @@ describe('TaskDetailDrawer session copy affordance', () => {
     fireEvent.keyDown(input, { key: 'C', ctrlKey: true, shiftKey: true });
 
     expect(onCopySessionId).not.toHaveBeenCalled();
+  });
+
+  it('keeps auto extract as an icon action in the session list and uses the updated submit label', () => {
+    renderDrawer();
+
+    expect(screen.getByRole('button', { name: '自动提取 session' })).toBeInTheDocument();
+    expect(screen.queryByText('自动提取')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '提交代码' })).toBeInTheDocument();
   });
 });
