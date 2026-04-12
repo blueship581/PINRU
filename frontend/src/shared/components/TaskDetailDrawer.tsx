@@ -30,9 +30,7 @@ import type { ModelRunFromDB, PromptGenerationStatus, TaskFromDB } from '../../a
 import type { GeneratePromptRequest, LlmProviderConfig } from '../../api/llm';
 import {
   getTaskTypePresentation,
-  getTaskTypeQuotaRawValue,
   normalizeTaskTypeName,
-  type TaskTypeQuotas,
 } from '../../api/config';
 import {
   getSessionDecisionValue,
@@ -41,6 +39,7 @@ import {
   summarizeCountedRounds,
   type EditableTaskSession,
 } from '../lib/sessionUtils';
+import { matchKindLabel } from '../lib/sessionCandidateUtils';
 import { CopyIconButton } from './CopyIconButton';
 
 export type TaskDetailDrawerTab = 'sessions' | 'prompt' | 'model-runs';
@@ -86,7 +85,7 @@ interface TaskDetailDrawerProps {
   sessionModelOptions: TaskDetailDrawerModelOption[];
   selectedSessionModelName: string;
   sessionTaskTypeOptions: string[];
-  projectQuotas: TaskTypeQuotas;
+  taskTypeRemainingToCompleteByType: Record<string, number | null>;
   sourceModelName: string;
   selectedPromptGenerationStatus: PromptGenerationStatus;
   selectedPromptGenerationMeta: PromptGenerationMeta;
@@ -115,6 +114,7 @@ interface TaskDetailDrawerProps {
   llmProviders: LlmProviderConfig[];
   promptGenerating: boolean;
   onGeneratePrompt: (config: Omit<GeneratePromptRequest, 'taskId'>) => void | Promise<void>;
+  onAiReview?: (run: ModelRunFromDB) => void;
 }
 
 const TAB_ITEMS: Array<{ id: TaskDetailDrawerTab; label: string; icon: React.ComponentType<{ className?: string }> }> = [
@@ -146,7 +146,7 @@ export default function TaskDetailDrawer({
   sessionModelOptions,
   selectedSessionModelName,
   sessionTaskTypeOptions,
-  projectQuotas,
+  taskTypeRemainingToCompleteByType,
   sourceModelName,
   selectedPromptGenerationStatus,
   selectedPromptGenerationMeta,
@@ -175,6 +175,7 @@ export default function TaskDetailDrawer({
   llmProviders,
   promptGenerating,
   onGeneratePrompt,
+  onAiReview,
 }: TaskDetailDrawerProps) {
   const CONSTRAINT_OPTIONS = ['技术栈约束', '架构约束', '代码风格约束', '非代码回复约束', '业务逻辑约束', '无约束'];
   const SCOPE_OPTIONS = ['单文件', '模块内多文件', '跨模块多文件', '跨系统多模块'];
@@ -184,6 +185,12 @@ export default function TaskDetailDrawer({
     { value: 'medium', label: '中' },
     { value: 'high', label: '高' },
   ];
+
+  const [runContextMenu, setRunContextMenu] = useState<{
+    run: ModelRunFromDB;
+    x: number;
+    y: number;
+  } | null>(null);
 
   const [genProviderId, setGenProviderId] = useState<string>('');
   const [genThinking, setGenThinking] = useState('');
@@ -265,81 +272,25 @@ export default function TaskDetailDrawer({
     setTimeout(() => setSubmitToast(false), 4000);
   };
 
-  const persistedSessionList = useMemo(() => {
-    const persistedModelSessions = selectedModelRuns.flatMap(
-      (run) => run.sessionList ?? [],
-    );
-    if (persistedModelSessions.length > 0) {
-      return persistedModelSessions;
-    }
-    return selectedTaskDetail?.sessionList ?? selected.sessionList;
-  }, [selected.sessionList, selectedModelRuns, selectedTaskDetail?.sessionList]);
   const [activeSessionLocalId, setActiveSessionLocalId] = useState<string | null>(null);
 
-  const countPersistedQuotaUsage = () => {
-    const counts: Record<string, number> = {};
-
-    persistedSessionList.forEach((session, index) => {
-      if (!isSessionCounted(session, index)) {
-        return;
-      }
-
-      const normalizedTaskType = normalizeTaskTypeName(session.taskType);
-      if (!normalizedTaskType) {
-        return;
-      }
-      counts[normalizedTaskType] = (counts[normalizedTaskType] ?? 0) + 1;
-    });
-
-    return counts;
-  };
-
-  const countDraftQuotaUsage = (excludeLocalId?: string) => {
-    const counts: Record<string, number> = {};
-
-    sessionListDraft.forEach((session, index) => {
-      if (session.localId === excludeLocalId) {
-        return;
-      }
-      if (!isSessionCounted(session, index)) {
-        return;
-      }
-
-      const normalizedTaskType = normalizeTaskTypeName(session.taskType);
-      if (!normalizedTaskType) {
-        return;
-      }
-      counts[normalizedTaskType] = (counts[normalizedTaskType] ?? 0) + 1;
-    });
-
-    return counts;
-  };
-
-  const persistedQuotaUsage = countPersistedQuotaUsage();
-
-  const getEditableQuotaValue = (taskType: string, excludeLocalId?: string) => {
+  const getRemainingToCompleteValue = (taskType: string) => {
     const normalizedTaskType = normalizeTaskTypeName(taskType);
     if (!normalizedTaskType) {
       return null;
     }
 
-    const rawQuota = getTaskTypeQuotaRawValue(projectQuotas, normalizedTaskType);
-    if (rawQuota === null) {
-      return null;
-    }
-
-    const otherDraftQuotaUsage = countDraftQuotaUsage(excludeLocalId);
-    return rawQuota + (persistedQuotaUsage[normalizedTaskType] ?? 0) - (otherDraftQuotaUsage[normalizedTaskType] ?? 0);
+    return taskTypeRemainingToCompleteByType[normalizedTaskType] ?? null;
   };
 
-  const formatEditableQuota = (value: number | null, mode: 'option' | 'inline') => {
+  const formatRemainingToComplete = (
+    value: number | null,
+    mode: 'option' | 'inline',
+  ) => {
     if (value === null) {
       return mode === 'option' ? '' : '当前类型不限额';
     }
-    if (value < 0) {
-      return mode === 'option' ? ` · 已超 ${Math.abs(value)}` : `当前已超额 ${Math.abs(value)}`;
-    }
-    return mode === 'option' ? ` · 可分配 ${value}` : `当前可分配 ${value}`;
+    return mode === 'option' ? ` · 待完成 ${value}` : `当前待完成 ${value}`;
   };
 
   useEffect(() => {
@@ -371,8 +322,11 @@ export default function TaskDetailDrawer({
   }, [activeSessionLocalId, sessionListDraft]);
 
   const activeSession = activeSessionIndex >= 0 ? sessionListDraft[activeSessionIndex] : null;
+  const sessionEvidence = activeSession?.evidence ?? null;
   const activeSessionPresentation = activeSession ? getTaskTypePresentation(activeSession.taskType) : null;
-  const activeEditableQuota = activeSession ? getEditableQuotaValue(activeSession.taskType, activeSession.localId) : null;
+  const activeRemainingToComplete = activeSession
+    ? getRemainingToCompleteValue(activeSession.taskType)
+    : null;
   const executionRuns = useMemo(
     () => selectedModelRuns.filter((run) => !isNonExecutionModel(run.modelName, sourceModelName)),
     [selectedModelRuns, sourceModelName],
@@ -449,7 +403,7 @@ export default function TaskDetailDrawer({
         ? '首个 session 固定扣减'
         : requiresSessionId
           ? (isQuotaToggleOn ? '填写 sessionId 后才会生效' : '填写 sessionId 后可开启计数')
-          : formatEditableQuota(activeEditableQuota, 'inline');
+          : formatRemainingToComplete(activeRemainingToComplete, 'inline');
 
     return (
       <div className="flex h-full min-h-0 flex-col lg:flex-row">
@@ -698,6 +652,45 @@ export default function TaskDetailDrawer({
                     />
                   </label>
                 </div>
+                {sessionEvidence && (
+                  <div className="mt-4 rounded-2xl border border-sky-500/20 bg-sky-500/5 px-4 py-4">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="text-[11px] font-medium text-zinc-500">Session 依据</span>
+                      <WorkspaceBadge tone="blue">
+                        {matchKindLabel(sessionEvidence.matchKind)}
+                      </WorkspaceBadge>
+                      {sessionEvidence.isCurrent && (
+                        <WorkspaceBadge tone="success">当前会话</WorkspaceBadge>
+                      )}
+                    </div>
+                    <div className="mt-3 grid gap-3 lg:grid-cols-2">
+                      <InfoTile label="用户">
+                        {sessionEvidence.username || sessionEvidence.userId || '未记录'}
+                      </InfoTile>
+                      <InfoTile label="最近活动">
+                        {sessionEvidence.lastActivityAt
+                          ? new Date(sessionEvidence.lastActivityAt * 1000).toLocaleString('zh-CN')
+                          : '未记录'}
+                      </InfoTile>
+                      <InfoTile label="提取时间">
+                        {sessionEvidence.extractedAt
+                          ? new Date(sessionEvidence.extractedAt * 1000).toLocaleString('zh-CN')
+                          : '未记录'}
+                      </InfoTile>
+                      <InfoTile label="匹配目录">
+                        {sessionEvidence.matchedPath || '未记录'}
+                      </InfoTile>
+                    </div>
+                    <div className="mt-3 space-y-2 text-xs leading-6 text-zinc-400">
+                      <p className="break-all">
+                        工作区目录：{sessionEvidence.workspacePath || '未记录'}
+                      </p>
+                      {sessionEvidence.summary && (
+                        <p>{sessionEvidence.summary}</p>
+                      )}
+                    </div>
+                  </div>
+                )}
               </SectionBlock>
 
               <SectionBlock
@@ -732,11 +725,13 @@ export default function TaskDetailDrawer({
                       >
                         {sessionTaskTypeOptions.map((taskType) => {
                           const optionPresentation = getTaskTypePresentation(taskType);
-                          const optionQuota = getEditableQuotaValue(optionPresentation.value, activeSession.localId);
+                          const optionRemainingToComplete = getRemainingToCompleteValue(
+                            optionPresentation.value,
+                          );
                           return (
                             <option key={optionPresentation.value} value={optionPresentation.value}>
                               {optionPresentation.label}
-                              {formatEditableQuota(optionQuota, 'option')}
+                              {formatRemainingToComplete(optionRemainingToComplete, 'option')}
                             </option>
                           );
                         })}
@@ -1137,9 +1132,17 @@ export default function TaskDetailDrawer({
             <div className="space-y-3">
               {selectedModelRuns.map((run) => {
                 const presentation = modelRunPresentation(run.status);
+                const reviewMeta = reviewStatusPresentation(run.reviewStatus, run.reviewRound);
                 const codeLink = resolveModelRunCodeLink(run, sourceModelName);
                 return (
-                  <div key={run.id} className="rounded-2xl border border-zinc-800/70 bg-zinc-900/35 px-4 py-4">
+                  <div
+                    key={run.id}
+                    className="rounded-2xl border border-zinc-800/70 bg-zinc-900/35 px-4 py-4 select-none"
+                    onContextMenu={(e) => {
+                      e.preventDefault();
+                      setRunContextMenu({ run, x: e.clientX, y: e.clientY });
+                    }}
+                  >
                     <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
                       <div className="min-w-0">
                         <div className="flex flex-wrap items-center gap-2">
@@ -1150,6 +1153,15 @@ export default function TaskDetailDrawer({
                           <span className={clsx('inline-flex rounded-full px-2 py-0.5 text-[10px] font-semibold', presentation.badgeCls)}>
                             {presentation.label}
                           </span>
+                          {run.reviewStatus !== 'none' && (
+                            <span
+                              className={clsx('inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold', reviewMeta.badgeCls)}
+                              title={run.reviewNotes ?? undefined}
+                            >
+                              {reviewMeta.icon}
+                              {reviewMeta.label}
+                            </span>
+                          )}
                         </div>
                         <div className="mt-3 space-y-1.5 text-xs text-zinc-400">
                           <p className="break-all">{run.localPath || '未记录副本目录'}</p>
@@ -1160,6 +1172,9 @@ export default function TaskDetailDrawer({
                             copyLabel={`复制 ${run.modelName} ${codeLink.label}`}
                           />
                         </div>
+                        {run.reviewStatus === 'warning' && run.reviewNotes && (
+                          <p className="mt-2 text-[11px] text-amber-400/80 line-clamp-2">{run.reviewNotes}</p>
+                        )}
                       </div>
                       {codeLink.url ? (
                         <a
@@ -1179,6 +1194,41 @@ export default function TaskDetailDrawer({
                 );
               })}
             </div>
+          )}
+
+          {/* Model run right-click context menu */}
+          {runContextMenu && (
+            <>
+              <div
+                className="fixed inset-0 z-40"
+                onClick={() => setRunContextMenu(null)}
+                onContextMenu={(e) => { e.preventDefault(); setRunContextMenu(null); }}
+              />
+              <div
+                className="fixed z-50 w-52 overflow-hidden rounded-2xl border border-zinc-700/70 bg-zinc-900/95 shadow-2xl backdrop-blur-md ring-1 ring-white/5"
+                style={{ left: runContextMenu.x, top: runContextMenu.y }}
+              >
+                <div className="border-b border-zinc-800 px-3.5 py-2.5">
+                  <p className="truncate font-mono text-[11px] text-zinc-400">{runContextMenu.run.modelName}</p>
+                </div>
+                <div className="py-1">
+                  <button
+                    type="button"
+                    disabled={!runContextMenu.run.localPath || runContextMenu.run.reviewStatus === 'running'}
+                    onClick={() => {
+                      if (onAiReview) onAiReview(runContextMenu.run);
+                      setRunContextMenu(null);
+                    }}
+                    className="flex w-full items-center gap-2.5 px-3.5 py-2.5 text-left text-[13px] font-medium text-zinc-200 transition hover:bg-zinc-800/70 disabled:opacity-40 disabled:cursor-not-allowed cursor-default"
+                  >
+                    <span className="flex h-6 w-6 items-center justify-center rounded-lg border border-violet-500/20 bg-violet-500/10 text-violet-300 text-[11px]">
+                      AI
+                    </span>
+                    {runContextMenu.run.reviewStatus === 'running' ? '复审中…' : 'AI 复审'}
+                  </button>
+                </div>
+              </div>
+            </>
           )}
         </SectionBlock>
       </div>
@@ -1613,6 +1663,8 @@ function taskStatusTone(status: TaskStatus) {
       return 'border-zinc-700/70 bg-zinc-900 text-zinc-200';
     case 'PromptReady':
       return 'border-indigo-500/20 bg-indigo-500/10 text-indigo-200';
+    case 'ExecutionCompleted':
+      return 'border-cyan-500/20 bg-cyan-500/10 text-cyan-200';
     case 'Submitted':
       return 'border-emerald-500/20 bg-emerald-500/10 text-emerald-200';
     case 'Error':
@@ -1671,6 +1723,31 @@ function resolveModelRunCodeLink(run: ModelRunFromDB, sourceModelName: string) {
     label: '代码地址',
     url: run.prUrl,
   };
+}
+
+function reviewStatusPresentation(reviewStatus: string, reviewRound: number) {
+  if (reviewStatus === 'running') {
+    return {
+      label: `复审中（第 ${reviewRound} 轮）`,
+      icon: '↻',
+      badgeCls: 'border border-violet-500/20 bg-violet-500/10 text-violet-300',
+    };
+  }
+  if (reviewStatus === 'pass') {
+    return {
+      label: `复审通过（第 ${reviewRound} 轮）`,
+      icon: '✓',
+      badgeCls: 'border border-emerald-500/20 bg-emerald-500/10 text-emerald-300',
+    };
+  }
+  if (reviewStatus === 'warning') {
+    return {
+      label: `复审未通过（${reviewRound} 轮）`,
+      icon: '⚠',
+      badgeCls: 'border border-amber-500/30 bg-amber-500/10 text-amber-300',
+    };
+  }
+  return { label: '', icon: '', badgeCls: '' };
 }
 
 function modelRunPresentation(status: string) {

@@ -2,6 +2,18 @@ import { callService } from './wails';
 
 export type PromptGenerationStatus = 'idle' | 'running' | 'done' | 'error';
 
+export interface TaskSessionEvidence {
+  workspacePath: string;
+  matchedPath: string;
+  matchKind: string;
+  userId: string;
+  username: string;
+  summary: string;
+  isCurrent: boolean;
+  lastActivityAt: number | null;
+  extractedAt: number | null;
+}
+
 export interface TaskSession {
   sessionId: string;
   taskType: string;
@@ -10,6 +22,7 @@ export interface TaskSession {
   isSatisfied?: boolean | null;
   evaluation?: string;
   userConversation?: string;
+  evidence?: TaskSessionEvidence | null;
 }
 
 export interface ExtractedTraeSession {
@@ -28,6 +41,7 @@ export interface ExtractTaskSessionCandidate {
   matchKind: 'exact' | 'child' | 'parent' | string;
   sessionCount: number;
   userId: string;
+  username: string;
   currentSessionId: string;
   userMessageCount: number;
   summary: string;
@@ -59,6 +73,8 @@ export interface TaskFromDB {
   projectConfigId: string | null;
 }
 
+export type ReviewStatus = 'none' | 'running' | 'pass' | 'warning';
+
 export interface ModelRunFromDB {
   id: string;
   taskId: string;
@@ -76,6 +92,9 @@ export interface ModelRunFromDB {
   conversationDate: number | null;
   submitError: string | null;
   sessionList?: TaskSession[];
+  reviewStatus: ReviewStatus;
+  reviewRound: number;
+  reviewNotes: string | null;
 }
 
 export interface CreateTaskRequest {

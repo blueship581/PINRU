@@ -2,8 +2,10 @@ package cli
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"embed"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -21,6 +23,9 @@ import (
 
 //go:embed manuals/*
 var manualFS embed.FS
+
+//go:embed schemas/pg_code_review.json
+var pgCodeReviewSchema []byte
 
 // Service executes the local claude CLI and streams output back via polling.
 type CliService struct {
@@ -523,6 +528,114 @@ func applyEnvOverrides(base []string, overrides map[string]string) []string {
 		result = append(result, k+"="+v)
 	}
 	return result
+}
+
+// ─── Codex Review ────────────────────────────────────────────────────────────
+
+// CodexReviewResult is the structured output from the pg-code review skill.
+type CodexReviewResult struct {
+	IsCompleted bool    `json:"isCompleted"`
+	IsSatisfied bool    `json:"isSatisfied"`
+	ProjectType string  `json:"projectType"`
+	ChangeScope string  `json:"changeScope"`
+	ReviewNotes string  `json:"reviewNotes"`
+	NextPrompt  string  `json:"nextPrompt"`
+	KeyLocations string `json:"keyLocations"`
+}
+
+// RunCodexReview executes the codex pg-code skill non-interactively on the given
+// localPath, streaming each output line to onLine (may be nil), and returns the
+// structured review result parsed from the --output-schema JSON file.
+func (s *CliService) RunCodexReview(ctx context.Context, localPath string, onLine func(string)) (*CodexReviewResult, error) {
+	codexPath, err := s.lookupCLI("codex")
+	if err != nil {
+		return nil, fmt.Errorf("codex CLI 未找到，请先安装: npm install -g @openai/codex")
+	}
+
+	// Write bundled schema to a temp file.
+	schemaFile, err := os.CreateTemp("", "pinru-review-schema-*.json")
+	if err != nil {
+		return nil, fmt.Errorf("创建 schema 临时文件失败: %w", err)
+	}
+	schemaPath := schemaFile.Name()
+	defer os.Remove(schemaPath)
+	if _, err := schemaFile.Write(pgCodeReviewSchema); err != nil {
+		schemaFile.Close()
+		return nil, fmt.Errorf("写入 schema 失败: %w", err)
+	}
+	schemaFile.Close()
+
+	// Temp file for the last-message output.
+	outFile, err := os.CreateTemp("", "pinru-review-out-*.json")
+	if err != nil {
+		return nil, fmt.Errorf("创建输出临时文件失败: %w", err)
+	}
+	outPath := outFile.Name()
+	outFile.Close()
+	defer os.Remove(outPath)
+
+	args := []string{
+		"exec", "/pg-code",
+		"-C", localPath,
+		"--dangerously-bypass-approvals-and-sandbox",
+		"--output-schema", schemaPath,
+		"-o", outPath,
+		"--ephemeral",
+	}
+
+	cmd := exec.CommandContext(ctx, codexPath, args...)
+	cmd.Dir = localPath
+
+	stdoutPipe, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, fmt.Errorf("创建 stdout 管道失败: %w", err)
+	}
+	stderrPipe, err := cmd.StderrPipe()
+	if err != nil {
+		return nil, fmt.Errorf("创建 stderr 管道失败: %w", err)
+	}
+
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("启动 codex 失败: %w", err)
+	}
+
+	// Stream stdout and stderr, forwarding each line to the caller.
+	var wg sync.WaitGroup
+	wg.Add(2)
+	streamPipe := func(r io.Reader) {
+		defer wg.Done()
+		scanner := bufio.NewScanner(r)
+		for scanner.Scan() {
+			if onLine != nil {
+				onLine(scanner.Text())
+			}
+		}
+	}
+	go streamPipe(stdoutPipe)
+	go streamPipe(stderrPipe)
+	wg.Wait()
+
+	if err := cmd.Wait(); err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, fmt.Errorf("codex 执行失败: %w", err)
+	}
+
+	// Parse the structured output file.
+	data, err := os.ReadFile(outPath)
+	if err != nil {
+		return nil, fmt.Errorf("读取 codex 输出失败: %w", err)
+	}
+	if len(bytes.TrimSpace(data)) == 0 {
+		return nil, fmt.Errorf("codex 未生成结构化输出")
+	}
+
+	var result CodexReviewResult
+	if err := json.Unmarshal(data, &result); err != nil {
+		return nil, fmt.Errorf("解析 codex 输出 JSON 失败: %w (raw: %s)", err, string(data))
+	}
+	return &result, nil
 }
 
 func buildPrompt(userPrompt, thinkingDepth, mode string) string {

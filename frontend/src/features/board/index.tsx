@@ -12,7 +12,13 @@ import {
   deleteTask,
   openTaskLocalFolder,
 } from '../../api/task';
-import { submitJob, type JobProgressEvent } from '../../api/job';
+import {
+  submitJob,
+  submitSessionSyncJob,
+  submitAiReviewJob,
+  type JobProgressEvent,
+} from '../../api/job';
+import type { ModelRunFromDB } from '../../api/task';
 import {
   BatchActionBar,
 } from './components/BatchActionBar';
@@ -35,7 +41,15 @@ import {
 } from './components/BoardLayerStack';
 import { useBoardTaskDetail } from './hooks/useBoardTaskDetail';
 
-const COLUMNS: TaskStatus[] = ['Claimed', 'Downloading', 'Downloaded', 'PromptReady', 'Submitted', 'Error'];
+const COLUMNS: TaskStatus[] = [
+  'Claimed',
+  'Downloading',
+  'Downloaded',
+  'PromptReady',
+  'ExecutionCompleted',
+  'Submitted',
+  'Error',
+];
 const DRAWER_ESC_CONFIRM_WINDOW_MS = 1600;
 
 export default function Board() {
@@ -176,6 +190,14 @@ export default function Board() {
   useEffect(() => {
     const cancel = Events.On('job:progress', (event: { data: JobProgressEvent }) => {
       const data = event.data;
+      if (data.jobType === 'session_sync') {
+        detail.handleSessionSyncEvent(data);
+        if (data.status === 'done' || data.status === 'error' || data.status === 'cancelled') {
+          void loadTasks();
+        }
+        return;
+      }
+
       if (data.jobType !== 'prompt_generate') {
         return;
       }
@@ -191,7 +213,10 @@ export default function Board() {
             task.id === taskId
               ? {
                   ...task,
-                  status: 'PromptReady',
+                  status:
+                    task.status === 'ExecutionCompleted' || task.status === 'Submitted'
+                      ? task.status
+                      : 'PromptReady',
                   promptGenerationStatus: 'done',
                   promptGenerationError: null,
                 }
@@ -235,7 +260,7 @@ export default function Board() {
     });
 
     return () => { cancel(); };
-  }, [loadTasks]);
+  }, [detail, loadTasks]);
 
   useEffect(() => {
     if (!taskCardContextMenu) {
@@ -399,6 +424,36 @@ export default function Board() {
     window.setTimeout(() => void loadTasks(), 400);
   };
 
+  const handleAiReview = (run: ModelRunFromDB) => {
+    if (!detail.selected || !run.localPath) return;
+    void (async () => {
+      try {
+        await submitAiReviewJob(detail.selected!.id, {
+          modelRunId: run.id,
+          modelName: run.modelName,
+          localPath: run.localPath!,
+        });
+        useAppStore.getState().loadBackgroundJobs();
+      } finally {
+        void detail.refreshModelRuns();
+      }
+    })();
+    window.setTimeout(() => void detail.refreshModelRuns(), 600);
+  };
+
+  const handleAfterBatchApply = async (
+    field: 'status' | 'taskType',
+    value: string,
+    taskIds: string[],
+  ) => {
+    if (field !== 'status' || value !== 'ExecutionCompleted' || taskIds.length === 0) {
+      return;
+    }
+
+    await Promise.allSettled(taskIds.map((taskId) => submitSessionSyncJob(taskId)));
+    void useAppStore.getState().loadBackgroundJobs();
+  };
+
   const handleOpenTaskLocalFolder = async () => {
     if (!taskCardContextMenu || taskCardFolderOpening) {
       return;
@@ -462,6 +517,16 @@ export default function Board() {
   const projectTaskSummaries = useMemo(
     () => buildTaskTypeOverviewSummaries(availableTaskTypes, tasks, projectQuotas, projectTotals),
     [availableTaskTypes, tasks, projectQuotas, projectTotals],
+  );
+  const projectTaskRemainingToCompleteByType = useMemo(
+    () =>
+      Object.fromEntries(
+        projectTaskSummaries.map((summary) => [
+          summary.taskType,
+          summary.remainingToCompleteCount,
+        ]),
+      ) as Record<string, number | null>,
+    [projectTaskSummaries],
   );
 
   const visibleProjectTaskSummaries = useMemo(
@@ -596,7 +661,7 @@ export default function Board() {
         detail={detail}
         detailEscCloseHintVisible={drawerEscCloseHintVisible}
         onCloseDetailDrawer={closeDetailDrawer}
-        projectQuotas={projectQuotas}
+        taskTypeRemainingToCompleteByType={projectTaskRemainingToCompleteByType}
         sourceModelName={sourceModelName}
         onOpenSubmit={() => {
           if (!detail.selected) return;
@@ -609,6 +674,7 @@ export default function Board() {
           setActiveProject(updated);
           setShowProjectPanel(false);
         }}
+        onAiReview={handleAiReview}
       />
 
       {selectionMode && selectedTaskIds.size > 0 && (
@@ -616,6 +682,7 @@ export default function Board() {
           selectedCount={selectedTaskIds.size}
           selectedTaskIds={selectedTaskIds}
           availableTaskTypes={availableTaskTypes}
+          onAfterApply={handleAfterBatchApply}
           onDone={() => {
             void loadTasks();
             exitSelectionMode();

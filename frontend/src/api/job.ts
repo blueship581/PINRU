@@ -68,6 +68,35 @@ export async function submitJob(req: SubmitJobRequest): Promise<BackgroundJob> {
   return callService('JobService', 'SubmitJob', req);
 }
 
+export async function submitSessionSyncJob(taskId: string): Promise<BackgroundJob> {
+  return submitJob({
+    jobType: 'session_sync',
+    taskId,
+    inputPayload: '{}',
+    maxRetries: 1,
+    timeoutSeconds: 900,
+  });
+}
+
+export interface AiReviewPayload {
+  modelRunId: string;
+  modelName: string;
+  localPath: string;
+}
+
+export async function submitAiReviewJob(
+  taskId: string,
+  payload: AiReviewPayload,
+): Promise<BackgroundJob> {
+  return submitJob({
+    jobType: 'ai_review',
+    taskId,
+    inputPayload: JSON.stringify(payload),
+    maxRetries: 1,
+    timeoutSeconds: 600,
+  });
+}
+
 export async function listJobs(filter?: JobFilter | null): Promise<BackgroundJob[]> {
   return callService('JobService', 'ListJobs', filter ?? null);
 }

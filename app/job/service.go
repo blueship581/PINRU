@@ -5,12 +5,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
+	appcli "github.com/blueship581/pinru/app/cli"
 	appgit "github.com/blueship581/pinru/app/git"
 	appprompt "github.com/blueship581/pinru/app/prompt"
 	appsubmit "github.com/blueship581/pinru/app/submit"
+	apptask "github.com/blueship581/pinru/app/task"
 	"github.com/blueship581/pinru/internal/store"
 	"github.com/google/uuid"
 	"github.com/wailsapp/wails/v3/pkg/application"
@@ -21,16 +24,27 @@ type JobService struct {
 	promptSvc *appprompt.PromptService
 	gitSvc    *appgit.GitService
 	submitSvc *appsubmit.SubmitService
+	taskSvc   *apptask.TaskService
+	cliSvc    *appcli.CliService
 	mu        sync.Mutex
 	running   map[string]context.CancelFunc
 }
 
-func New(st *store.Store, promptSvc *appprompt.PromptService, gitSvc *appgit.GitService, submitSvc *appsubmit.SubmitService) *JobService {
+func New(
+	st *store.Store,
+	promptSvc *appprompt.PromptService,
+	gitSvc *appgit.GitService,
+	submitSvc *appsubmit.SubmitService,
+	taskSvc *apptask.TaskService,
+	cliSvc *appcli.CliService,
+) *JobService {
 	return &JobService{
 		store:     st,
 		promptSvc: promptSvc,
 		gitSvc:    gitSvc,
 		submitSvc: submitSvc,
+		taskSvc:   taskSvc,
+		cliSvc:    cliSvc,
 		running:   make(map[string]context.CancelFunc),
 	}
 }
@@ -202,10 +216,14 @@ func (s *JobService) executeJob(id string, req SubmitJobRequest) {
 	switch req.JobType {
 	case "prompt_generate":
 		execResult, execErr = s.executePromptGenerate(ctx, id, req)
+	case "session_sync":
+		execResult, execErr = s.executeSessionSync(ctx, id, req)
 	case "git_clone":
 		execResult, execErr = s.executeGitClone(ctx, id, req)
 	case "pr_submit":
 		execResult, execErr = s.executePrSubmit(ctx, id, req)
+	case "ai_review":
+		execResult, execErr = s.executeAiReview(ctx, id, req)
 	default:
 		execErr = fmt.Errorf("未知的任务类型: %s", req.JobType)
 	}
@@ -305,6 +323,64 @@ func (s *JobService) executePromptGenerate(
 		outputPayload: &outputStr,
 		finalMessage:  strPtr(fmt.Sprintf("[%s] 提示词已生成", projectLabel)),
 	}, nil
+}
+
+func (s *JobService) executeSessionSync(
+	ctx context.Context,
+	jobID string,
+	req SubmitJobRequest,
+) (jobExecutionResult, error) {
+	if strings.TrimSpace(req.TaskID) == "" {
+		return jobExecutionResult{}, fmt.Errorf("session_sync 缺少 taskId")
+	}
+	if s.taskSvc == nil {
+		return jobExecutionResult{}, fmt.Errorf("session_sync 服务未初始化")
+	}
+
+	projectLabel := req.TaskID
+	if task, err := s.store.GetTask(req.TaskID); err == nil && task != nil {
+		projectLabel = task.ProjectName
+	}
+
+	s.emitProgress(jobID, req.JobType, req.TaskID, "running", 20, strPtr(fmt.Sprintf("[%s] 正在同步最新 Session…", projectLabel)), nil)
+
+	type result struct {
+		payload *apptask.SyncTaskSessionsResult
+		err     error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		payload, err := s.taskSvc.SyncLatestTaskSessions(req.TaskID)
+		ch <- result{payload: payload, err: err}
+	}()
+
+	select {
+	case <-ctx.Done():
+		return jobExecutionResult{}, ctx.Err()
+	case r := <-ch:
+		if r.err != nil {
+			return jobExecutionResult{}, r.err
+		}
+
+		if r.payload != nil {
+			outputJSON, _ := json.Marshal(r.payload)
+			outputStr := string(outputJSON)
+			if r.payload.UpdatedTargetCount == 0 {
+				return jobExecutionResult{
+					outputPayload: &outputStr,
+					finalMessage:  strPtr(fmt.Sprintf("[%s] 未找到可同步的 Session", projectLabel)),
+				}, nil
+			}
+			return jobExecutionResult{
+				outputPayload: &outputStr,
+				finalMessage: strPtr(
+					fmt.Sprintf("[%s] 已同步 %d 组 Session", projectLabel, r.payload.UpdatedTargetCount),
+				),
+			}, nil
+		}
+
+		return jobExecutionResult{finalMessage: strPtr(fmt.Sprintf("[%s] Session 同步完成", projectLabel))}, nil
+	}
 }
 
 func (s *JobService) emitProgress(id, jobType, taskID, status string, progress int, message, errMsg *string) {
@@ -558,6 +634,174 @@ func (s *JobService) executePrSubmit(
 		}
 		return jobExecutionResult{finalMessage: strPtr("PR 提交完成")}, nil
 	}
+}
+
+// AiReviewPayload 描述一次 ai_review 任务的参数。
+type AiReviewPayload struct {
+	ModelRunID string `json:"modelRunId"`
+	ModelName  string `json:"modelName"`
+	LocalPath  string `json:"localPath"`
+}
+
+// AiReviewResult 记录一次 ai_review 任务的输出。
+type AiReviewResult struct {
+	ModelRunID   string `json:"modelRunId"`
+	ModelName    string `json:"modelName"`
+	ReviewStatus string `json:"reviewStatus"`
+	ReviewRound  int    `json:"reviewRound"`
+	ReviewNotes  string `json:"reviewNotes"`
+	NextPrompt   string `json:"nextPrompt"`
+}
+
+const aiReviewMaxRounds = 2
+
+func (s *JobService) executeAiReview(
+	ctx context.Context,
+	jobID string,
+	req SubmitJobRequest,
+) (jobExecutionResult, error) {
+	if s.cliSvc == nil {
+		return jobExecutionResult{}, fmt.Errorf("cli 服务未初始化")
+	}
+
+	var payload AiReviewPayload
+	if err := json.Unmarshal([]byte(req.InputPayload), &payload); err != nil {
+		return jobExecutionResult{}, fmt.Errorf("解析 ai_review 参数失败: %w", err)
+	}
+	if strings.TrimSpace(payload.ModelRunID) == "" {
+		return jobExecutionResult{}, fmt.Errorf("ai_review 缺少 modelRunId")
+	}
+	if strings.TrimSpace(payload.LocalPath) == "" {
+		return jobExecutionResult{}, fmt.Errorf("ai_review 缺少 localPath")
+	}
+
+	label := payload.ModelName
+	if label == "" {
+		label = payload.ModelRunID
+	}
+
+	var lastResult *appcli.CodexReviewResult
+	var finalRound int
+
+	for round := 1; round <= aiReviewMaxRounds; round++ {
+		finalRound = round
+		roundLabel := fmt.Sprintf("第 %d/%d 轮", round, aiReviewMaxRounds)
+
+		slog.Info("ai review round started",
+			"job_id", jobID,
+			"model_run", label,
+			"round", round,
+		)
+		s.emitProgress(jobID, req.JobType, req.TaskID, "running",
+			(round-1)*45,
+			strPtr(fmt.Sprintf("[%s] 复审%s…", label, roundLabel)),
+			nil,
+		)
+		_ = s.store.UpdateModelRunReview(payload.ModelRunID, "running", round, nil)
+
+		var roundErr error
+		type reviewOut struct {
+			result *appcli.CodexReviewResult
+			err    error
+		}
+		ch := make(chan reviewOut, 1)
+
+		go func(r int) {
+			res, err := s.cliSvc.RunCodexReview(ctx, payload.LocalPath, func(line string) {
+				s.emitProgress(jobID, req.JobType, req.TaskID, "running",
+					(r-1)*45+10,
+					strPtr(fmt.Sprintf("[%s] %s", label, line)),
+					nil,
+				)
+			})
+			ch <- reviewOut{res, err}
+		}(round)
+
+		select {
+		case <-ctx.Done():
+			return jobExecutionResult{}, ctx.Err()
+		case out := <-ch:
+			roundErr = out.err
+			lastResult = out.result
+		}
+
+		if roundErr != nil {
+			slog.Error("ai review round failed",
+				"job_id", jobID,
+				"model_run", label,
+				"round", round,
+				"error", roundErr,
+			)
+			// On final round, surface error; otherwise try next round.
+			if round == aiReviewMaxRounds {
+				_ = s.store.UpdateModelRunReview(payload.ModelRunID, "warning", round, nil)
+				return jobExecutionResult{}, roundErr
+			}
+			continue
+		}
+
+		passed := lastResult.IsCompleted && lastResult.IsSatisfied
+		slog.Info("ai review round completed",
+			"job_id", jobID,
+			"model_run", label,
+			"round", round,
+			"is_completed", lastResult.IsCompleted,
+			"is_satisfied", lastResult.IsSatisfied,
+			"passed", passed,
+		)
+
+		if passed {
+			notes := strPtr(lastResult.ReviewNotes)
+			_ = s.store.UpdateModelRunReview(payload.ModelRunID, "pass", round, notes)
+			result := AiReviewResult{
+				ModelRunID:   payload.ModelRunID,
+				ModelName:    payload.ModelName,
+				ReviewStatus: "pass",
+				ReviewRound:  round,
+				ReviewNotes:  lastResult.ReviewNotes,
+				NextPrompt:   lastResult.NextPrompt,
+			}
+			outputJSON, _ := json.Marshal(result)
+			outputStr := string(outputJSON)
+			return jobExecutionResult{
+				outputPayload: &outputStr,
+				finalMessage:  strPtr(fmt.Sprintf("[%s] 复审通过（第 %d 轮）", label, round)),
+			}, nil
+		}
+
+		// Not passed — if more rounds remain, continue.
+		if round < aiReviewMaxRounds {
+			s.emitProgress(jobID, req.JobType, req.TaskID, "running",
+				round*45,
+				strPtr(fmt.Sprintf("[%s] 第 %d 轮未通过，准备第 %d 轮…", label, round, round+1)),
+				nil,
+			)
+		}
+	}
+
+	// Exhausted all rounds without passing → warning.
+	var notes *string
+	if lastResult != nil && lastResult.ReviewNotes != "" {
+		notes = strPtr(lastResult.ReviewNotes)
+	}
+	_ = s.store.UpdateModelRunReview(payload.ModelRunID, "warning", finalRound, notes)
+
+	result := AiReviewResult{
+		ModelRunID:   payload.ModelRunID,
+		ModelName:    payload.ModelName,
+		ReviewStatus: "warning",
+		ReviewRound:  finalRound,
+	}
+	if lastResult != nil {
+		result.ReviewNotes = lastResult.ReviewNotes
+		result.NextPrompt = lastResult.NextPrompt
+	}
+	outputJSON, _ := json.Marshal(result)
+	outputStr := string(outputJSON)
+	return jobExecutionResult{
+		outputPayload: &outputStr,
+		finalMessage:  strPtr(fmt.Sprintf("[%s] 复审未通过（已复审 %d 轮）", label, finalRound)),
+	}, nil
 }
 
 func strPtr(s string) *string {
