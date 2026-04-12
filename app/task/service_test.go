@@ -99,8 +99,10 @@ func TestCreateTaskNormalizesStoredPaths(t *testing.T) {
 	defer testStore.Close()
 
 	s := &TaskService{store: testStore}
-	localPath := "/tmp//pinru///label-01808-comparison"
-	sourcePath := "/tmp//pinru///label-01808-comparison////01808-comparison"
+	sep := string(filepath.Separator)
+	base := t.TempDir()
+	localPath := base + sep + sep + "pinru" + sep + sep + sep + "label-01808-comparison"
+	sourcePath := base + sep + sep + "pinru" + sep + sep + sep + "label-01808-comparison" + sep + sep + sep + sep + "01808-comparison"
 
 	task, err := s.CreateTask(CreateTaskRequest{
 		GitLabProjectID: 1808,
@@ -115,8 +117,9 @@ func TestCreateTaskNormalizesStoredPaths(t *testing.T) {
 		t.Fatalf("CreateTask() error = %v", err)
 	}
 
-	if task.LocalPath == nil || *task.LocalPath != "/tmp/pinru/label-01808-comparison" {
-		t.Fatalf("task.LocalPath = %v, want normalized path", task.LocalPath)
+	wantLocal := filepath.Join(base, "pinru", "label-01808-comparison")
+	if task.LocalPath == nil || *task.LocalPath != wantLocal {
+		t.Fatalf("task.LocalPath = %v, want %q", task.LocalPath, wantLocal)
 	}
 
 	runs, err := testStore.ListModelRuns(task.ID)
@@ -133,11 +136,13 @@ func TestCreateTaskNormalizesStoredPaths(t *testing.T) {
 			modelPaths[run.ModelName] = *run.LocalPath
 		}
 	}
-	if modelPaths["ORIGIN"] != "/tmp/pinru/label-01808-comparison/01808-comparison" {
-		t.Fatalf("ORIGIN path = %q, want normalized source path", modelPaths["ORIGIN"])
+	wantOrigin := filepath.Join(base, "pinru", "label-01808-comparison", "01808-comparison")
+	if modelPaths["ORIGIN"] != wantOrigin {
+		t.Fatalf("ORIGIN path = %q, want %q", modelPaths["ORIGIN"], wantOrigin)
 	}
-	if modelPaths["cotv21-pro"] != "/tmp/pinru/label-01808-comparison/cotv21-pro" {
-		t.Fatalf("cotv21-pro path = %q, want normalized model path", modelPaths["cotv21-pro"])
+	wantModel := filepath.Join(base, "pinru", "label-01808-comparison", "cotv21-pro")
+	if modelPaths["cotv21-pro"] != wantModel {
+		t.Fatalf("cotv21-pro path = %q, want %q", modelPaths["cotv21-pro"], wantModel)
 	}
 }
 

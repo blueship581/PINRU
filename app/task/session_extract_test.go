@@ -1,8 +1,15 @@
 package task
 
-import "testing"
+import (
+	"runtime"
+	"testing"
+)
 
 func TestBestTraeWorkspacePathMatchMatchesCrossRootPeerModel(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Trae workspace path matching uses Unix-style paths; not applicable on Windows")
+	}
+
 	workspacePath := "/Users/alice/workspaces/review/label-01849-comparison/cotv21-pro"
 	targetPaths := []string{
 		"/Users/gaobo/repositories/gitlab/review/project/generate/label-01849-comparison/cotv21-pro",
@@ -24,6 +31,10 @@ func TestBestTraeWorkspacePathMatchMatchesCrossRootPeerModel(t *testing.T) {
 }
 
 func TestBestTraeWorkspacePathMatchMatchesCrossRootPeerTask(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Trae workspace path matching uses Unix-style paths; not applicable on Windows")
+	}
+
 	workspacePath := "/Users/alice/workspaces/review/label-01849-bug修复"
 	targetPaths := []string{
 		"/Users/gaobo/repositories/gitlab/review/project/generate/label-01849-comparison/cotv21-pro",
