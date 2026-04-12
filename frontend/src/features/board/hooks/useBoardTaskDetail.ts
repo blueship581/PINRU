@@ -83,7 +83,6 @@ export function useBoardTaskDetail({
   const [statusChanging, setStatusChanging] = useState(false);
   const [promptDraft, setPromptDraft] = useState('');
   const [promptSaving, setPromptSaving] = useState(false);
-  const [promptSaveState, setPromptSaveState] = useState<'idle' | 'saved'>('idle');
   const [promptCopied, setPromptCopied] = useState(false);
   const [promptGeneratingTaskIds, setPromptGeneratingTaskIds] = useState<Set<string>>(
     new Set(),
@@ -126,6 +125,8 @@ export function useBoardTaskDetail({
     selectedTaskDetail?.promptGenerationError ??
     selected?.promptGenerationError ??
     null;
+  const promptSaveState: 'idle' | 'saved' =
+    promptDraft === (selectedTaskDetail?.promptText ?? '') ? 'saved' : 'idle';
   const promptGenerating =
     selected?.id !== undefined && selected?.id !== null
       ? promptGeneratingTaskIds.has(selected.id)
@@ -255,7 +256,6 @@ export function useBoardTaskDetail({
       setOpenSessionEditors(new Set());
       setCopiedSessionId(null);
       setSessionSaveState('idle');
-      setPromptSaveState('idle');
       setActiveDrawerTab(getDefaultTaskDetailTab());
       return;
     }
@@ -287,7 +287,6 @@ export function useBoardTaskDetail({
         modelRuns,
         selected,
       );
-      setPromptSaveState('idle');
       setDrawerLoading(false);
     })().catch((error) => {
       if (cancelled) {
@@ -542,9 +541,7 @@ export function useBoardTaskDetail({
           : prev,
       );
       updateTaskStatusInStore(selected.id, 'PromptReady');
-      setPromptSaveState('saved');
       await loadTasks();
-      window.setTimeout(() => setPromptSaveState('idle'), 1600);
     } catch (error) {
       setDrawerError(error instanceof Error ? error.message : '提示词保存失败');
     } finally {
@@ -563,12 +560,10 @@ export function useBoardTaskDetail({
 
   const handlePromptDraftChange = (value: string) => {
     setPromptDraft(value);
-    setPromptSaveState('idle');
   };
 
   const handlePromptReset = () => {
     setPromptDraft(selectedTaskDetail?.promptText ?? '');
-    setPromptSaveState('idle');
   };
 
   useEffect(() => {

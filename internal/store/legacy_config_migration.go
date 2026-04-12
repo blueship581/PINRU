@@ -4,7 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"strings"
 	"time"
 )
@@ -91,7 +91,7 @@ func (s *Store) migrateLegacyProjects(defaultSubmitRepoFallback string) error {
 
 	var legacyProjects []legacyProjectConfig
 	if err := json.Unmarshal([]byte(raw), &legacyProjects); err != nil {
-		log.Printf("skip legacy projects migration: %v", err)
+		slog.Warn("skip legacy projects migration", "error", err)
 		return nil
 	}
 
@@ -180,7 +180,7 @@ func (s *Store) migrateLegacyGitHubAccounts(raw string) error {
 
 	var legacyAccounts []legacyGitHubAccountConfig
 	if err := json.Unmarshal([]byte(raw), &legacyAccounts); err != nil {
-		log.Printf("skip legacy github_accounts migration: %v", err)
+		slog.Warn("skip legacy github_accounts migration", "error", err)
 		return nil
 	}
 	legacyAccounts = normalizeLegacyGitHubAccounts(legacyAccounts)
@@ -260,7 +260,7 @@ func (s *Store) migrateLegacyLLMProviders() error {
 
 	var legacyProviders []legacyLLMProviderConfig
 	if err := json.Unmarshal([]byte(raw), &legacyProviders); err != nil {
-		log.Printf("skip legacy llm_providers migration: %v", err)
+		slog.Warn("skip legacy llm_providers migration", "error", err)
 		return nil
 	}
 	legacyProviders = normalizeLegacyLLMProviders(legacyProviders)

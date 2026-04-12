@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -116,14 +117,32 @@ func (s *PromptService) GenerateTaskPromptWithContext(ctx context.Context, req G
 
 	// Execute CLI Agent with one automatic retry on failure
 	workDir := util.NormalizePath(*task.LocalPath)
+	slog.Info("CLI prompt generation started",
+		"project", task.ProjectName,
+		"task_type", req.TaskType,
+		"model", selection.Model,
+		"provider", selection.Name,
+	)
+	cliStart := time.Now()
 	promptText, err := s.executeCliWithRetry(ctx, workDir, skillPrompt, selection.Model, 1)
 	if err != nil {
+		slog.Error("CLI prompt generation failed",
+			"project", task.ProjectName,
+			"model", selection.Model,
+			"elapsed", time.Since(cliStart).Round(time.Millisecond),
+			"error", err,
+		)
 		errMsg := normalizePromptGenerationError(err)
 		if failErr := s.store.FailTaskPromptGeneration(task.ID, errMsg, startedAt); failErr != nil {
 			return nil, fmt.Errorf("%s；提示词状态回写失败: %v", errMsg, failErr)
 		}
 		return nil, fmt.Errorf("%s", errMsg)
 	}
+	slog.Info("CLI prompt generation completed",
+		"project", task.ProjectName,
+		"model", selection.Model,
+		"elapsed", time.Since(cliStart).Round(time.Millisecond),
+	)
 
 	if err := s.store.CompleteTaskPromptGeneration(task.ID, promptText, startedAt); err != nil {
 		return nil, err
@@ -165,6 +184,13 @@ func (s *PromptService) SaveTaskPrompt(taskID, promptText string) error {
 func (s *PromptService) executeCliWithRetry(ctx context.Context, workDir, prompt, model string, maxRetries int) (string, error) {
 	var lastErr error
 	for attempt := 0; attempt <= maxRetries; attempt++ {
+		if attempt > 0 {
+			slog.Warn("retrying CLI prompt generation",
+				"attempt", attempt,
+				"max_retries", maxRetries,
+				"last_error", lastErr,
+			)
+		}
 		promptText, err := s.executeCliPromptGeneration(ctx, workDir, prompt, model)
 		if err == nil {
 			return promptText, nil

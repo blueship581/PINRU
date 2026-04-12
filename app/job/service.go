@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -157,6 +158,8 @@ func (s *JobService) CancelJob(id string) error {
 }
 
 func (s *JobService) executeJob(id string, req SubmitJobRequest) {
+	start := time.Now()
+
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(req.TimeoutSeconds)*time.Second)
 	defer cancel()
 
@@ -177,6 +180,15 @@ func (s *JobService) executeJob(id string, req SubmitJobRequest) {
 			jobLabel = task.ProjectName
 		}
 	}
+
+	slog.Info("job started",
+		"job_id", id,
+		"job_type", req.JobType,
+		"project", jobLabel,
+		"task_id", req.TaskID,
+		"timeout_s", req.TimeoutSeconds,
+	)
+
 	if jobLabel != "" {
 		s.emitProgress(id, req.JobType, req.TaskID, "running", 0, strPtr(fmt.Sprintf("[%s] 准备中…", jobLabel)), nil)
 	} else {
@@ -202,9 +214,21 @@ func (s *JobService) executeJob(id string, req SubmitJobRequest) {
 		errMsg := "执行超时"
 		_ = s.store.FailBackgroundJob(id, errMsg)
 		s.emitProgress(id, req.JobType, req.TaskID, "error", 0, nil, &errMsg)
+		slog.Error("job timeout",
+			"job_id", id,
+			"job_type", req.JobType,
+			"project", jobLabel,
+			"elapsed", time.Since(start).Round(time.Millisecond),
+		)
 		return
 	}
 	if ctx.Err() == context.Canceled {
+		slog.Info("job cancelled",
+			"job_id", id,
+			"job_type", req.JobType,
+			"project", jobLabel,
+			"elapsed", time.Since(start).Round(time.Millisecond),
+		)
 		return
 	}
 
@@ -212,6 +236,13 @@ func (s *JobService) executeJob(id string, req SubmitJobRequest) {
 		errMsg := execErr.Error()
 		_ = s.store.FailBackgroundJob(id, errMsg)
 		s.emitProgress(id, req.JobType, req.TaskID, "error", 0, nil, &errMsg)
+		slog.Error("job failed",
+			"job_id", id,
+			"job_type", req.JobType,
+			"project", jobLabel,
+			"error", errMsg,
+			"elapsed", time.Since(start).Round(time.Millisecond),
+		)
 		return
 	}
 
@@ -221,6 +252,12 @@ func (s *JobService) executeJob(id string, req SubmitJobRequest) {
 		finalMessage = strPtr("已完成")
 	}
 	s.emitProgress(id, req.JobType, req.TaskID, "done", 100, finalMessage, nil)
+	slog.Info("job completed",
+		"job_id", id,
+		"job_type", req.JobType,
+		"project", jobLabel,
+		"elapsed", time.Since(start).Round(time.Millisecond),
+	)
 }
 
 func (s *JobService) executePromptGenerate(
@@ -228,6 +265,8 @@ func (s *JobService) executePromptGenerate(
 	jobID string,
 	req SubmitJobRequest,
 ) (jobExecutionResult, error) {
+	start := time.Now()
+
 	var promptReq appprompt.GeneratePromptRequest
 	if err := json.Unmarshal([]byte(req.InputPayload), &promptReq); err != nil {
 		return jobExecutionResult{}, fmt.Errorf("解析提示词生成参数失败: %w", err)
@@ -239,12 +278,27 @@ func (s *JobService) executePromptGenerate(
 		projectLabel = task.ProjectName
 	}
 
+	slog.Info("prompt generation started",
+		"project", projectLabel,
+		"task_type", promptReq.TaskType,
+	)
 	s.emitProgress(jobID, req.JobType, req.TaskID, "running", 20, strPtr(fmt.Sprintf("[%s] 分析代码仓库…", projectLabel)), nil)
 
 	res, err := s.promptSvc.GenerateTaskPromptWithContext(ctx, promptReq)
 	if err != nil {
+		slog.Error("prompt generation failed",
+			"project", projectLabel,
+			"error", err,
+			"elapsed", time.Since(start).Round(time.Millisecond),
+		)
 		return jobExecutionResult{}, err
 	}
+
+	slog.Info("prompt generation completed",
+		"project", projectLabel,
+		"model", res.Model,
+		"elapsed", time.Since(start).Round(time.Millisecond),
+	)
 	outputJSON, _ := json.Marshal(res)
 	outputStr := string(outputJSON)
 	return jobExecutionResult{
@@ -310,6 +364,8 @@ func (s *JobService) executeGitClone(
 	jobID string,
 	req SubmitJobRequest,
 ) (jobExecutionResult, error) {
+	start := time.Now()
+
 	var payload GitClonePayload
 	if err := json.Unmarshal([]byte(req.InputPayload), &payload); err != nil {
 		return jobExecutionResult{}, fmt.Errorf("解析 git_clone 参数失败: %w", err)
@@ -325,6 +381,11 @@ func (s *JobService) executeGitClone(
 		FailedModels:     make([]GitCloneFailure, 0),
 	}
 
+	slog.Info("git clone started",
+		"clone_url", payload.CloneURL,
+		"source_model", sourceModelID,
+		"copy_targets", len(payload.CopyTargets),
+	)
 	s.emitProgress(jobID, req.JobType, req.TaskID, "running", 10, strPtr("准备拉取源码…"), nil)
 
 	type result struct{ err error }
@@ -388,6 +449,13 @@ func (s *JobService) executeGitClone(
 	outputJSON, _ := json.Marshal(resultPayload)
 	outputStr := string(outputJSON)
 	totalModels := len(payload.CopyTargets) + 1
+	slog.Info("git clone completed",
+		"clone_url", payload.CloneURL,
+		"success_count", len(resultPayload.SuccessfulModels),
+		"failed_count", len(resultPayload.FailedModels),
+		"total", totalModels,
+		"elapsed", time.Since(start).Round(time.Millisecond),
+	)
 	if len(resultPayload.FailedModels) > 0 {
 		return jobExecutionResult{
 			outputPayload: &outputStr,
@@ -418,11 +486,18 @@ func (s *JobService) executePrSubmit(
 	jobID string,
 	req SubmitJobRequest,
 ) (jobExecutionResult, error) {
+	start := time.Now()
+
 	var payload PrSubmitPayload
 	if err := json.Unmarshal([]byte(req.InputPayload), &payload); err != nil {
 		return jobExecutionResult{}, fmt.Errorf("解析 pr_submit 参数失败: %w", err)
 	}
 
+	slog.Info("pr submit started",
+		"task_id", payload.TaskID,
+		"target_repo", payload.TargetRepo,
+		"models", payload.Models,
+	)
 	s.emitProgress(jobID, req.JobType, req.TaskID, "running", 20, strPtr("正在上传源码到 GitHub…"), nil)
 
 	type result struct {
@@ -448,13 +523,31 @@ func (s *JobService) executePrSubmit(
 		return jobExecutionResult{}, ctx.Err()
 	case r := <-ch:
 		if r.err != nil {
+			slog.Error("pr submit failed",
+				"task_id", payload.TaskID,
+				"target_repo", payload.TargetRepo,
+				"error", r.err,
+				"elapsed", time.Since(start).Round(time.Millisecond),
+			)
 			return jobExecutionResult{}, r.err
 		}
 		if r.res != nil && r.res.RepoError != "" {
-			return jobExecutionResult{}, fmt.Errorf("源码上传失败: %s", r.res.RepoError)
+			err := fmt.Errorf("源码上传失败: %s", r.res.RepoError)
+			slog.Error("pr submit failed",
+				"task_id", payload.TaskID,
+				"target_repo", payload.TargetRepo,
+				"error", err,
+				"elapsed", time.Since(start).Round(time.Millisecond),
+			)
+			return jobExecutionResult{}, err
 		}
 		s.emitProgress(jobID, req.JobType, req.TaskID, "running", 80, strPtr("源码已上传，正在创建模型 PR…"), nil)
 
+		slog.Info("pr submit completed",
+			"task_id", payload.TaskID,
+			"target_repo", payload.TargetRepo,
+			"elapsed", time.Since(start).Round(time.Millisecond),
+		)
 		if r.res != nil {
 			outputJSON, _ := json.Marshal(r.res)
 			outputStr := string(outputJSON)

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
 import {
   Activity,
@@ -10,6 +10,7 @@ import {
   XCircle,
 } from 'lucide-react';
 import { Events } from '@wailsio/runtime';
+import { useLocation } from 'react-router-dom';
 import { useAppStore } from '../../store';
 import { retryJob, cancelJob, type JobProgressEvent } from '../../api/job';
 
@@ -32,7 +33,9 @@ const STATUS_CONFIG: Record<string, {
 };
 
 export default function BackgroundJobPanel() {
+  const location = useLocation();
   const [open, setOpen] = useState(false);
+  const containerRef = useRef<HTMLDivElement>(null);
   const backgroundJobs = useAppStore((s) => s.backgroundJobs);
   const loadBackgroundJobs = useAppStore((s) => s.loadBackgroundJobs);
   const updateBackgroundJob = useAppStore((s) => s.updateBackgroundJob);
@@ -59,6 +62,23 @@ export default function BackgroundJobPanel() {
     });
     return () => { cancel(); };
   }, [loadBackgroundJobs, updateBackgroundJob]);
+
+  useEffect(() => {
+    if (!open) return;
+
+    const handleOutsideClick = (event: MouseEvent) => {
+      if (containerRef.current && !containerRef.current.contains(event.target as Node)) {
+        setOpen(false);
+      }
+    };
+
+    document.addEventListener('mousedown', handleOutsideClick);
+    return () => document.removeEventListener('mousedown', handleOutsideClick);
+  }, [open]);
+
+  useEffect(() => {
+    setOpen(false);
+  }, [location.pathname]);
 
   const activeCount = backgroundJobs.filter(
     (j) => j.status === 'running' || j.status === 'pending',
@@ -89,7 +109,7 @@ export default function BackgroundJobPanel() {
   };
 
   return (
-    <div className="fixed bottom-4 right-4 z-50">
+    <div ref={containerRef} className="fixed bottom-4 right-4 z-50">
       <AnimatePresence>
         {open && (
           <motion.div
@@ -195,6 +215,9 @@ export default function BackgroundJobPanel() {
       <button
         type="button"
         onClick={() => setOpen((prev) => !prev)}
+        aria-label="查看后台任务"
+        aria-expanded={open}
+        aria-haspopup="dialog"
         className="relative flex h-10 w-10 items-center justify-center rounded-full border border-zinc-700/70 bg-zinc-900/90 shadow-lg backdrop-blur-sm transition hover:border-zinc-600 hover:bg-zinc-800"
       >
         <Activity className="h-4.5 w-4.5 text-zinc-400" />

@@ -1,5 +1,6 @@
 import { useState, useEffect, useMemo, useRef, type MouseEvent } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { Events } from '@wailsio/runtime';
 import { useAppStore, TaskStatus, TaskType, Task } from '../../store';
 import {
   buildTaskTypeOverviewSummaries,
@@ -11,7 +12,7 @@ import {
   deleteTask,
   openTaskLocalFolder,
 } from '../../api/task';
-import { generateTaskPrompt } from '../../api/llm';
+import { submitJob, type JobProgressEvent } from '../../api/job';
 import {
   BatchActionBar,
 } from './components/BatchActionBar';
@@ -173,6 +174,70 @@ export default function Board() {
   useEffect(() => { loadActiveProject(); }, [loadActiveProject]);
 
   useEffect(() => {
+    const cancel = Events.On('job:progress', (event: { data: JobProgressEvent }) => {
+      const data = event.data;
+      if (data.jobType !== 'prompt_generate') {
+        return;
+      }
+
+      const taskId = data.taskId ?? '';
+      if (!taskId) {
+        return;
+      }
+
+      if (data.status === 'done') {
+        useAppStore.setState((state) => ({
+          tasks: state.tasks.map((task) =>
+            task.id === taskId
+              ? {
+                  ...task,
+                  status: 'PromptReady',
+                  promptGenerationStatus: 'done',
+                  promptGenerationError: null,
+                }
+              : task,
+          ),
+        }));
+        void loadTasks();
+        return;
+      }
+
+      if (data.status === 'error') {
+        useAppStore.setState((state) => ({
+          tasks: state.tasks.map((task) =>
+            task.id === taskId
+              ? {
+                  ...task,
+                  promptGenerationStatus: 'error',
+                  promptGenerationError: data.errorMessage ?? null,
+                }
+              : task,
+          ),
+        }));
+        void loadTasks();
+        return;
+      }
+
+      if (data.status === 'cancelled') {
+        useAppStore.setState((state) => ({
+          tasks: state.tasks.map((task) =>
+            task.id === taskId
+              ? {
+                  ...task,
+                  promptGenerationStatus: 'idle',
+                  promptGenerationError: null,
+                }
+              : task,
+          ),
+        }));
+        void loadTasks();
+      }
+    });
+
+    return () => { cancel(); };
+  }, [loadTasks]);
+
+  useEffect(() => {
     if (!taskCardContextMenu) {
       return undefined;
     }
@@ -311,13 +376,20 @@ export default function Board() {
 
     void (async () => {
       try {
-        await generateTaskPrompt({
+        const inputPayload = JSON.stringify({
           taskId: task.id,
           taskType: task.taskType,
           constraints: constraints.length > 0 ? constraints : ['无约束'],
           scopes: scope ? [scope] : [],
           thinkingBudget: '',
         });
+        await submitJob({
+          jobType: 'prompt_generate',
+          taskId: task.id,
+          inputPayload,
+          timeoutSeconds: 1200,
+        });
+        useAppStore.getState().loadBackgroundJobs();
       } finally {
         void loadTasks();
       }

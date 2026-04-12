@@ -2,7 +2,7 @@ package prompt
 
 import (
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -73,6 +73,6 @@ func BestEffortSyncTaskPromptArtifact(task *store.Task, promptText string) {
 		return
 	}
 	if err := SyncPromptArtifactIfPresent(task.LocalPath, promptText); err != nil {
-		log.Printf("sync task prompt artifact failed for %s: %v", task.ID, err)
+		slog.Error("sync task prompt artifact failed", "task_id", task.ID, "error", err)
 	}
 }

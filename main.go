@@ -3,8 +3,12 @@ package main
 import (
 	"embed"
 	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"time"
+
+	"github.com/lmittmann/tint"
 
 	appchat "github.com/blueship581/pinru/app/chat"
 	appcli "github.com/blueship581/pinru/app/cli"
@@ -23,6 +27,11 @@ import (
 var assets embed.FS
 
 func main() {
+	slog.SetDefault(slog.New(tint.NewHandler(os.Stderr, &tint.Options{
+		Level:      slog.LevelInfo,
+		TimeFormat: time.TimeOnly,
+	})))
+
 	home, _ := os.UserHomeDir()
 	dbPath := filepath.Join(home, ".pinru", "pinru.db")
 
