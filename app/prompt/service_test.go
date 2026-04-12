@@ -1,16 +1,12 @@
 package prompt
 
 import (
-	"encoding/json"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/blueship581/pinru/app/testutil"
-	internalprompt "github.com/blueship581/pinru/internal/prompt"
 	"github.com/blueship581/pinru/internal/store"
 )
 
@@ -90,122 +86,202 @@ func TestSaveTaskPromptSkipsMissingArtifact(t *testing.T) {
 	}
 }
 
-func TestGenerateTaskPromptRefinesLongBodyBeforeSave(t *testing.T) {
+func TestBuildSkillPrompt(t *testing.T) {
+	tests := []struct {
+		name     string
+		req      GeneratePromptRequest
+		contains []string
+	}{
+		{
+			name: "full parameters",
+			req: GeneratePromptRequest{
+				TaskType:    "Bug修复",
+				Scopes:      []string{"单文件", "模块内多文件"},
+				Constraints: []string{"业务逻辑约束", "代码风格或规范约束"},
+			},
+			contains: []string{
+				"/评审项目提示词生成 [PINRU]",
+				"taskType: Bug修复",
+				"constraints: 业务逻辑约束,代码风格或规范约束",
+				"scope: 单文件,模块内多文件",
+			},
+		},
+		{
+			name: "no constraints",
+			req: GeneratePromptRequest{
+				TaskType: "代码生成",
+				Scopes:   []string{"跨模块多文件"},
+			},
+			contains: []string{
+				"taskType: 代码生成",
+				"constraints: 无约束",
+				"scope: 跨模块多文件",
+			},
+		},
+		{
+			name: "no scope",
+			req: GeneratePromptRequest{
+				TaskType:    "Feature迭代",
+				Constraints: []string{"技术栈或依赖约束"},
+			},
+			contains: []string{
+				"taskType: Feature迭代",
+				"constraints: 技术栈或依赖约束",
+			},
+		},
+		{
+			name: "with notes",
+			req: GeneratePromptRequest{
+				TaskType:        "Feature迭代",
+				Scopes:          []string{"跨模块多文件"},
+				Constraints:     []string{"无约束"},
+				AdditionalNotes: strPtr("优先围绕最近改动的看板交互出题"),
+			},
+			contains: []string{
+				"notes: 优先围绕最近改动的看板交互出题",
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			result := buildSkillPrompt(tc.req)
+			for _, want := range tc.contains {
+				if !strings.Contains(result, want) {
+					t.Errorf("buildSkillPrompt() missing %q in:\n%s", want, result)
+				}
+			}
+		})
+	}
+
+	// Verify no scope line when scopes are empty
+	noScopeResult := buildSkillPrompt(GeneratePromptRequest{
+		TaskType:    "Feature迭代",
+		Constraints: []string{"技术栈或依赖约束"},
+	})
+	if strings.Contains(noScopeResult, "scope:") {
+		t.Errorf("buildSkillPrompt() should not contain scope line when scopes are empty, got:\n%s", noScopeResult)
+	}
+}
+
+func TestResolveProviderForPromptGeneration(t *testing.T) {
 	testStore := testutil.OpenTestStore(t)
 	defer testStore.Close()
 
-	workDir := t.TempDir()
-	seedPromptRepo(t, workDir)
-
-	task := store.Task{
-		ID:              "task-generate-prompt-1",
-		GitLabProjectID: 3001,
-		ProjectName:     "Prompt Generate Demo",
-		TaskType:        "Bug修复",
-		LocalPath:       &workDir,
+	selection, err := resolveProviderForPromptGeneration(testStore, nil)
+	if err != nil {
+		t.Fatalf("resolveProviderForPromptGeneration(no providers) error = %v", err)
 	}
-	if err := testStore.CreateTask(task); err != nil {
-		t.Fatalf("CreateTask() error = %v", err)
-	}
-
-	longBody := "会员列表切换筛选条件和分页后，页面会短暂显示上一组查询结果，运营会误以为刚才的筛选没有生效，还可能继续在旧数据上批量操作，需要保证列表、统计数字和批量选择状态始终只对应最后一次查询。"
-	constraintLine := "业务逻辑约束：已失效会员不能再出现在可批量操作名单里。"
-	shortBody := "会员列表切换筛选和分页后会短暂显示旧结果，需要确保列表、统计和勾选状态始终只对应最后一次查询。"
-
-	if !internalprompt.PromptBodyExceedsLimit(longBody + "\n" + constraintLine) {
-		t.Fatalf("expected long prompt body to exceed %d runes", internalprompt.MaxPromptBodyRunes)
-	}
-	if internalprompt.PromptBodyExceedsLimit(shortBody + "\n" + constraintLine) {
-		t.Fatalf("expected refined prompt body to fit within %d runes", internalprompt.MaxPromptBodyRunes)
-	}
-
-	callCount := 0
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		callCount++
-
-		var responseText string
-		switch callCount {
-		case 1:
-			responseText = longBody + "\n" + constraintLine
-		case 2:
-			responseText = shortBody
-		default:
-			t.Fatalf("unexpected provider call count: %d", callCount)
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		if err := json.NewEncoder(w).Encode(map[string]any{
-			"choices": []map[string]any{
-				{
-					"message": map[string]string{
-						"content": responseText,
-					},
-				},
-			},
-		}); err != nil {
-			t.Fatalf("Encode() error = %v", err)
-		}
-	}))
-	defer server.Close()
-
-	baseURL := server.URL
 	if err := testStore.CreateLLMProvider(store.LLMProvider{
-		ID:           "provider-openai-mock",
-		Name:         "Mock OpenAI",
+		ID:           "provider-openai",
+		Name:         "OpenAI",
 		ProviderType: "openai_compatible",
-		Model:        "gpt-test",
-		BaseURL:      &baseURL,
+		Model:        "gpt-5.4",
 		APIKey:       "test-key",
 		IsDefault:    true,
 	}); err != nil {
 		t.Fatalf("CreateLLMProvider() error = %v", err)
 	}
+	if selection.Model != defaultPromptGenerationModel {
+		t.Fatalf("resolveProviderForPromptGeneration(no providers).Model = %q, want %q", selection.Model, defaultPromptGenerationModel)
+	}
 
-	s := &PromptService{store: testStore}
-	result, err := s.GenerateTaskPrompt(GeneratePromptRequest{
-		TaskID:      task.ID,
-		TaskType:    "Bug修复",
-		Scopes:      []string{"单文件"},
-		Constraints: []string{"业务逻辑约束"},
-	})
+	if err := testStore.CreateLLMProvider(store.LLMProvider{
+		ID:           "provider-claude",
+		Name:         "Claude ACP",
+		ProviderType: "claude_code_acp",
+		Model:        "claude-opus-4-6",
+		IsDefault:    false,
+	}); err != nil {
+		t.Fatalf("CreateLLMProvider() error = %v", err)
+	}
+
+	selection, err = resolveProviderForPromptGeneration(testStore, nil)
 	if err != nil {
-		t.Fatalf("GenerateTaskPrompt() error = %v", err)
+		t.Fatalf("resolveProviderForPromptGeneration(fallback claude provider) error = %v", err)
+	}
+	if selection.Model != "claude-opus-4-6" {
+		t.Fatalf("resolveProviderForPromptGeneration(fallback claude provider).Model = %q, want claude-opus-4-6", selection.Model)
 	}
 
-	expected := shortBody + "\n" + constraintLine
-	if result.PromptText != expected {
-		t.Fatalf("PromptText = %q, want %q", result.PromptText, expected)
-	}
-	if callCount != 2 {
-		t.Fatalf("provider call count = %d, want 2", callCount)
+	openaiID := "provider-openai"
+	if _, err := resolveProviderForPromptGeneration(testStore, &openaiID); err == nil {
+		t.Fatalf("resolveProviderForPromptGeneration(openai provider) expected error")
 	}
 
-	savedTask, err := testStore.GetTask(task.ID)
+	claudeID := "provider-claude"
+	selection, err = resolveProviderForPromptGeneration(testStore, &claudeID)
 	if err != nil {
-		t.Fatalf("GetTask() error = %v", err)
+		t.Fatalf("resolveProviderForPromptGeneration(claude provider) error = %v", err)
 	}
-	if savedTask == nil || savedTask.PromptText == nil || *savedTask.PromptText != expected {
-		t.Fatalf("saved PromptText = %v, want %q", savedTask.PromptText, expected)
+	if selection.Name != "Claude ACP" {
+		t.Fatalf("resolveProviderForPromptGeneration(claude provider).Name = %q, want Claude ACP", selection.Name)
 	}
 }
 
-func seedPromptRepo(t *testing.T, workDir string) {
-	t.Helper()
+func TestResolveProviderForTestPreservesStoredAPIKey(t *testing.T) {
+	testStore := testutil.OpenTestStore(t)
+	defer testStore.Close()
 
-	for path, content := range map[string]string{
-		".git/HEAD":          "ref: refs/heads/main\n",
-		"README.md":          "# Demo Repo\n\n会员管理后台。\n",
-		"package.json":       "{\n  \"name\": \"prompt-demo\"\n}\n",
-		"src/App.tsx":        "export function App() { return <div>会员管理</div>; }\n",
-		"src/member.ts":      "export const members = [];\n",
-		"src/member.test.ts": "test('member', () => {});\n",
-	} {
-		fullPath := filepath.Join(workDir, path)
-		if err := os.MkdirAll(filepath.Dir(fullPath), 0o755); err != nil {
-			t.Fatalf("MkdirAll(%q) error = %v", fullPath, err)
-		}
-		if err := os.WriteFile(fullPath, []byte(content), 0o644); err != nil {
-			t.Fatalf("WriteFile(%q) error = %v", fullPath, err)
-		}
+	if err := testStore.CreateLLMProvider(store.LLMProvider{
+		ID:           "provider-openai",
+		Name:         "OpenAI",
+		ProviderType: "openai_compatible",
+		Model:        "gpt-5.4",
+		APIKey:       "stored-secret",
+		IsDefault:    true,
+	}); err != nil {
+		t.Fatalf("CreateLLMProvider() error = %v", err)
+	}
+
+	svc := &PromptService{store: testStore}
+	provider, err := svc.resolveProviderForTest(store.LLMProvider{
+		ID:           "provider-openai",
+		Name:         "OpenAI",
+		ProviderType: "openai_compatible",
+		Model:        "gpt-5.4",
+		APIKey:       "",
+	})
+	if err != nil {
+		t.Fatalf("resolveProviderForTest() error = %v", err)
+	}
+	if provider.APIKey != "stored-secret" {
+		t.Fatalf("resolveProviderForTest().APIKey = %q, want stored-secret", provider.APIKey)
+	}
+}
+
+func strPtr(value string) *string {
+	return &value
+}
+
+func TestExtractPromptFromCLIOutputJSON(t *testing.T) {
+	expected := "订单列表筛选条件切换得太快时，列表内容会短暂停留在上一组条件。"
+	payload := `{"version":1,"prompt":"` + expected + `","artifactPath":"/tmp/test.md","fileWritten":true}`
+
+	got, err := ExtractPromptFromCLIOutput(payload)
+	if err != nil {
+		t.Fatalf("ExtractPromptFromCLIOutput() error = %v", err)
+	}
+	if got != expected {
+		t.Fatalf("ExtractPromptFromCLIOutput() = %q, want %q", got, expected)
+	}
+}
+
+func TestExtractPromptFromCLIOutputMarkers(t *testing.T) {
+	expected := "购物车同时勾选多件商品时，结算页的总价偶尔还是上一轮的结果。"
+	output := strings.Join([]string{
+		"已完成，结果如下：",
+		PromptOutputStartMarker,
+		expected,
+		PromptOutputEndMarker,
+		"已写入：/tmp/demo/任务提示词.md",
+	}, "\n")
+
+	got, err := ExtractPromptFromCLIOutput(output)
+	if err != nil {
+		t.Fatalf("ExtractPromptFromCLIOutput() error = %v", err)
+	}
+	if got != expected {
+		t.Fatalf("ExtractPromptFromCLIOutput() = %q, want %q", got, expected)
 	}
 }
