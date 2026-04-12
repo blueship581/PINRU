@@ -370,6 +370,16 @@ export default function Board() {
     [tasks, search, activeTypes, activeStages, activeRounds],
   );
 
+  // 各维度的计数基准：排除自身维度，反映其他维度当前筛选的结果
+  const tasksForStageCount = useMemo(
+    () => filterBoardTasks(tasks, { search, activeTypes, activeStages: new Set(), activeRounds }),
+    [tasks, search, activeTypes, activeRounds],
+  );
+  const tasksForRoundCount = useMemo(
+    () => filterBoardTasks(tasks, { search, activeTypes, activeStages, activeRounds: new Set() }),
+    [tasks, search, activeTypes, activeStages],
+  );
+
   const sortedTasks = useMemo(() => sortBoardTasks(filtered, sortBy), [filtered, sortBy]);
 
   const groupedTasks = useMemo(
@@ -430,6 +440,8 @@ export default function Board() {
         hasFilters={hasFilters}
         availableExecutionRounds={availableExecutionRounds}
         tasks={tasks}
+        tasksForStageCount={tasksForStageCount}
+        tasksForRoundCount={tasksForRoundCount}
         sortedTasks={sortedTasks}
         groupedTasks={groupedTasks}
         visibleProjectTaskSummaries={visibleProjectTaskSummaries}

@@ -9,6 +9,8 @@ import (
 	"os/exec"
 	"strings"
 	"time"
+
+	"github.com/blueship581/pinru/internal/util"
 )
 
 const anthropicVersion = "2023-06-01"
@@ -267,15 +269,16 @@ func (p *claudeCodeACPProvider) Name() string  { return p.cfg.Name }
 func (p *claudeCodeACPProvider) Model() string { return p.cfg.Model }
 
 func (p *claudeCodeACPProvider) TestConnection() error {
-	// 先检查 CLI 是否安装
-	if _, err := exec.LookPath("claude"); err != nil {
+	// 先检查 CLI 是否安装（支持打包应用的受限 PATH 环境）
+	claudePath, err := util.ResolveCLI("claude")
+	if err != nil {
 		return fmt.Errorf("Claude Code CLI 未安装，请执行: npm install -g @anthropic-ai/claude-code")
 	}
 
 	// 真实发一次 API 请求，验证 ACP 代理可达且有可用账号
 	// 不传 --model，让全局配置决定模型，与提示词生成保持一致
 	args := []string{"-p", "respond with the single word: ok", "--dangerously-skip-permissions"}
-	cmd := exec.Command("claude", args...)
+	cmd := exec.Command(claudePath, args...)
 
 	type result struct {
 		out []byte
@@ -312,9 +315,13 @@ func (p *claudeCodeACPProvider) TestConnection() error {
 }
 
 func (p *claudeCodeACPProvider) Generate(systemPrompt, userPrompt string) (string, error) {
+	claudePath, err := util.ResolveCLI("claude")
+	if err != nil {
+		return "", fmt.Errorf("Claude Code CLI 未安装，请执行: npm install -g @anthropic-ai/claude-code")
+	}
 	prompt := systemPrompt + "\n\n" + userPrompt
 	args := []string{"--print", "--model", p.cfg.Model, prompt}
-	cmd := exec.Command("claude", args...)
+	cmd := exec.Command(claudePath, args...)
 	cmd.Stdin = nil
 	out, err := cmd.Output()
 	if err != nil {
@@ -340,7 +347,11 @@ func (p *codexACPProvider) Name() string  { return p.cfg.Name }
 func (p *codexACPProvider) Model() string { return p.cfg.Model }
 
 func (p *codexACPProvider) TestConnection() error {
-	cmd := exec.Command("codex", "--version")
+	codexPath, err := util.ResolveCLI("codex")
+	if err != nil {
+		return fmt.Errorf("Codex CLI 未安装或不可用: %v", err)
+	}
+	cmd := exec.Command(codexPath, "--version")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("Codex CLI 未安装或不可用: %v", strings.TrimSpace(string(out)))
 	}
@@ -348,9 +359,13 @@ func (p *codexACPProvider) TestConnection() error {
 }
 
 func (p *codexACPProvider) Generate(systemPrompt, userPrompt string) (string, error) {
+	codexPath, err := util.ResolveCLI("codex")
+	if err != nil {
+		return "", fmt.Errorf("Codex CLI 未安装，请先安装后重试")
+	}
 	prompt := systemPrompt + "\n\n" + userPrompt
 	args := []string{"--quiet", "--model", p.cfg.Model, prompt}
-	cmd := exec.Command("codex", args...)
+	cmd := exec.Command(codexPath, args...)
 	out, err := cmd.Output()
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {

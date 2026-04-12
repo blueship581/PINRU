@@ -39,6 +39,8 @@ export function BoardMainContent({
   hasFilters,
   availableExecutionRounds,
   tasks,
+  tasksForStageCount,
+  tasksForRoundCount,
   sortedTasks,
   groupedTasks,
   visibleProjectTaskSummaries,
@@ -74,6 +76,8 @@ export function BoardMainContent({
   hasFilters: boolean;
   availableExecutionRounds: number[];
   tasks: Task[];
+  tasksForStageCount: Task[];
+  tasksForRoundCount: Task[];
   sortedTasks: Task[];
   groupedTasks: Array<{ taskType: string; tasks: Task[] }>;
   visibleProjectTaskSummaries: TaskTypeOverviewSummary[];
@@ -221,7 +225,7 @@ export function BoardMainContent({
           </span>
           {(['Claimed', 'Downloading', 'Downloaded', 'PromptReady', 'Submitted', 'Error'] as TaskStatus[]).map((status) => {
             const cfg = STATUS[status];
-            const count = tasks.filter((task) => task.status === status).length;
+            const count = tasksForStageCount.filter((task) => task.status === status).length;
             const active = activeStages.has(status);
             return (
               <button
@@ -266,7 +270,7 @@ export function BoardMainContent({
               轮次
             </span>
             {availableExecutionRounds.map((round) => {
-              const count = tasks.filter((task) => task.executionRounds === round).length;
+              const count = tasksForRoundCount.filter((task) => task.executionRounds === round).length;
               const active = activeRounds.has(round);
 
               return (

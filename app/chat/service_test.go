@@ -2,6 +2,7 @@ package chat
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -469,8 +470,13 @@ func TestSendMessageStartupFailureCleansMessagesAndFailsPromptGeneration(t *test
 		t.Fatalf("CreateChatSession() error = %v", err)
 	}
 
-	t.Setenv("PATH", t.TempDir())
-	s := &ChatService{store: testStore, cliSvc: appcli.New()}
+	// Simulate an environment where the claude binary is unavailable by using a
+	// resolver that always fails (t.Setenv alone is insufficient because
+	// ResolveCLI also checks hardcoded paths and the login shell).
+	unavailableCLI := appcli.NewWithResolver(func(name string) (string, error) {
+		return "", fmt.Errorf("%s: binary not found (simulated for test)", name)
+	})
+	s := &ChatService{store: testStore, cliSvc: unavailableCLI}
 
 	_, err = s.SendMessage(SendMessageRequest{
 		SessionID:      session.ID,

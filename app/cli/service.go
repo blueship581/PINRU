@@ -24,8 +24,9 @@ var manualFS embed.FS
 
 // Service executes the local claude CLI and streams output back via polling.
 type CliService struct {
-	mu       sync.Mutex
-	sessions map[string]*cliSession
+	mu         sync.Mutex
+	sessions   map[string]*cliSession
+	resolveCLI func(name string) (string, error) // nil → util.ResolveCLI
 }
 
 type cliSession struct {
@@ -68,6 +69,26 @@ func New() *CliService {
 	}
 	go svc.cleanupLoop()
 	return svc
+}
+
+// NewWithResolver creates a CliService with a custom binary resolver. Use this
+// in tests to simulate a missing CLI without touching the system PATH.
+func NewWithResolver(fn func(name string) (string, error)) *CliService {
+	svc := &CliService{
+		sessions:   make(map[string]*cliSession),
+		resolveCLI: fn,
+	}
+	go svc.cleanupLoop()
+	return svc
+}
+
+// lookupCLI resolves the named binary using the configured resolver, or falls
+// back to util.ResolveCLI when none is set.
+func (s *CliService) lookupCLI(name string) (string, error) {
+	if s.resolveCLI != nil {
+		return s.resolveCLI(name)
+	}
+	return util.ResolveCLI(name)
 }
 
 func (s *CliService) cleanupLoop() {
@@ -139,7 +160,7 @@ type SkillItem struct {
 
 // CheckCLI returns the resolved path to the claude binary, or an error.
 func (s *CliService) CheckCLI() (string, error) {
-	path, err := exec.LookPath("claude")
+	path, err := s.lookupCLI("claude")
 	if err != nil {
 		return "", fmt.Errorf("claude CLI 未找到，请先安装 Claude Code: npm install -g @anthropic-ai/claude-code")
 	}
@@ -155,7 +176,7 @@ func (s *CliService) StartClaude(req StartClaudeRequest) (*StartClaudeResponse, 
 		return nil, fmt.Errorf("提示词不能为空")
 	}
 
-	claudePath, err := exec.LookPath("claude")
+	claudePath, err := s.lookupCLI("claude")
 	if err != nil {
 		return nil, fmt.Errorf("claude CLI 未找到，请先安装: npm install -g @anthropic-ai/claude-code")
 	}
