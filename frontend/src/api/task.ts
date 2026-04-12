@@ -82,6 +82,7 @@ export interface CreateTaskRequest {
   gitlabProjectId: number;
   projectName: string;
   taskType?: string;
+  claimSequence?: number | null;
   localPath: string | null;
   sourceModelName?: string | null;
   sourceLocalPath?: string | null;

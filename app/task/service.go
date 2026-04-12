@@ -31,6 +31,7 @@ type CreateTaskRequest struct {
 	GitLabProjectID int64    `json:"gitlabProjectId"`
 	ProjectName     string   `json:"projectName"`
 	TaskType        string   `json:"taskType"`
+	ClaimSequence   *int     `json:"claimSequence"`
 	LocalPath       *string  `json:"localPath"`
 	SourceModelName *string  `json:"sourceModelName"`
 	SourceLocalPath *string  `json:"sourceLocalPath"`
@@ -301,8 +302,12 @@ func (s *TaskService) removeManagedTaskDirectory(task *store.Task) error {
 		return nil
 	}
 
-	expectedPath := util.BuildManagedTaskFolderPath(project.CloneBasePath, task.ProjectName, task.TaskType)
 	actualPath := strings.TrimSpace(*task.LocalPath)
+	sequence, ok := parseManagedTaskClaimSequence(actualPath, task.ProjectName, task.TaskType)
+	if !ok {
+		return nil
+	}
+	expectedPath := util.BuildManagedTaskFolderPathWithSequence(project.CloneBasePath, task.ProjectName, task.TaskType, sequence)
 	if !util.SamePath(expectedPath, actualPath) {
 		return nil
 	}
@@ -443,6 +448,10 @@ func buildModelRunLocalPath(req CreateTaskRequest, model string) *string {
 }
 
 func (s *TaskService) findExistingTask(req CreateTaskRequest) (*store.Task, error) {
+	if req.ClaimSequence != nil || claimSequenceForRequest(req) > 0 {
+		return s.store.GetTask(buildTaskID(req))
+	}
+
 	if req.ProjectConfigID != nil && strings.TrimSpace(*req.ProjectConfigID) != "" {
 		return s.store.FindTaskByProjectConfigAndGitLabProjectID(strings.TrimSpace(*req.ProjectConfigID), req.GitLabProjectID)
 	}
@@ -451,7 +460,7 @@ func (s *TaskService) findExistingTask(req CreateTaskRequest) (*store.Task, erro
 }
 
 func buildTaskID(req CreateTaskRequest) string {
-	legacyID := legacyTaskID(req.GitLabProjectID)
+	legacyID := buildClaimTaskID(req.GitLabProjectID, claimSequenceForRequest(req))
 	if req.ProjectConfigID == nil {
 		return legacyID
 	}
@@ -466,6 +475,44 @@ func buildTaskID(req CreateTaskRequest) string {
 
 func legacyTaskID(gitLabProjectID int64) string {
 	return fmt.Sprintf("label-%05d", gitLabProjectID)
+}
+
+func buildClaimTaskID(gitLabProjectID int64, claimSequence int) string {
+	baseID := legacyTaskID(gitLabProjectID)
+	if claimSequence <= 0 {
+		return baseID
+	}
+	return fmt.Sprintf("%s-%d", baseID, claimSequence)
+}
+
+func claimSequenceForRequest(req CreateTaskRequest) int {
+	if req.ClaimSequence != nil && *req.ClaimSequence > 0 {
+		return *req.ClaimSequence
+	}
+
+	if req.LocalPath != nil {
+		if sequence, ok := parseManagedTaskClaimSequence(*req.LocalPath, req.ProjectName, req.TaskType); ok {
+			return sequence
+		}
+	}
+
+	if req.SourceLocalPath != nil {
+		baseName := filepath.Base(util.ExpandTilde(strings.TrimSpace(*req.SourceLocalPath)))
+		if sequence, ok := util.ParseManagedSourceFolderSequence(baseName, req.GitLabProjectID, req.TaskType); ok {
+			return sequence
+		}
+	}
+
+	return 0
+}
+
+func parseManagedTaskClaimSequence(pathValue, projectName, taskType string) (int, bool) {
+	trimmedPath := strings.TrimSpace(pathValue)
+	if trimmedPath == "" {
+		return 0, false
+	}
+	baseName := filepath.Base(util.ExpandTilde(trimmedPath))
+	return util.ParseManagedTaskFolderSequence(baseName, projectName, taskType)
 }
 
 func normalizeTaskIdentityToken(value string) string {

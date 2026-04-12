@@ -16,6 +16,7 @@ import type {
   DirectoryInspectionResult,
   GitLabProject,
   GitLabProjectLookupResult,
+  ManagedClaimPathPlan,
   NormalizeManagedSourceFoldersResult,
 } from './git';
 import type {
@@ -121,6 +122,17 @@ export type WailsServiceContract = {
     CopyProjectDirectory: ServiceMethod<[sourcePath: string, destinationPath: string], void>;
     CheckPathsExist: ServiceMethod<[paths: string[]], string[]>;
     InspectDirectory: ServiceMethod<[path: string], DirectoryInspectionResult>;
+    PlanManagedClaimPaths: ServiceMethod<
+      [
+        basePath: string,
+        projectName: string,
+        projectId: number,
+        taskType: string,
+        count: number,
+        projectConfigId: string,
+      ],
+      ManagedClaimPathPlan[]
+    >;
     NormalizeManagedSourceFolders: ServiceMethod<
       [projectId: string],
       NormalizeManagedSourceFoldersResult

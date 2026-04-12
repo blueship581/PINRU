@@ -16,6 +16,8 @@ import {
   checkPathsExist,
   fetchConfiguredGitLabProjects,
   type GitLabProject,
+  planManagedClaimPaths,
+  type ManagedClaimPathPlan,
 } from '../../api/git';
 import {
   getJob,
@@ -52,9 +54,8 @@ import type {
   ProjectLookup,
 } from './types';
 import {
-  buildProjectBasePath,
-  buildProjectSourcePath,
   buildProjectRef,
+  formatClaimProjectId,
   getResultStatusMeta,
   isOriginModel,
   parseProjectIds,
@@ -63,6 +64,13 @@ import {
 } from './utils/claimUtils';
 
 /* ─── Component ─── */
+
+type PlannedClaim = {
+  lookup: ProjectLookup;
+  plan: ManagedClaimPathPlan;
+  claimKey: string;
+  displayProjectId: string;
+};
 
 export default function Claim() {
   const navigate = useNavigate();
@@ -85,6 +93,7 @@ export default function Claim() {
   const [activeProject, setActiveProject] = useState<ProjectConfig | null>(null);
   const [quotas, setQuotas] = useState<TaskTypeQuotas>({});
   const [selectedTaskType, setSelectedTaskType] = useState<TaskType | null>(null);
+  const [claimSetCount, setClaimSetCount] = useState(1);
 
   const [models, setModels] = useState<ModelEntry[]>(
     storeCloneModels.map((m) => ({ ...m, checked: m.isDefault, status: 'pending' as const })),
@@ -154,7 +163,6 @@ export default function Claim() {
   );
   const claimTaskType = selectedTaskType ?? defaultTaskType;
   const claimTaskTypeRemaining = getTaskTypeRemaining(claimTaskType);
-  const isClaimQuotaBlocked = claimTaskTypeRemaining !== null && claimTaskTypeRemaining <= 0;
   const preferredSourceModelName = activeProject?.sourceModelFolder?.trim() || 'ORIGIN';
 
   useEffect(() => {
@@ -191,19 +199,18 @@ export default function Claim() {
 
   const runClonePlan = async (
     currentProject: GitLabProject,
-    projectNumber: string,
     basePath: string,
-    taskType: string,
+    sourcePath: string,
     checkedModels: ModelEntry[],
     onStatusChange?: (modelId: string, status: ModelEntry['status']) => void,
   ): Promise<ClonePlanResult> => {
     const normalizedBasePath = basePath.replace(/\/+$/, '');
     const sourceModel = pickSourceModel(checkedModels, preferredSourceModelName);
-    const sourcePath = buildProjectSourcePath(projectNumber, taskType, normalizedBasePath);
+    const normalizedSourcePath = sourcePath.replace(/\/+$/, '');
 
     const allTargetPaths = checkedModels.map((model) =>
       model.id === sourceModel.id
-        ? sourcePath
+        ? normalizedSourcePath
         : `${normalizedBasePath}/${model.id}`,
     );
     const existingPaths = (await checkPathsExist(allTargetPaths)) ?? [];
@@ -226,7 +233,7 @@ export default function Claim() {
 
     const payload: GitClonePayload = {
       cloneUrl,
-      sourcePath,
+      sourcePath: normalizedSourcePath,
       sourceModelId: sourceModel.id,
       copyTargets,
     };
@@ -266,7 +273,7 @@ export default function Claim() {
     }
 
     let result: GitCloneResult = {
-      sourcePath,
+      sourcePath: normalizedSourcePath,
       successfulModels: checkedModels.map((model) => model.id),
       failedModels: [],
     };
@@ -339,37 +346,74 @@ export default function Claim() {
   };
 
   const validProjects = lookups.filter((l) => l.project);
+  const requestedClaimCount = validProjects.length * claimSetCount;
+  const isClaimQuotaBlocked = claimTaskTypeRemaining !== null && (
+    claimTaskTypeRemaining <= 0 || requestedClaimCount > claimTaskTypeRemaining
+  );
+
+  const buildPlannedClaims = async (): Promise<PlannedClaim[]> => {
+    const plannedGroups = await Promise.all(
+      validProjects.map(async (lookup) => ({
+        lookup,
+        plans: await planManagedClaimPaths(
+          defaultCloneRoot,
+          lookup.project!.name,
+          Number.parseInt(lookup.id, 10),
+          claimTaskType,
+          claimSetCount,
+          activeConfigId ?? '',
+        ),
+      })),
+    );
+
+    return plannedGroups.flatMap(({ lookup, plans }) =>
+      plans.map((plan) => ({
+        lookup,
+        plan,
+        claimKey: `${lookup.id}:${plan.sequence}`,
+        displayProjectId: formatClaimProjectId(lookup.id, plan.sequence),
+      })),
+    );
+  };
 
   const handleClaim = async () => {
     if (!validProjects.length || !selectedModels.length) return;
     if (isClaimQuotaBlocked) return;
 
-    setPhase('running');
-    const initialResults: ClaimResult[] = validProjects.map((l) => ({
-      projectId: l.id,
-      projectName: l.project!.name,
-      localPath: buildProjectBasePath(l.project!.name, claimTaskType, defaultCloneRoot),
-      status: 'pending',
-      message: '等待中',
-      modelStatuses: new Map(selectedModels.map((m) => [m.id, 'pending' as const])),
-    }));
-    setClaimResults(initialResults);
-
+    setSearchError('');
+    let startedRun = false;
     try {
       const gitLabSettings = await getGitLabSettings();
       if (!gitLabSettings.url || !gitLabSettings.hasToken) {
         throw new Error('请先在设置页面配置 GitLab URL 和 Token');
       }
 
+      const plannedClaims = await buildPlannedClaims();
+      const sourceModelId = pickSourceModel(selectedModels, preferredSourceModelName).id;
+      const initialResults: ClaimResult[] = plannedClaims.map(({ lookup, plan, claimKey, displayProjectId }) => ({
+        claimKey,
+        projectId: lookup.id,
+        displayProjectId,
+        projectName: lookup.project!.name,
+        claimSequence: plan.sequence,
+        localPath: plan.taskPath,
+        status: 'pending',
+        message: '等待中',
+        modelStatuses: new Map(selectedModels.map((model) => [model.id, 'pending' as const])),
+      }));
+
+      setPhase('running');
+      setClaimResults(initialResults);
+      startedRun = true;
+
       let createdCount = 0;
 
-      for (const lookup of validProjects) {
+      for (const { lookup, plan, claimKey } of plannedClaims) {
         const project = lookup.project!;
-        const basePath = buildProjectBasePath(project.name, claimTaskType, defaultCloneRoot);
 
         setClaimResults((prev) =>
           prev.map((r) =>
-            r.projectId === lookup.id
+            r.claimKey === claimKey
               ? { ...r, status: 'running', message: '正在 clone 源码并为各模型初始化 Git...' }
               : r,
           ),
@@ -378,14 +422,13 @@ export default function Claim() {
         try {
           const result = await runClonePlan(
             project,
-            lookup.id,
-            basePath,
-            claimTaskType,
+            plan.taskPath,
+            plan.sourcePath,
             selectedModels,
             (modelId, status) => {
               setClaimResults((prev) =>
                 prev.map((r) => {
-                  if (r.projectId !== lookup.id) return r;
+                  if (r.claimKey !== claimKey) return r;
                   const updated = new Map(r.modelStatuses);
                   updated.set(modelId, status);
                   return { ...r, modelStatuses: updated };
@@ -398,9 +441,10 @@ export default function Claim() {
             gitlabProjectId: Number.parseInt(lookup.id, 10),
             projectName: project.name,
             taskType: claimTaskType,
-            localPath: basePath,
-            sourceModelName: pickSourceModel(selectedModels, preferredSourceModelName).id,
-            sourceLocalPath: buildProjectSourcePath(lookup.id, claimTaskType, basePath),
+            claimSequence: plan.sequence,
+            localPath: plan.taskPath,
+            sourceModelName: sourceModelId,
+            sourceLocalPath: plan.sourcePath,
             models: result.successfulModels,
             projectConfigId: activeConfigId,
           });
@@ -425,7 +469,7 @@ export default function Claim() {
           const isPartial = result.failedModels.length > 0;
           setClaimResults((prev) =>
             prev.map((r) =>
-              r.projectId === lookup.id
+              r.claimKey === claimKey
                 ? {
                     ...r,
                     status: isPartial ? 'partial' : 'done',
@@ -439,7 +483,7 @@ export default function Claim() {
         } catch (error) {
           setClaimResults((prev) =>
             prev.map((r) =>
-              r.projectId === lookup.id
+              r.claimKey === claimKey
                 ? { ...r, status: 'error', message: toErrorMessage(error) }
                 : r,
             ),
@@ -449,6 +493,10 @@ export default function Claim() {
 
       if (createdCount > 0) await loadTasks();
     } catch (error) {
+      if (!startedRun) {
+        setSearchError(toErrorMessage(error));
+        return;
+      }
       setClaimResults((prev) =>
         prev.map((r) =>
           r.status === 'pending' ? { ...r, status: 'error', message: toErrorMessage(error) } : r,
@@ -481,6 +529,7 @@ export default function Claim() {
     setCloneProgressMsg('');
     setAddingModel(false);
     setNewModelInput('');
+    setClaimSetCount(1);
     setSelectedTaskType(null);
     setModels(
       storeCloneModels.map((m) => ({ ...m, checked: m.isDefault, status: 'pending' as const })),
@@ -715,19 +764,57 @@ export default function Claim() {
                 Clone 配置
               </h2>
 
+              <div className="grid gap-4 sm:grid-cols-[minmax(0,1fr)_140px] mb-5">
+                <div>
+                  <label className="block text-xs font-medium text-stone-500 dark:text-stone-400 mb-1.5">
+                    根目录
+                  </label>
+                  <div className="flex items-center gap-2 px-3.5 py-2.5 rounded-2xl bg-stone-50 dark:bg-stone-800/50 border border-stone-100 dark:border-stone-700/50">
+                    <Folder className="w-3.5 h-3.5 text-stone-400 flex-shrink-0" />
+                    <code className="text-sm font-mono text-stone-700 dark:text-stone-300 truncate">
+                      {defaultCloneRoot}
+                    </code>
+                  </div>
+                  <p className="mt-1 text-xs text-stone-400 dark:text-stone-500">
+                    每个项目会在根目录下创建 <code className="font-mono">label-xxxxx-任务类型/</code>，源码目录默认命名为 <code className="font-mono">题号-任务类型</code>；多套或同名已存在时会自动追加 <code className="font-mono">-1/-2/...</code>
+                  </p>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-stone-500 dark:text-stone-400 mb-1.5">
+                    领题套数
+                  </label>
+                  <input
+                    type="number"
+                    min={1}
+                    step={1}
+                    value={claimSetCount}
+                    onChange={(event) => {
+                      const nextValue = Number.parseInt(event.target.value, 10);
+                      setClaimSetCount(Number.isFinite(nextValue) && nextValue > 0 ? nextValue : 1);
+                    }}
+                    className={`${inputCls} font-mono`}
+                  />
+                  <p className="mt-1 text-xs text-stone-400 dark:text-stone-500">
+                    每个项目会按这个数量连续领题。
+                  </p>
+                </div>
+              </div>
+
               <div className="mb-5">
                 <label className="block text-xs font-medium text-stone-500 dark:text-stone-400 mb-1.5">
-                  根目录
+                  本次预计创建
                 </label>
-                <div className="flex items-center gap-2 px-3.5 py-2.5 rounded-2xl bg-stone-50 dark:bg-stone-800/50 border border-stone-100 dark:border-stone-700/50">
-                  <Folder className="w-3.5 h-3.5 text-stone-400 flex-shrink-0" />
-                  <code className="text-sm font-mono text-stone-700 dark:text-stone-300 truncate">
-                    {defaultCloneRoot}
-                  </code>
+                <div className="flex flex-wrap items-center gap-2 px-3.5 py-2.5 rounded-2xl bg-stone-50 dark:bg-stone-800/50 border border-stone-100 dark:border-stone-700/50 text-sm text-stone-700 dark:text-stone-300">
+                  <span className="font-semibold">{validProjects.length}</span>
+                  <span>个项目</span>
+                  <span className="text-stone-300 dark:text-stone-600">×</span>
+                  <span className="font-semibold">{claimSetCount}</span>
+                  <span>套</span>
+                  <span className="text-stone-300 dark:text-stone-600">=</span>
+                  <span className="font-semibold">{requestedClaimCount}</span>
+                  <span>个领题任务</span>
                 </div>
-                <p className="mt-1 text-xs text-stone-400 dark:text-stone-500">
-                  每个项目会在根目录下创建 <code className="font-mono">label-xxxxx-任务类型/</code>，源码目录默认命名为 <code className="font-mono">题号-任务类型</code>
-                </p>
               </div>
 
               <div>
@@ -829,7 +916,9 @@ export default function Claim() {
                   </span>
                   {isClaimQuotaBlocked && (
                     <span className="text-red-500 dark:text-red-400">
-                      当前类型已经完成，请返回修改
+                      {claimTaskTypeRemaining !== null && claimTaskTypeRemaining > 0
+                        ? `当前仅剩 ${claimTaskTypeRemaining} 套，不足以创建 ${requestedClaimCount} 套`
+                        : '当前类型已经完成，请返回修改'}
                     </span>
                   )}
                 </div>
@@ -838,6 +927,7 @@ export default function Claim() {
                   onClick={() => {
                     setPhase('input');
                     setLookups([]);
+                    setSearchError('');
                   }}
                   className={btnSecondary}
                 >
@@ -850,13 +940,16 @@ export default function Claim() {
                 >
                   <Rocket className="w-4 h-4" />
                   开始领题
-                  {validProjects.length > 1 && (
+                  {requestedClaimCount > 1 && (
                     <span className="bg-white/20 dark:bg-black/20 px-1.5 py-0.5 rounded-md text-xs">
-                      {validProjects.length}
+                      {requestedClaimCount}
                     </span>
                   )}
                 </button>
                 </div>
+                {searchError && (
+                  <p className="mt-3 text-xs text-red-500 dark:text-red-400">{searchError}</p>
+                )}
               </div>
             </section>
           )}
@@ -868,6 +961,7 @@ export default function Claim() {
                 onClick={() => {
                   setPhase('input');
                   setLookups([]);
+                  setSearchError('');
                 }}
                 className={btnSecondary}
               >
@@ -884,7 +978,7 @@ export default function Claim() {
           <div className={cardCls}>
             <div className="flex items-center gap-2 text-sm font-semibold text-stone-700 dark:text-stone-300 mb-3">
               <Loader2 className="w-4 h-4 animate-spin text-slate-500" />
-              正在处理 {claimResults.length} 个项目...
+              正在处理 {claimResults.length} 个领题任务...
             </div>
             {cloneProgressMsg && (
               <p className="text-xs font-mono text-stone-500 dark:text-stone-400 truncate mb-3" title={cloneProgressMsg}>
@@ -893,7 +987,7 @@ export default function Claim() {
             )}
             <div className="max-h-80 overflow-y-auto -mx-1 px-1 space-y-1">
               {claimResults.map((result) => (
-                <RunningRow key={result.projectId} result={result} selectedModels={selectedModels} />
+                <RunningRow key={result.claimKey} result={result} selectedModels={selectedModels} />
               ))}
             </div>
           </div>
@@ -913,9 +1007,9 @@ export default function Claim() {
                     {claimResults.map((r) => {
                       const meta = getResultStatusMeta(r.status);
                       return (
-                        <tr key={r.projectId} className="border-b border-stone-100 dark:border-stone-800 last:border-b-0">
-                          <td className="py-2 pr-3 font-mono text-xs text-stone-400 w-12 tabular-nums">
-                            {r.projectId}
+                        <tr key={r.claimKey} className="border-b border-stone-100 dark:border-stone-800 last:border-b-0">
+                          <td className="py-2 pr-3 font-mono text-xs text-stone-400 w-20 tabular-nums">
+                            {r.displayProjectId}
                           </td>
                           <td className="py-2 pr-3 font-medium text-stone-800 dark:text-stone-200 truncate max-w-0">
                             {r.projectName}

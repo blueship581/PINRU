@@ -34,7 +34,7 @@ export const DoneSummary: FC<{ results: ClaimResult[] }> = ({ results }) => {
         {allSuccess ? '全部完成' : '部分完成'}
       </h2>
       <p className="text-sm text-stone-500 dark:text-stone-400">
-        {doneCount > 0 && `${doneCount} 个项目已创建任务`}
+        {doneCount > 0 && `${doneCount} 个领题任务已创建`}
         {doneCount > 0 && errorCount > 0 && '，'}
         {errorCount > 0 && `${errorCount} 个失败`}
       </p>
@@ -68,7 +68,7 @@ export const RunningRow: FC<{
         ) : (
           <ChevronRight className="w-3.5 h-3.5 text-stone-400 flex-shrink-0" />
         )}
-        <span className="font-mono text-xs text-stone-400 tabular-nums">{result.projectId}</span>
+        <span className="font-mono text-xs text-stone-400 tabular-nums">{result.displayProjectId}</span>
         <span className="text-sm font-medium text-stone-800 dark:text-stone-200 truncate flex-1">
           {result.projectName}
         </span>

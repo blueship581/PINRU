@@ -237,6 +237,69 @@ func TestNormalizeManagedSourceFoldersInitializesGitForExistingModelDirectories(
 	}
 }
 
+func TestPlanManagedClaimPathsStartsNumberingFromOneForMultiSet(t *testing.T) {
+	s := &GitService{}
+
+	plans, err := s.PlanManagedClaimPaths(t.TempDir(), "label-01849", 1849, "Bug修复", 3, "")
+	if err != nil {
+		t.Fatalf("PlanManagedClaimPaths() error = %v", err)
+	}
+	if len(plans) != 3 {
+		t.Fatalf("plans len = %d, want 3", len(plans))
+	}
+
+	wantSequences := []int{1, 2, 3}
+	for index, want := range wantSequences {
+		if plans[index].Sequence != want {
+			t.Fatalf("plans[%d].Sequence = %d, want %d", index, plans[index].Sequence, want)
+		}
+		if !strings.HasSuffix(plans[index].TaskPath, fmt.Sprintf("label-01849-bug修复-%d", want)) {
+			t.Fatalf("plans[%d].TaskPath = %q", index, plans[index].TaskPath)
+		}
+		if !strings.HasSuffix(plans[index].SourcePath, fmt.Sprintf("01849-bug修复-%d", want)) {
+			t.Fatalf("plans[%d].SourcePath = %q", index, plans[index].SourcePath)
+		}
+	}
+}
+
+func TestPlanManagedClaimPathsContinuesFromExistingFoldersAndTasks(t *testing.T) {
+	testStore := testutil.OpenTestStore(t)
+	defer testStore.Close()
+
+	basePath := t.TempDir()
+	projectConfigID := "project-1"
+
+	if err := os.MkdirAll(filepath.Join(basePath, "label-01849-bug修复"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(base claim dir) error = %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(basePath, "label-01849-bug修复-2"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(suffixed claim dir) error = %v", err)
+	}
+
+	taskID := "pproject-1__label-01849-3"
+	if err := testStore.CreateTask(store.Task{
+		ID:              taskID,
+		GitLabProjectID: 1849,
+		ProjectName:     "label-01849",
+		TaskType:        "Bug修复",
+		ProjectConfigID: &projectConfigID,
+	}); err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+
+	s := &GitService{store: testStore}
+	plans, err := s.PlanManagedClaimPaths(basePath, "label-01849", 1849, "Bug修复", 2, projectConfigID)
+	if err != nil {
+		t.Fatalf("PlanManagedClaimPaths() error = %v", err)
+	}
+	if len(plans) != 2 {
+		t.Fatalf("plans len = %d, want 2", len(plans))
+	}
+	if plans[0].Sequence != 4 || plans[1].Sequence != 5 {
+		t.Fatalf("plan sequences = [%d %d], want [4 5]", plans[0].Sequence, plans[1].Sequence)
+	}
+}
+
 func initGitRepoInDir(t *testing.T, dir, branch string) {
 	t.Helper()
 	if err := runGitCommand(dir, "init", "-b", branch); err != nil {

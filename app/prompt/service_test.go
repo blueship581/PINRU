@@ -57,7 +57,7 @@ func TestSaveTaskPromptSyncsExistingArtifact(t *testing.T) {
 	}
 }
 
-func TestSaveTaskPromptSkipsMissingArtifact(t *testing.T) {
+func TestSaveTaskPromptCreatesMissingArtifact(t *testing.T) {
 	testStore := testutil.OpenTestStore(t)
 	defer testStore.Close()
 
@@ -81,8 +81,12 @@ func TestSaveTaskPromptSkipsMissingArtifact(t *testing.T) {
 		t.Fatalf("SaveTaskPrompt() error = %v", err)
 	}
 
-	if _, err := os.Stat(artifactPath); !os.IsNotExist(err) {
-		t.Fatalf("artifact should not be created, stat err = %v", err)
+	content, err := os.ReadFile(artifactPath)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	if strings.TrimSpace(string(content)) != expected {
+		t.Fatalf("artifact content = %q, want %q", strings.TrimSpace(string(content)), expected)
 	}
 }
 

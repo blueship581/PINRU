@@ -42,25 +42,27 @@ func LoadTaskForPromptSync(taskStore promptTaskGetter, taskID string) (*store.Ta
 	return task, nil
 }
 
-// SyncPromptArtifactIfPresent updates the artifact file only when it already
-// exists on disk, leaving directories without an artifact file untouched.
-func SyncPromptArtifactIfPresent(localPath *string, promptText string) error {
+// SyncPromptArtifact writes the prompt artifact into the task work directory.
+// The artifact file is created when it does not already exist.
+func SyncPromptArtifact(localPath *string, promptText string) error {
 	if localPath == nil {
 		return nil
 	}
 
-	workDir := strings.TrimSpace(*localPath)
+	workDir := util.NormalizePath(*localPath)
 	if workDir == "" {
 		return nil
 	}
 
-	workDir = util.ExpandTilde(workDir)
-	path := PromptArtifactPath(workDir)
-	if _, err := os.Stat(path); err != nil {
+	info, err := os.Stat(workDir)
+	if err != nil {
 		if os.IsNotExist(err) {
-			return nil
+			return fmt.Errorf("任务目录不存在: %s", workDir)
 		}
-		return fmt.Errorf("读取提示词文件信息失败: %w", err)
+		return fmt.Errorf("读取任务目录信息失败: %w", err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("任务目录不是文件夹: %s", workDir)
 	}
 
 	return WritePromptArtifact(workDir, promptText)
@@ -72,7 +74,7 @@ func BestEffortSyncTaskPromptArtifact(task *store.Task, promptText string) {
 	if task == nil {
 		return
 	}
-	if err := SyncPromptArtifactIfPresent(task.LocalPath, promptText); err != nil {
+	if err := SyncPromptArtifact(task.LocalPath, promptText); err != nil {
 		slog.Error("sync task prompt artifact failed", "task_id", task.ID, "error", err)
 	}
 }

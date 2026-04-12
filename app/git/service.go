@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -64,6 +65,12 @@ type DirectoryInspectionResult struct {
 	Exists  bool   `json:"exists"`
 	IsDir   bool   `json:"isDir"`
 	IsEmpty bool   `json:"isEmpty"`
+}
+
+type ManagedClaimPathPlan struct {
+	Sequence   int    `json:"sequence"`
+	TaskPath   string `json:"taskPath"`
+	SourcePath string `json:"sourcePath"`
 }
 
 func (s *GitService) FetchGitLabProject(projectRef, url, token string) (*gl.Project, error) {
@@ -188,6 +195,56 @@ func (s *GitService) InspectDirectory(path string) (*DirectoryInspectionResult, 
 	return result, nil
 }
 
+func (s *GitService) PlanManagedClaimPaths(
+	basePath,
+	projectName string,
+	projectID int64,
+	taskType string,
+	count int,
+	projectConfigID string,
+) ([]ManagedClaimPathPlan, error) {
+	trimmedBasePath := strings.TrimSpace(basePath)
+	if trimmedBasePath == "" {
+		return nil, fmt.Errorf("根目录不能为空")
+	}
+	if count <= 0 {
+		return nil, fmt.Errorf("套数必须大于 0")
+	}
+
+	normalizedBasePath := filepath.Clean(util.ExpandTilde(trimmedBasePath))
+	baseFolderName := util.BuildManagedTaskFolderName(projectName, taskType)
+
+	folderMaxSequence, hasFolderMatch, err := collectManagedFolderSequenceInfo(normalizedBasePath, baseFolderName)
+	if err != nil {
+		return nil, err
+	}
+
+	taskMaxSequence, hasTaskMatch, err := s.collectManagedTaskSequenceInfo(projectConfigID, projectID, taskType)
+	if err != nil {
+		return nil, err
+	}
+
+	maxSequence := folderMaxSequence
+	if taskMaxSequence > maxSequence {
+		maxSequence = taskMaxSequence
+	}
+	startSequence := resolveManagedClaimStartSequence(maxSequence, hasFolderMatch || hasTaskMatch, count)
+
+	plans := make([]ManagedClaimPathPlan, 0, count)
+	for index := 0; index < count; index++ {
+		sequence := startSequence + index
+		taskPath := util.BuildManagedTaskFolderPathWithSequence(normalizedBasePath, projectName, taskType, sequence)
+		sourcePath := util.BuildManagedSourceFolderPathWithSequence(taskPath, projectID, taskType, sequence)
+		plans = append(plans, ManagedClaimPathPlan{
+			Sequence:   sequence,
+			TaskPath:   taskPath,
+			SourcePath: sourcePath,
+		})
+	}
+
+	return plans, nil
+}
+
 func (s *GitService) NormalizeManagedSourceFolders(projectID string) (*NormalizeManagedSourceFoldersResult, error) {
 	projectID = strings.TrimSpace(projectID)
 	if projectID == "" {
@@ -296,6 +353,8 @@ func (s *GitService) normalizeManagedSourceFolder(task store.Task, preferredSour
 		detail.SourceModelName = sourceRun.ModelName
 	}
 
+	claimSequence := inferManagedClaimSequence(task, sourceRun)
+
 	basePath := ""
 	if task.LocalPath != nil && strings.TrimSpace(*task.LocalPath) != "" {
 		basePath = strings.TrimSpace(*task.LocalPath)
@@ -319,7 +378,7 @@ func (s *GitService) normalizeManagedSourceFolder(task store.Task, preferredSour
 	}
 
 	baseRoot := filepath.Dir(basePath)
-	desiredBasePath := util.BuildManagedTaskFolderPath(baseRoot, task.ProjectName, task.TaskType)
+	desiredBasePath := util.BuildManagedTaskFolderPathWithSequence(baseRoot, task.ProjectName, task.TaskType, claimSequence)
 	baseStatus, baseMessage, err := normalizeManagedDirectoryOnDisk(basePath, desiredBasePath, "任务目录")
 	if err != nil {
 		return err
@@ -371,7 +430,7 @@ func (s *GitService) normalizeManagedSourceFolder(task store.Task, preferredSour
 		return nil
 	}
 
-	desiredPath := util.BuildManagedSourceFolderPath(desiredBasePath, task.GitLabProjectID, task.TaskType)
+	desiredPath := util.BuildManagedSourceFolderPathWithSequence(desiredBasePath, task.GitLabProjectID, task.TaskType, claimSequence)
 	detail.CurrentPath = desiredPath
 
 	status, message, err := normalizeManagedDirectoryOnDisk(currentPath, desiredPath, "源码目录")
@@ -543,6 +602,156 @@ func taskPromptNeedsSync(task store.Task, promptText string) bool {
 		return true
 	}
 	return task.Status != "PromptReady" && task.Status != "Submitted"
+}
+
+func collectManagedFolderSequenceInfo(basePath, folderBaseName string) (int, bool, error) {
+	entries, err := os.ReadDir(util.ExpandTilde(basePath))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, false, nil
+		}
+		return 0, false, err
+	}
+
+	maxSequence := 0
+	hasMatch := false
+	for _, entry := range entries {
+		sequence, ok := util.ParseManagedFolderSequence(entry.Name(), folderBaseName)
+		if !ok {
+			continue
+		}
+		hasMatch = true
+		if sequence > maxSequence {
+			maxSequence = sequence
+		}
+	}
+
+	return maxSequence, hasMatch, nil
+}
+
+func resolveManagedClaimStartSequence(maxSequence int, hasExisting bool, count int) int {
+	if count > 1 {
+		if maxSequence < 1 {
+			return 1
+		}
+		return maxSequence + 1
+	}
+
+	if !hasExisting {
+		return 0
+	}
+	if maxSequence < 1 {
+		return 1
+	}
+	return maxSequence + 1
+}
+
+func managedClaimSequenceFromTask(task store.Task) (int, bool) {
+	if task.LocalPath != nil && strings.TrimSpace(*task.LocalPath) != "" {
+		baseName := filepath.Base(util.ExpandTilde(strings.TrimSpace(*task.LocalPath)))
+		if sequence, ok := util.ParseManagedTaskFolderSequence(baseName, task.ProjectName, task.TaskType); ok {
+			return sequence, true
+		}
+		if sequence, ok := parseTrailingClaimSequence(baseName); ok {
+			return sequence, true
+		}
+	}
+	return 0, false
+}
+
+func inferManagedClaimSequence(task store.Task, sourceRun *store.ModelRun) int {
+	if sequence, ok := managedClaimSequenceFromTask(task); ok {
+		return sequence
+	}
+
+	if sourceRun != nil && sourceRun.LocalPath != nil && strings.TrimSpace(*sourceRun.LocalPath) != "" {
+		baseName := filepath.Base(util.ExpandTilde(strings.TrimSpace(*sourceRun.LocalPath)))
+		if sequence, ok := util.ParseManagedSourceFolderSequence(baseName, task.GitLabProjectID, task.TaskType); ok {
+			return sequence
+		}
+		if sequence, ok := parseTrailingClaimSequence(baseName); ok {
+			return sequence
+		}
+	}
+
+	if sequence, ok := parseTaskIDClaimSequence(task.ID, task.GitLabProjectID); ok {
+		return sequence
+	}
+
+	return 0
+}
+
+func parseTaskIDClaimSequence(taskID string, projectID int64) (int, bool) {
+	trimmedTaskID := strings.TrimSpace(taskID)
+	if trimmedTaskID == "" {
+		return 0, false
+	}
+	if separatorIndex := strings.LastIndex(trimmedTaskID, "__"); separatorIndex >= 0 {
+		trimmedTaskID = trimmedTaskID[separatorIndex+2:]
+	}
+	return util.ParseManagedFolderSequence(trimmedTaskID, fmt.Sprintf("label-%05d", projectID))
+}
+
+func parseTrailingClaimSequence(name string) (int, bool) {
+	trimmedName := strings.TrimSpace(name)
+	lastDash := strings.LastIndex(trimmedName, "-")
+	if lastDash < 0 || lastDash >= len(trimmedName)-1 {
+		return 0, false
+	}
+	sequence, err := strconv.Atoi(trimmedName[lastDash+1:])
+	if err != nil || sequence <= 0 {
+		return 0, false
+	}
+	return sequence, true
+}
+
+func (s *GitService) collectManagedTaskSequenceInfo(projectConfigID string, projectID int64, taskType string) (int, bool, error) {
+	if s.store == nil {
+		return 0, false, nil
+	}
+
+	trimmedProjectConfigID := strings.TrimSpace(projectConfigID)
+	var (
+		tasks []store.Task
+		err   error
+	)
+	if trimmedProjectConfigID != "" {
+		tasks, err = s.store.ListTasks(&trimmedProjectConfigID)
+	} else {
+		tasks, err = s.store.ListTasks(nil)
+	}
+	if err != nil {
+		return 0, false, err
+	}
+
+	maxSequence := 0
+	hasMatch := false
+	for _, task := range tasks {
+		if trimmedProjectConfigID == "" {
+			if task.ProjectConfigID != nil && strings.TrimSpace(*task.ProjectConfigID) != "" {
+				continue
+			}
+		} else if task.ProjectConfigID == nil || !strings.EqualFold(strings.TrimSpace(*task.ProjectConfigID), trimmedProjectConfigID) {
+			continue
+		}
+
+		if task.GitLabProjectID != projectID || !strings.EqualFold(strings.TrimSpace(task.TaskType), strings.TrimSpace(taskType)) {
+			continue
+		}
+
+		hasMatch = true
+		if sequence, ok := managedClaimSequenceFromTask(task); ok {
+			if sequence > maxSequence {
+				maxSequence = sequence
+			}
+			continue
+		}
+		if sequence, ok := parseTaskIDClaimSequence(task.ID, task.GitLabProjectID); ok && sequence > maxSequence {
+			maxSequence = sequence
+		}
+	}
+
+	return maxSequence, hasMatch, nil
 }
 
 func normalizeManagedDirectoryOnDisk(currentPath, desiredPath, directoryLabel string) (string, string, error) {

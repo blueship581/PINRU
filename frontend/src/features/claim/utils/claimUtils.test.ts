@@ -3,6 +3,7 @@ import {
   buildProjectBasePath,
   buildProjectRef,
   buildProjectSourcePath,
+  formatClaimProjectId,
   formatProjectName,
   getResultStatusMeta,
   parseProjectIds,
@@ -21,9 +22,17 @@ describe('claimUtils', () => {
     expect(buildProjectBasePath('label-01849', 'Bug修复', '/tmp/workspace/')).toBe(
       '/tmp/workspace/label-01849-bug修复',
     );
+    expect(buildProjectBasePath('label-01849', 'Bug修复', '/tmp/workspace/', 2)).toBe(
+      '/tmp/workspace/label-01849-bug修复-2',
+    );
     expect(
       buildProjectSourcePath('1872', '未归类', '/tmp/workspace/label-01872-未归类'),
     ).toBe('/tmp/workspace/label-01872-未归类/01872-未归类');
+    expect(
+      buildProjectSourcePath('1872', '未归类', '/tmp/workspace/label-01872-未归类-2', 2),
+    ).toBe('/tmp/workspace/label-01872-未归类-2/01872-未归类-2');
+    expect(formatClaimProjectId('1849', 0)).toBe('1849');
+    expect(formatClaimProjectId('1849', 3)).toBe('1849-3');
   });
 
   it('picks preferred source model before falling back to ORIGIN and first item', () => {

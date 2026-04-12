@@ -1,6 +1,6 @@
 import {
-  buildManagedSourceFolderPath,
-  buildManagedTaskFolderPath,
+  buildManagedSourceFolderPathWithSequence,
+  buildManagedTaskFolderPathWithSequence,
 } from '../../../shared/lib/sourceFolders';
 import type { ClaimResult, ModelEntry } from '../types';
 
@@ -12,12 +12,26 @@ export function buildProjectRef(value: string) {
   return `prompt2repo/${formatProjectName(value)}`;
 }
 
-export function buildProjectBasePath(projectName: string, taskType: string, root: string) {
-  return buildManagedTaskFolderPath(root, projectName, taskType);
+export function buildProjectBasePath(
+  projectName: string,
+  taskType: string,
+  root: string,
+  sequence = 0,
+) {
+  return buildManagedTaskFolderPathWithSequence(root, projectName, taskType, sequence);
 }
 
-export function buildProjectSourcePath(projectNumber: string, taskType: string, basePath: string) {
-  return buildManagedSourceFolderPath(basePath, projectNumber, taskType);
+export function buildProjectSourcePath(
+  projectNumber: string,
+  taskType: string,
+  basePath: string,
+  sequence = 0,
+) {
+  return buildManagedSourceFolderPathWithSequence(basePath, projectNumber, taskType, sequence);
+}
+
+export function formatClaimProjectId(projectId: string, sequence: number) {
+  return sequence > 0 ? `${projectId}-${sequence}` : projectId;
 }
 
 export function parseProjectIds(value: string): string[] {

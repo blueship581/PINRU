@@ -14,8 +14,11 @@ export type ProjectLookup = {
 };
 
 export type ClaimResult = {
+  claimKey: string;
   projectId: string;
+  displayProjectId: string;
   projectName: string;
+  claimSequence: number;
   localPath: string;
   status: 'pending' | 'running' | 'done' | 'partial' | 'error';
   message: string;

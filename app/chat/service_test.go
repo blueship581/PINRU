@@ -382,6 +382,51 @@ func TestSaveMessageAsPromptParsesJSONPayload(t *testing.T) {
 	}
 }
 
+func TestSaveMessageAsPromptCreatesMissingArtifact(t *testing.T) {
+	testStore := testutil.OpenTestStore(t)
+	defer testStore.Close()
+
+	s := &ChatService{store: testStore}
+	workDir := t.TempDir()
+	artifactPath := filepath.Join(workDir, "任务提示词.md")
+	task := store.Task{
+		ID:              "task-4",
+		GitLabProjectID: 1004,
+		ProjectName:     "Demo Save No Artifact",
+		TaskType:        "Bug修复",
+		LocalPath:       &workDir,
+	}
+	if err := testStore.CreateTask(task); err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+
+	session, err := testStore.CreateChatSession(task.ID, "测试会话", "claude-sonnet-4-6")
+	if err != nil {
+		t.Fatalf("CreateChatSession() error = %v", err)
+	}
+
+	expected := strings.Join([]string{
+		"批量勾选学员后执行导出，如果中途切换筛选条件，导出结果有时还是旧筛选范围，需要保证导出始终使用用户最后一次确认的筛选结果。",
+		"业务逻辑约束：没有导出权限的班级不能出现在最终导出文件里。",
+	}, "\n")
+	message, err := testStore.AddChatMessage(session.ID, "assistant", expected)
+	if err != nil {
+		t.Fatalf("AddChatMessage() error = %v", err)
+	}
+
+	if err := s.SaveMessageAsPrompt(task.ID, message.ID); err != nil {
+		t.Fatalf("SaveMessageAsPrompt() error = %v", err)
+	}
+
+	content, err := os.ReadFile(artifactPath)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	if strings.TrimSpace(string(content)) != expected {
+		t.Fatalf("artifact content = %q, want %q", strings.TrimSpace(string(content)), expected)
+	}
+}
+
 func TestListSessionsFiltersByModel(t *testing.T) {
 	testStore := testutil.OpenTestStore(t)
 	defer testStore.Close()

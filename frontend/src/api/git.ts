@@ -47,6 +47,12 @@ export interface DirectoryInspectionResult {
   isEmpty: boolean;
 }
 
+export interface ManagedClaimPathPlan {
+  sequence: number;
+  taskPath: string;
+  sourcePath: string;
+}
+
 export async function fetchGitLabProject(projectRef: string, url: string, token: string): Promise<GitLabProject> {
   return callService('GitService', 'FetchGitLabProject', projectRef, url, token);
 }
@@ -93,6 +99,26 @@ export async function checkPathsExist(paths: string[]): Promise<string[]> {
 
 export async function inspectDirectory(path: string): Promise<DirectoryInspectionResult> {
   return callService('GitService', 'InspectDirectory', path);
+}
+
+export async function planManagedClaimPaths(
+  basePath: string,
+  projectName: string,
+  projectId: number,
+  taskType: string,
+  count: number,
+  projectConfigId: string,
+): Promise<ManagedClaimPathPlan[]> {
+  return callService(
+    'GitService',
+    'PlanManagedClaimPaths',
+    basePath,
+    projectName,
+    projectId,
+    taskType,
+    count,
+    projectConfigId,
+  );
 }
 
 export async function normalizeManagedSourceFolders(projectId: string): Promise<NormalizeManagedSourceFoldersResult> {

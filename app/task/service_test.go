@@ -16,6 +16,10 @@ func strPtr(value string) *string {
 	return &value
 }
 
+func intPtr(value int) *int {
+	return &value
+}
+
 func TestCreateTaskUsesProjectScopedIdentity(t *testing.T) {
 	testStore := testutil.OpenTestStore(t)
 	defer testStore.Close()
@@ -91,6 +95,48 @@ func TestCreateTaskRejectsDuplicateWithinSameProject(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "当前项目下题卡已存在") {
 		t.Fatalf("unexpected duplicate error = %q", err.Error())
+	}
+}
+
+func TestCreateTaskAllowsMultipleClaimSetsWithinSameProject(t *testing.T) {
+	testStore := testutil.OpenTestStore(t)
+	defer testStore.Close()
+
+	s := &TaskService{store: testStore}
+	projectID := "project-1710000000001"
+
+	taskA, err := s.CreateTask(CreateTaskRequest{
+		GitLabProjectID: 1849,
+		ProjectName:     "label-01849",
+		TaskType:        "Bug修复",
+		ClaimSequence:   intPtr(1),
+		Models:          []string{"ORIGIN"},
+		ProjectConfigID: &projectID,
+	})
+	if err != nil {
+		t.Fatalf("CreateTask(claim 1) error = %v", err)
+	}
+
+	taskB, err := s.CreateTask(CreateTaskRequest{
+		GitLabProjectID: 1849,
+		ProjectName:     "label-01849",
+		TaskType:        "Bug修复",
+		ClaimSequence:   intPtr(2),
+		Models:          []string{"ORIGIN"},
+		ProjectConfigID: &projectID,
+	})
+	if err != nil {
+		t.Fatalf("CreateTask(claim 2) error = %v", err)
+	}
+
+	if taskA.ID == taskB.ID {
+		t.Fatalf("task ids should differ, got %q", taskA.ID)
+	}
+	if !strings.HasSuffix(taskA.ID, "label-01849-1") {
+		t.Fatalf("taskA.ID = %q, want suffix label-01849-1", taskA.ID)
+	}
+	if !strings.HasSuffix(taskB.ID, "label-01849-2") {
+		t.Fatalf("taskB.ID = %q, want suffix label-01849-2", taskB.ID)
 	}
 }
 
@@ -239,6 +285,50 @@ func TestDeleteTaskKeepsUnmanagedDirectory(t *testing.T) {
 	}
 	if len(tasks) != 0 {
 		t.Fatalf("ListTasks() count = %d, want 0", len(tasks))
+	}
+}
+
+func TestDeleteTaskRemovesManagedTaskDirectoryWithClaimSequence(t *testing.T) {
+	testStore := testutil.OpenTestStore(t)
+	defer testStore.Close()
+
+	s := &TaskService{store: testStore}
+	cloneBasePath := t.TempDir()
+	project := store.Project{
+		ID:            "project-3",
+		Name:          "Demo",
+		GitLabURL:     "https://gitlab.example.com",
+		GitLabToken:   "glpat-demo",
+		CloneBasePath: cloneBasePath,
+		Models:        "ORIGIN",
+	}
+	if err := testStore.CreateProject(project); err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+
+	localPath := util.BuildManagedTaskFolderPathWithSequence(cloneBasePath, "label-01849", "Bug修复", 2)
+	if err := os.MkdirAll(localPath, 0o755); err != nil {
+		t.Fatalf("MkdirAll(localPath) error = %v", err)
+	}
+
+	task := store.Task{
+		ID:              "task-managed-claim-2",
+		GitLabProjectID: 1849,
+		ProjectName:     "label-01849",
+		TaskType:        "Bug修复",
+		LocalPath:       &localPath,
+		ProjectConfigID: &project.ID,
+	}
+	if err := testStore.CreateTask(task); err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+
+	if err := s.DeleteTask(task.ID); err != nil {
+		t.Fatalf("DeleteTask() error = %v", err)
+	}
+
+	if _, err := os.Stat(localPath); !os.IsNotExist(err) {
+		t.Fatalf("managed claim directory should be removed, stat err = %v", err)
 	}
 }
 
@@ -475,5 +565,96 @@ func TestUpdateTaskTypeNormalizesManagedPaths(t *testing.T) {
 	}
 	if execRun == nil || execRun.LocalPath == nil || !util.SamePath(*execRun.LocalPath, newExecPath) {
 		t.Fatalf("cotv21-pro local path = %v, want %q", execRun, newExecPath)
+	}
+}
+
+func TestUpdateTaskTypePreservesClaimSequenceInManagedPaths(t *testing.T) {
+	testStore := testutil.OpenTestStore(t)
+	defer testStore.Close()
+
+	cloneBasePath := t.TempDir()
+	project := store.Project{
+		ID:                "project-normalize-seq",
+		Name:              "Demo",
+		GitLabURL:         "https://gitlab.example.com",
+		GitLabToken:       "glpat-demo",
+		CloneBasePath:     cloneBasePath,
+		Models:            "ORIGIN\ncotv21-pro",
+		SourceModelFolder: "ORIGIN",
+	}
+	if err := testStore.CreateProject(project); err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+
+	const (
+		projectName   = "label-01849"
+		oldTaskType   = "Bug修复"
+		newTaskType   = "Feature迭代"
+		claimSequence = 2
+	)
+
+	oldBasePath := util.BuildManagedTaskFolderPathWithSequence(cloneBasePath, projectName, oldTaskType, claimSequence)
+	oldSourcePath := util.BuildManagedSourceFolderPathWithSequence(oldBasePath, 1849, oldTaskType, claimSequence)
+	oldExecPath := filepath.Join(oldBasePath, "cotv21-pro")
+	if err := os.MkdirAll(oldSourcePath, 0o755); err != nil {
+		t.Fatalf("MkdirAll(oldSourcePath) error = %v", err)
+	}
+	if err := os.MkdirAll(oldExecPath, 0o755); err != nil {
+		t.Fatalf("MkdirAll(oldExecPath) error = %v", err)
+	}
+
+	task := store.Task{
+		ID:              "task-normalize-type-2",
+		GitLabProjectID: 1849,
+		ProjectName:     projectName,
+		TaskType:        oldTaskType,
+		LocalPath:       &oldBasePath,
+		ProjectConfigID: &project.ID,
+	}
+	if err := testStore.CreateTask(task); err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+	if err := testStore.CreateModelRun(store.ModelRun{
+		ID:        "run-origin-2",
+		TaskID:    task.ID,
+		ModelName: "ORIGIN",
+		LocalPath: &oldSourcePath,
+	}); err != nil {
+		t.Fatalf("CreateModelRun(ORIGIN) error = %v", err)
+	}
+	if err := testStore.CreateModelRun(store.ModelRun{
+		ID:        "run-cotv21-2",
+		TaskID:    task.ID,
+		ModelName: "cotv21-pro",
+		LocalPath: &oldExecPath,
+	}); err != nil {
+		t.Fatalf("CreateModelRun(cotv21-pro) error = %v", err)
+	}
+
+	s := &TaskService{
+		store:  testStore,
+		gitSvc: appgit.New(testStore),
+	}
+	if err := s.UpdateTaskType(task.ID, newTaskType); err != nil {
+		t.Fatalf("UpdateTaskType() error = %v", err)
+	}
+
+	newBasePath := util.BuildManagedTaskFolderPathWithSequence(cloneBasePath, projectName, newTaskType, claimSequence)
+	newSourcePath := util.BuildManagedSourceFolderPathWithSequence(newBasePath, 1849, newTaskType, claimSequence)
+
+	savedTask, err := testStore.GetTask(task.ID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if savedTask == nil || savedTask.LocalPath == nil || !util.SamePath(*savedTask.LocalPath, newBasePath) {
+		t.Fatalf("LocalPath = %v, want %q", savedTask, newBasePath)
+	}
+
+	sourceRun, err := testStore.GetModelRun(task.ID, "ORIGIN")
+	if err != nil {
+		t.Fatalf("GetModelRun(ORIGIN) error = %v", err)
+	}
+	if sourceRun == nil || sourceRun.LocalPath == nil || !util.SamePath(*sourceRun.LocalPath, newSourcePath) {
+		t.Fatalf("ORIGIN local path = %v, want %q", sourceRun, newSourcePath)
 	}
 }

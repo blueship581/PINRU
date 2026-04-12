@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 )
 
@@ -65,9 +66,46 @@ func BuildManagedTaskFolderName(projectName, taskType string) string {
 	return fmt.Sprintf("%s-%s", NormalizeManagedProjectFolderName(projectName), NormalizeManagedTaskTypeFolderName(taskType))
 }
 
+func appendManagedFolderSequence(folderName string, sequence int) string {
+	if sequence <= 0 {
+		return folderName
+	}
+	return fmt.Sprintf("%s-%d", folderName, sequence)
+}
+
+func ParseManagedFolderSequence(name, baseName string) (int, bool) {
+	trimmedName := strings.TrimSpace(name)
+	trimmedBase := strings.TrimSpace(baseName)
+	if trimmedName == "" || trimmedBase == "" {
+		return 0, false
+	}
+	if trimmedName == trimmedBase {
+		return 0, true
+	}
+
+	prefix := trimmedBase + "-"
+	if !strings.HasPrefix(trimmedName, prefix) {
+		return 0, false
+	}
+
+	sequence, err := strconv.Atoi(strings.TrimPrefix(trimmedName, prefix))
+	if err != nil || sequence <= 0 {
+		return 0, false
+	}
+	return sequence, true
+}
+
+func BuildManagedTaskFolderNameWithSequence(projectName, taskType string, sequence int) string {
+	return appendManagedFolderSequence(BuildManagedTaskFolderName(projectName, taskType), sequence)
+}
+
 func BuildManagedTaskFolderPath(basePath, projectName, taskType string) string {
+	return BuildManagedTaskFolderPathWithSequence(basePath, projectName, taskType, 0)
+}
+
+func BuildManagedTaskFolderPathWithSequence(basePath, projectName, taskType string, sequence int) string {
 	trimmedBase := strings.TrimSpace(basePath)
-	folderName := BuildManagedTaskFolderName(projectName, taskType)
+	folderName := BuildManagedTaskFolderNameWithSequence(projectName, taskType, sequence)
 	if trimmedBase == "" {
 		return folderName
 	}
@@ -78,13 +116,29 @@ func BuildManagedSourceFolderName(projectID int64, taskType string) string {
 	return fmt.Sprintf("%05d-%s", projectID, NormalizeManagedTaskTypeFolderName(taskType))
 }
 
+func BuildManagedSourceFolderNameWithSequence(projectID int64, taskType string, sequence int) string {
+	return appendManagedFolderSequence(BuildManagedSourceFolderName(projectID, taskType), sequence)
+}
+
 func BuildManagedSourceFolderPath(basePath string, projectID int64, taskType string) string {
+	return BuildManagedSourceFolderPathWithSequence(basePath, projectID, taskType, 0)
+}
+
+func BuildManagedSourceFolderPathWithSequence(basePath string, projectID int64, taskType string, sequence int) string {
 	trimmedBase := strings.TrimSpace(basePath)
-	folderName := BuildManagedSourceFolderName(projectID, taskType)
+	folderName := BuildManagedSourceFolderNameWithSequence(projectID, taskType, sequence)
 	if trimmedBase == "" {
 		return folderName
 	}
 	return filepath.Join(trimmedBase, folderName)
+}
+
+func ParseManagedTaskFolderSequence(name, projectName, taskType string) (int, bool) {
+	return ParseManagedFolderSequence(name, BuildManagedTaskFolderName(projectName, taskType))
+}
+
+func ParseManagedSourceFolderSequence(name string, projectID int64, taskType string) (int, bool) {
+	return ParseManagedFolderSequence(name, BuildManagedSourceFolderName(projectID, taskType))
 }
 
 // PinruManualDir returns the platform-appropriate directory for PINRU's
@@ -132,7 +186,6 @@ func DefaultTraeLogsPath() string {
 	}
 	return filepath.Join(home, rel)
 }
-
 
 func SamePath(a, b string) bool {
 	trimmedA := strings.TrimSpace(a)

@@ -16,3 +16,25 @@ func TestNormalizePathCollapsesRepeatedSeparators(t *testing.T) {
 		t.Fatalf("NormalizePath() = %q, want %q", got, want)
 	}
 }
+
+func TestManagedFolderSequenceHelpers(t *testing.T) {
+	taskPath := BuildManagedTaskFolderPathWithSequence("/tmp/workspace", "label-01849", "Bug修复", 2)
+	if want := filepath.Join("/tmp/workspace", "label-01849-bug修复-2"); taskPath != want {
+		t.Fatalf("BuildManagedTaskFolderPathWithSequence() = %q, want %q", taskPath, want)
+	}
+
+	sourcePath := BuildManagedSourceFolderPathWithSequence(taskPath, 1849, "Bug修复", 2)
+	if want := filepath.Join("/tmp/workspace", "label-01849-bug修复-2", "01849-bug修复-2"); sourcePath != want {
+		t.Fatalf("BuildManagedSourceFolderPathWithSequence() = %q, want %q", sourcePath, want)
+	}
+
+	if sequence, ok := ParseManagedTaskFolderSequence("label-01849-bug修复-2", "label-01849", "Bug修复"); !ok || sequence != 2 {
+		t.Fatalf("ParseManagedTaskFolderSequence() = (%d, %v), want (2, true)", sequence, ok)
+	}
+	if sequence, ok := ParseManagedSourceFolderSequence("01849-bug修复-2", 1849, "Bug修复"); !ok || sequence != 2 {
+		t.Fatalf("ParseManagedSourceFolderSequence() = (%d, %v), want (2, true)", sequence, ok)
+	}
+	if sequence, ok := ParseManagedTaskFolderSequence("label-01849-bug修复", "label-01849", "Bug修复"); !ok || sequence != 0 {
+		t.Fatalf("ParseManagedTaskFolderSequence(base) = (%d, %v), want (0, true)", sequence, ok)
+	}
+}
