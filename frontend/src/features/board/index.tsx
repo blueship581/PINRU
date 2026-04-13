@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useRef, type MouseEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Events } from '@wailsio/runtime';
 import { useAppStore, TaskStatus, TaskType, Task } from '../../store';
@@ -10,6 +10,7 @@ import {
 } from '../../api/config';
 import {
   deleteTask,
+  listTaskChildDirectories,
   openTaskLocalFolder,
 } from '../../api/task';
 import {
@@ -18,7 +19,7 @@ import {
   submitAiReviewJob,
   type JobProgressEvent,
 } from '../../api/job';
-import type { ModelRunFromDB } from '../../api/task';
+import type { ModelRunFromDB, TaskChildDirectory } from '../../api/task';
 import {
   BatchActionBar,
 } from './components/BatchActionBar';
@@ -52,6 +53,12 @@ const COLUMNS: TaskStatus[] = [
 ];
 const DRAWER_ESC_CONFIRM_WINDOW_MS = 1600;
 
+function normalizeTaskChildDirectoryList(
+  directories: TaskChildDirectory[] | null | undefined,
+): TaskChildDirectory[] {
+  return Array.isArray(directories) ? directories : [];
+}
+
 export default function Board() {
   const navigate = useNavigate();
   const tasks                  = useAppStore(s => s.tasks);
@@ -62,6 +69,7 @@ export default function Board() {
   const loadActiveProject      = useAppStore(s => s.loadActiveProject);
   const updateTaskStatusInStore = useAppStore(s => s.updateTaskStatus);
   const updateTaskTypeInStore = useAppStore(s => s.updateTaskType);
+  const aiReviewVisible = useAppStore((s) => s.aiReviewVisible);
   const sourceModelName = activeProject?.sourceModelFolder?.trim() || 'ORIGIN';
   const projectTaskSettings = useMemo(
     () =>
@@ -90,10 +98,14 @@ export default function Board() {
   const [taskCardContextMenu, setTaskCardContextMenu] = useState<TaskCardContextMenuState | null>(null);
   const [taskCardContextMenuError, setTaskCardContextMenuError] = useState('');
   const [taskCardFolderOpening, setTaskCardFolderOpening] = useState(false);
+  const [taskCardChildDirectories, setTaskCardChildDirectories] = useState<TaskChildDirectory[]>([]);
+  const [taskCardChildDirectoriesLoading, setTaskCardChildDirectoriesLoading] = useState(false);
+  const [taskCardQuickActionLoadingPath, setTaskCardQuickActionLoadingPath] = useState<string | null>(null);
   const [drawerEscCloseHintVisible, setDrawerEscCloseHintVisible] = useState(false);
   const [selectionMode, setSelectionMode] = useState(false);
   const [selectedTaskIds, setSelectedTaskIds] = useState<Set<string>>(new Set());
   const taskCardContextMenuRef = useRef<HTMLDivElement | null>(null);
+  const taskCardContextMenuRequestIdRef = useRef(0);
   const drawerEscCloseHintTimeoutRef = useRef<number | null>(null);
   const drawerEscLastPressedAtRef = useRef<number | null>(null);
   const detail = useBoardTaskDetail({
@@ -159,11 +171,15 @@ export default function Board() {
     detail.setSelected(null);
   };
 
-  const closeTaskCardContextMenu = () => {
+  const closeTaskCardContextMenu = useCallback(() => {
+    taskCardContextMenuRequestIdRef.current += 1;
     setTaskCardContextMenu(null);
     setTaskCardContextMenuError('');
     setTaskCardFolderOpening(false);
-  };
+    setTaskCardChildDirectories([]);
+    setTaskCardChildDirectoriesLoading(false);
+    setTaskCardQuickActionLoadingPath(null);
+  }, []);
 
   const openTaskCardContextMenu = (event: MouseEvent, task: Task) => {
     event.preventDefault();
@@ -175,6 +191,9 @@ export default function Board() {
 
     setTaskCardContextMenuError('');
     setTaskCardFolderOpening(false);
+    setTaskCardChildDirectories([]);
+    setTaskCardChildDirectoriesLoading(true);
+    setTaskCardQuickActionLoadingPath(null);
     setTaskCardContextMenu({
       task,
       position: {
@@ -182,6 +201,27 @@ export default function Board() {
         y: Math.max(padding, Math.min(event.clientY, window.innerHeight - estimatedHeight - padding)),
       },
     });
+
+    const requestId = taskCardContextMenuRequestIdRef.current + 1;
+    taskCardContextMenuRequestIdRef.current = requestId;
+    void (async () => {
+      try {
+        const directories = await listTaskChildDirectories(task.id);
+        if (taskCardContextMenuRequestIdRef.current !== requestId) {
+          return;
+        }
+        setTaskCardChildDirectories(normalizeTaskChildDirectoryList(directories));
+      } catch (error) {
+        if (taskCardContextMenuRequestIdRef.current !== requestId) {
+          return;
+        }
+        setTaskCardContextMenuError(error instanceof Error ? error.message : '加载子文件夹失败');
+      } finally {
+        if (taskCardContextMenuRequestIdRef.current === requestId) {
+          setTaskCardChildDirectoriesLoading(false);
+        }
+      }
+    })();
   };
 
   useEffect(() => { loadTasks(); }, [loadTasks]);
@@ -194,6 +234,20 @@ export default function Board() {
         detail.handleSessionSyncEvent(data);
         if (data.status === 'done' || data.status === 'error' || data.status === 'cancelled') {
           void loadTasks();
+        }
+        return;
+      }
+
+      if (data.jobType === 'ai_review') {
+        const taskId = data.taskId ?? '';
+        if (!taskId) {
+          return;
+        }
+        if (
+          detail.selected?.id === taskId &&
+          (data.status === 'done' || data.status === 'error' || data.status === 'cancelled')
+        ) {
+          void detail.refreshModelRuns();
         }
         return;
       }
@@ -276,17 +330,17 @@ export default function Board() {
       if ((target as Element).closest?.('[data-prompt-gen-flyout]')) {
         return;
       }
-      setTaskCardContextMenu(null);
+      closeTaskCardContextMenu();
     };
 
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
-        setTaskCardContextMenu(null);
+        closeTaskCardContextMenu();
       }
     };
 
     const handleViewportChange = () => {
-      setTaskCardContextMenu(null);
+      closeTaskCardContextMenu();
     };
 
     window.addEventListener('pointerdown', handlePointerDown);
@@ -298,7 +352,7 @@ export default function Board() {
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('resize', handleViewportChange);
     };
-  }, [taskCardContextMenu]);
+  }, [closeTaskCardContextMenu, taskCardContextMenu]);
 
   const shouldHandleDrawerEscape =
     Boolean(detail.selected) &&
@@ -425,20 +479,73 @@ export default function Board() {
   };
 
   const handleAiReview = (run: ModelRunFromDB) => {
-    if (!detail.selected || !run.localPath) return;
+    if (!run.localPath) return;
+    const taskId = run.taskId?.trim();
+    if (!taskId) return;
+    const localPath = run.localPath.trim();
+    if (!localPath) return;
     void (async () => {
       try {
-        await submitAiReviewJob(detail.selected!.id, {
-          modelRunId: run.id,
+        await submitAiReviewJob(taskId, {
+          modelRunId: run.id ?? null,
           modelName: run.modelName,
-          localPath: run.localPath!,
+          localPath,
         });
         useAppStore.getState().loadBackgroundJobs();
-      } finally {
-        void detail.refreshModelRuns();
+        if (aiReviewVisible && detail.selected?.id === taskId) {
+          detail.setActiveDrawerTab('ai-review');
+          void detail.refreshModelRuns();
+        }
+      } catch (error) {
+        console.error('提交 AI 复审失败', error);
       }
     })();
-    window.setTimeout(() => void detail.refreshModelRuns(), 600);
+    window.setTimeout(() => {
+      if (detail.selected?.id === taskId) {
+        void detail.refreshModelRuns();
+      }
+    }, 600);
+  };
+
+  const handleTaskCardAiReview = (directory: TaskChildDirectory) => {
+    const taskId = taskCardContextMenu?.task.id?.trim();
+    const localPath = directory.path?.trim();
+    if (!taskId || !localPath) return;
+
+    setTaskCardContextMenuError('');
+    setTaskCardQuickActionLoadingPath(localPath);
+    void (async () => {
+      try {
+        await submitAiReviewJob(taskId, {
+          modelRunId: directory.modelRunId ?? null,
+          modelName: directory.modelName?.trim() || directory.name,
+          localPath,
+        });
+        useAppStore.getState().loadBackgroundJobs();
+        if (aiReviewVisible && detail.selected?.id === taskId) {
+          detail.setActiveDrawerTab('ai-review');
+        }
+        if (taskCardContextMenu?.task.id === taskId) {
+          closeTaskCardContextMenu();
+        }
+      } catch (error) {
+        if (taskCardContextMenu?.task.id === taskId) {
+          setTaskCardContextMenuError(
+            error instanceof Error ? error.message : '提交 AI 复审失败',
+          );
+        }
+      } finally {
+        if (detail.selected?.id === taskId) {
+          void detail.refreshModelRuns();
+        }
+        setTaskCardQuickActionLoadingPath((current) => (current === localPath ? null : current));
+      }
+    })();
+    window.setTimeout(() => {
+      if (detail.selected?.id === taskId) {
+        void detail.refreshModelRuns();
+      }
+    }, 600);
   };
 
   const handleAfterBatchApply = async (
@@ -613,6 +720,9 @@ export default function Board() {
         availableTaskTypes={availableTaskTypes}
         statusOptions={COLUMNS}
         localFolderOpening={taskCardFolderOpening}
+        contextMenuChildDirectories={taskCardChildDirectories}
+        contextMenuChildDirectoriesLoading={taskCardChildDirectoriesLoading}
+        quickActionLoadingPath={taskCardQuickActionLoadingPath}
         actionError={taskCardContextMenuError}
         onOpenLocalFolder={() => {
           void handleOpenTaskLocalFolder();
@@ -639,6 +749,7 @@ export default function Board() {
             setTaskCardContextMenuError(result.error);
           }
         }}
+        onTaskCardQuickAiReview={aiReviewVisible ? handleTaskCardAiReview : undefined}
         showProjectOverview={showProjectOverview}
         activeProject={activeProject}
         visibleProjectTaskSummaries={visibleProjectTaskSummaries}
@@ -674,7 +785,7 @@ export default function Board() {
           setActiveProject(updated);
           setShowProjectPanel(false);
         }}
-        onAiReview={handleAiReview}
+        onAiReview={aiReviewVisible ? handleAiReview : undefined}
       />
 
       {selectionMode && selectedTaskIds.size > 0 && (

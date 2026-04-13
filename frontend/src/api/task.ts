@@ -97,6 +97,17 @@ export interface ModelRunFromDB {
   reviewNotes: string | null;
 }
 
+export interface TaskChildDirectory {
+  name: string;
+  path: string;
+  modelRunId: string | null;
+  modelName: string | null;
+  reviewStatus: ReviewStatus;
+  reviewRound: number;
+  reviewNotes: string | null;
+  isSource: boolean;
+}
+
 export interface CreateTaskRequest {
   gitlabProjectId: number;
   projectName: string;
@@ -129,6 +140,10 @@ export async function getTask(id: string): Promise<TaskFromDB | null> {
 
 export async function listModelRuns(taskId: string): Promise<ModelRunFromDB[]> {
   return callService('TaskService', 'ListModelRuns', taskId);
+}
+
+export async function listTaskChildDirectories(taskId: string): Promise<TaskChildDirectory[]> {
+  return callService('TaskService', 'ListTaskChildDirectories', taskId);
 }
 
 export async function createTask(task: CreateTaskRequest): Promise<TaskFromDB> {

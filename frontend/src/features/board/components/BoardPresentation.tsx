@@ -15,6 +15,19 @@ import type { TaskTypeOverviewSummary } from '../../../shared/lib/taskTypeOvervi
 
 export type CardSize = 'sm' | 'md' | 'lg';
 
+/**
+ * 生成任务的可读代号，格式为 `{项目ID}-{任务类型}[-{序号}]`
+ * 例如：1990-代码生成-1
+ */
+function buildTaskDisplayCode(task: Task): string {
+  const projectId = parseInt(task.projectId, 10);
+  const typeName = task.taskType || '未归类';
+  // 从 task ID 中提取 claim 序号，格式为 label-NNNNN-M（其中 M 是序号）
+  const seqMatch = task.id.match(/label-\d{5}-(\d+)/);
+  const sequence = seqMatch ? parseInt(seqMatch[1], 10) : 0;
+  return sequence > 0 ? `${projectId}-${typeName}-${sequence}` : `${projectId}-${typeName}`;
+}
+
 export const STATUS: Record<
   TaskStatus,
   {
@@ -46,6 +59,12 @@ export const STATUS: Record<
     dotCls: 'bg-violet-500',
     badgeCls:
       'bg-violet-50 dark:bg-violet-500/10 text-violet-700 dark:text-violet-300 border-violet-200 dark:border-violet-500/20',
+  },
+  ExecutionCompleted: {
+    label: '执行完成',
+    dotCls: 'bg-cyan-500',
+    badgeCls:
+      'bg-cyan-50 dark:bg-cyan-500/10 text-cyan-700 dark:text-cyan-300 border-cyan-200 dark:border-cyan-500/20',
   },
   Submitted: {
     label: '已提交',
@@ -303,7 +322,7 @@ export function TaskCard({
               ) : (
                 <CircleDashed className="w-3.5 h-3.5" />
               )}
-              {task.progress}/{task.totalModels} 模型
+              {task.progress}/{task.totalModels} 执行副本
             </div>
           )}
         </div>
@@ -378,7 +397,7 @@ export function TaskCard({
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-1.5 text-xs text-stone-500 dark:text-stone-400">
           <GitBranch className="w-3.5 h-3.5" />
-          <span className="font-mono truncate max-w-[120px]">{task.id}</span>
+          <span className="font-mono truncate max-w-[160px]">{buildTaskDisplayCode(task)}</span>
         </div>
         <div className="flex items-center gap-2">
           {showPromptBadge && (
@@ -397,7 +416,7 @@ export function TaskCard({
               ) : (
                 <CircleDashed className="w-3.5 h-3.5" />
               )}
-              {task.progress}/{task.totalModels}
+              {task.progress}/{task.totalModels} 执行副本
             </div>
           )}
         </div>
@@ -568,7 +587,7 @@ function TaskGroupPreview({
               onContextMenu={(event) => onOpenTaskContextMenu(event, task)}
               className={`rounded-full border px-2.5 py-1 text-[11px] font-medium transition-colors hover:opacity-90 cursor-default ${toneMap[tone]}`}
             >
-              {task.id}
+              {buildTaskDisplayCode(task)}
             </button>
           ))}
           {tasks.length > 4 && (

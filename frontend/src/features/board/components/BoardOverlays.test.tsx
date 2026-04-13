@@ -3,6 +3,7 @@ import { createRef } from 'react';
 import { describe, expect, it, vi } from 'vitest';
 import type { Task } from '../../../store';
 import { TaskCardContextMenu } from './BoardOverlays';
+import type { TaskChildDirectory } from '../../../api/task';
 
 function createTask(overrides: Partial<Task> = {}): Task {
   return {
@@ -22,6 +23,19 @@ function createTask(overrides: Partial<Task> = {}): Task {
   };
 }
 
+function createChildDirectory(overrides: Partial<TaskChildDirectory> = {}): TaskChildDirectory {
+  return {
+    name: overrides.name ?? 'cotv21-pro',
+    path: overrides.path ?? '/tmp/task-1/cotv21-pro',
+    modelRunId: overrides.modelRunId ?? 'run-1',
+    modelName: overrides.modelName ?? 'cotv21-pro',
+    reviewStatus: overrides.reviewStatus ?? 'none',
+    reviewRound: overrides.reviewRound ?? 0,
+    reviewNotes: overrides.reviewNotes ?? null,
+    isSource: overrides.isSource ?? false,
+  };
+}
+
 describe('TaskCardContextMenu', () => {
   it('toggles the status panel on click', () => {
 
@@ -35,11 +49,15 @@ describe('TaskCardContextMenu', () => {
         statusChanging={false}
         taskTypeChanging={false}
         localFolderOpening={false}
+        childDirectories={[]}
+        childDirectoriesLoading={false}
+        quickActionLoadingPath={null}
         actionError=""
         onOpenLocalFolder={() => {}}
         onStatusChange={() => {}}
         onTaskTypeChange={() => {}}
         onGeneratePrompt={() => {}}
+        onQuickAiReview={() => {}}
       />,
     );
 
@@ -71,11 +89,15 @@ describe('TaskCardContextMenu', () => {
         statusChanging={false}
         taskTypeChanging={false}
         localFolderOpening={false}
+        childDirectories={[]}
+        childDirectoriesLoading={false}
+        quickActionLoadingPath={null}
         actionError=""
         onOpenLocalFolder={() => {}}
         onStatusChange={onStatusChange}
         onTaskTypeChange={() => {}}
         onGeneratePrompt={() => {}}
+        onQuickAiReview={() => {}}
       />,
     );
 
@@ -98,11 +120,15 @@ describe('TaskCardContextMenu', () => {
         statusChanging={false}
         taskTypeChanging={false}
         localFolderOpening={false}
+        childDirectories={[]}
+        childDirectoriesLoading={false}
+        quickActionLoadingPath={null}
         actionError=""
         onOpenLocalFolder={onOpenLocalFolder}
         onStatusChange={() => {}}
         onTaskTypeChange={() => {}}
         onGeneratePrompt={() => {}}
+        onQuickAiReview={() => {}}
       />,
     );
 
@@ -124,11 +150,15 @@ describe('TaskCardContextMenu', () => {
         statusChanging={false}
         taskTypeChanging={false}
         localFolderOpening={false}
+        childDirectories={[]}
+        childDirectoriesLoading={false}
+        quickActionLoadingPath={null}
         actionError=""
         onOpenLocalFolder={() => {}}
         onStatusChange={() => {}}
         onTaskTypeChange={onTaskTypeChange}
         onGeneratePrompt={() => {}}
+        onQuickAiReview={() => {}}
       />,
     );
 
@@ -136,5 +166,101 @@ describe('TaskCardContextMenu', () => {
     fireEvent.click(screen.getByText('Feature 迭代'));
 
     expect(onTaskTypeChange).toHaveBeenCalledWith('Feature迭代');
+  });
+
+  it('triggers quick AI review from the quick execute panel', () => {
+    const onQuickAiReview = vi.fn();
+
+    render(
+      <TaskCardContextMenu
+        menuRef={createRef<HTMLDivElement>()}
+        task={createTask()}
+        position={{ x: 32, y: 32 }}
+        statusOptions={['Claimed', 'Downloading', 'Downloaded', 'PromptReady', 'Submitted', 'Error']}
+        availableTaskTypes={['Bug修复', 'Feature迭代']}
+        statusChanging={false}
+        taskTypeChanging={false}
+        localFolderOpening={false}
+        childDirectories={[createChildDirectory()]}
+        childDirectoriesLoading={false}
+        quickActionLoadingPath={null}
+        actionError=""
+        onOpenLocalFolder={() => {}}
+        onStatusChange={() => {}}
+        onTaskTypeChange={() => {}}
+        onGeneratePrompt={() => {}}
+        onQuickAiReview={onQuickAiReview}
+      />,
+    );
+
+    fireEvent.click(screen.getByText('快捷执行'));
+    fireEvent.click(screen.getByText('cotv21-pro'));
+
+    expect(onQuickAiReview).toHaveBeenCalledWith(
+      expect.objectContaining({ path: '/tmp/task-1/cotv21-pro', modelName: 'cotv21-pro' }),
+    );
+  });
+
+  it('shows child directories in quick execute with source metadata', () => {
+    render(
+      <TaskCardContextMenu
+        menuRef={createRef<HTMLDivElement>()}
+        task={createTask()}
+        position={{ x: 32, y: 32 }}
+        statusOptions={['Claimed', 'Downloading', 'Downloaded', 'PromptReady', 'Submitted', 'Error']}
+        availableTaskTypes={['Bug修复', 'Feature迭代']}
+        statusChanging={false}
+        taskTypeChanging={false}
+        localFolderOpening={false}
+        childDirectories={[createChildDirectory({
+          name: '01849-bug修复',
+          path: '/tmp/task-1/01849-bug修复',
+          modelRunId: 'run-origin',
+          modelName: 'ORIGIN',
+          isSource: true,
+        })]}
+        childDirectoriesLoading={false}
+        quickActionLoadingPath={null}
+        actionError=""
+        onOpenLocalFolder={() => {}}
+        onStatusChange={() => {}}
+        onTaskTypeChange={() => {}}
+        onGeneratePrompt={() => {}}
+        onQuickAiReview={() => {}}
+      />,
+    );
+
+    fireEvent.click(screen.getByText('快捷执行'));
+
+    expect(screen.getByText('01849-bug修复')).toBeInTheDocument();
+    expect(screen.getByText('源码目录')).toBeInTheDocument();
+  });
+
+  it('shows an empty state when no child directories are available', () => {
+    render(
+      <TaskCardContextMenu
+        menuRef={createRef<HTMLDivElement>()}
+        task={createTask()}
+        position={{ x: 32, y: 32 }}
+        statusOptions={['Claimed', 'Downloading', 'Downloaded', 'PromptReady', 'Submitted', 'Error']}
+        availableTaskTypes={['Bug修复', 'Feature迭代']}
+        statusChanging={false}
+        taskTypeChanging={false}
+        localFolderOpening={false}
+        childDirectories={[]}
+        childDirectoriesLoading={false}
+        quickActionLoadingPath={null}
+        actionError=""
+        onOpenLocalFolder={() => {}}
+        onStatusChange={() => {}}
+        onTaskTypeChange={() => {}}
+        onGeneratePrompt={() => {}}
+        onQuickAiReview={() => {}}
+      />,
+    );
+
+    fireEvent.click(screen.getByText('快捷执行'));
+
+    expect(screen.getByText('当前题卡目录下没有可用子文件夹。先完成领题 Clone，或检查任务目录是否存在。')).toBeInTheDocument();
   });
 });

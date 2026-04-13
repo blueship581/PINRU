@@ -79,9 +79,23 @@ export async function submitSessionSyncJob(taskId: string): Promise<BackgroundJo
 }
 
 export interface AiReviewPayload {
-  modelRunId: string;
+  modelRunId: string | null;
   modelName: string;
   localPath: string;
+}
+
+export interface AiReviewResult {
+  modelRunId: string;
+  modelName: string;
+  reviewStatus: 'pass' | 'warning';
+  reviewRound: number;
+  reviewNotes: string;
+  nextPrompt: string;
+  isCompleted?: boolean;
+  isSatisfied?: boolean;
+  projectType?: string;
+  changeScope?: string;
+  keyLocations?: string;
 }
 
 export async function submitAiReviewJob(

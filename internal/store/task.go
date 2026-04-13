@@ -29,14 +29,27 @@ type Task struct {
 	UpdatedAt                  int64         `json:"updatedAt"`
 }
 
+type TaskSessionEvidence struct {
+	WorkspacePath  string `json:"workspacePath"`
+	MatchedPath    string `json:"matchedPath"`
+	MatchKind      string `json:"matchKind"`
+	UserID         string `json:"userId"`
+	Username       string `json:"username"`
+	Summary        string `json:"summary"`
+	IsCurrent      bool   `json:"isCurrent"`
+	LastActivityAt *int64 `json:"lastActivityAt"`
+	ExtractedAt    *int64 `json:"extractedAt"`
+}
+
 type TaskSession struct {
-	SessionID        string `json:"sessionId"`
-	TaskType         string `json:"taskType"`
-	ConsumeQuota     bool   `json:"consumeQuota"`
-	IsCompleted      *bool  `json:"isCompleted"`
-	IsSatisfied      *bool  `json:"isSatisfied"`
-	Evaluation       string `json:"evaluation"`
-	UserConversation string `json:"userConversation"`
+	SessionID        string               `json:"sessionId"`
+	TaskType         string               `json:"taskType"`
+	ConsumeQuota     bool                 `json:"consumeQuota"`
+	IsCompleted      *bool                `json:"isCompleted"`
+	IsSatisfied      *bool                `json:"isSatisfied"`
+	Evaluation       string               `json:"evaluation"`
+	UserConversation string               `json:"userConversation"`
+	Evidence         *TaskSessionEvidence `json:"evidence"`
 }
 
 func cloneBoolPtr(value *bool) *bool {
@@ -46,6 +59,33 @@ func cloneBoolPtr(value *bool) *bool {
 
 	next := *value
 	return &next
+}
+
+func cloneInt64Ptr(value *int64) *int64 {
+	if value == nil {
+		return nil
+	}
+
+	next := *value
+	return &next
+}
+
+func cloneTaskSessionEvidence(value *TaskSessionEvidence) *TaskSessionEvidence {
+	if value == nil {
+		return nil
+	}
+
+	return &TaskSessionEvidence{
+		WorkspacePath:  strings.TrimSpace(value.WorkspacePath),
+		MatchedPath:    strings.TrimSpace(value.MatchedPath),
+		MatchKind:      strings.TrimSpace(value.MatchKind),
+		UserID:         strings.TrimSpace(value.UserID),
+		Username:       strings.TrimSpace(value.Username),
+		Summary:        strings.TrimSpace(value.Summary),
+		IsCurrent:      value.IsCurrent,
+		LastActivityAt: cloneInt64Ptr(value.LastActivityAt),
+		ExtractedAt:    cloneInt64Ptr(value.ExtractedAt),
+	}
 }
 
 func defaultTaskSessionList(taskType string) []TaskSession {
@@ -93,6 +133,7 @@ func normalizeTaskSessionList(taskType string, sessions []TaskSession) ([]TaskSe
 			IsSatisfied:      cloneBoolPtr(session.IsSatisfied),
 			Evaluation:       strings.TrimSpace(session.Evaluation),
 			UserConversation: strings.TrimSpace(session.UserConversation),
+			Evidence:         cloneTaskSessionEvidence(session.Evidence),
 		})
 	}
 
@@ -753,7 +794,7 @@ func (s *Store) SyncTaskPromptFromArtifact(id, promptText string) error {
 	res, err := s.DB.Exec(
 		`UPDATE tasks
 		 SET prompt_text=?,
-		     status=CASE WHEN status='Submitted' THEN status ELSE 'PromptReady' END,
+		     status=CASE WHEN status IN ('Submitted', 'ExecutionCompleted') THEN status ELSE 'PromptReady' END,
 		     prompt_generation_status='done',
 		     prompt_generation_error=NULL,
 		     prompt_generation_started_at=COALESCE(prompt_generation_started_at, ?),
@@ -805,7 +846,7 @@ func (s *Store) CompleteTaskPromptGeneration(id, promptText string, startedAt in
 	res, err := s.DB.Exec(
 		`UPDATE tasks
 		 SET prompt_text=?,
-		     status='PromptReady',
+		     status=CASE WHEN status IN ('Submitted', 'ExecutionCompleted') THEN status ELSE 'PromptReady' END,
 		     prompt_generation_status='done',
 		     prompt_generation_error=NULL,
 		     prompt_generation_started_at=?,
@@ -863,6 +904,21 @@ func (s *Store) UpdateTaskLocalPath(id string, localPath *string) error {
 		return fmt.Errorf("task not found: %s", id)
 	}
 	return nil
+}
+
+func (s *Store) CountTasksByProjectConfigGitLabProjectAndTaskType(projectConfigID string, gitLabProjectID int64, taskType string) (int, error) {
+	projectConfigID = strings.TrimSpace(projectConfigID)
+	taskType = strings.TrimSpace(taskType)
+	if projectConfigID == "" {
+		return 0, fmt.Errorf("projectConfigID 不能为空")
+	}
+
+	var count int
+	err := s.DB.QueryRow(
+		`SELECT COUNT(*) FROM tasks WHERE project_config_id = ? AND gitlab_project_id = ? AND task_type = ?`,
+		projectConfigID, gitLabProjectID, taskType,
+	).Scan(&count)
+	return count, err
 }
 
 func (s *Store) DeleteTask(id string) error {

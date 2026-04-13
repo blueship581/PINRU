@@ -53,6 +53,18 @@ import { useAppStore, type Task, type TaskStatus } from '../../../store';
 
 const PROMPT_GENERATION_TIMEOUT_MS = 1_200_000;
 
+function normalizeModelRunList(
+  modelRuns: ModelRunFromDB[] | null | undefined,
+): ModelRunFromDB[] {
+  return Array.isArray(modelRuns) ? modelRuns : [];
+}
+
+function normalizeLlmProviderList(
+  providers: LlmProviderConfig[] | null | undefined,
+): LlmProviderConfig[] {
+  return Array.isArray(providers) ? providers : [];
+}
+
 function getDefaultTaskDetailTab(status?: TaskStatus | null): TaskDetailDrawerTab {
   return status === 'Submitted' || status === 'ExecutionCompleted' ? 'sessions' : 'prompt';
 }
@@ -242,6 +254,7 @@ export function useBoardTaskDetail({
       getTask(taskId),
       listModelRuns(taskId),
     ]);
+    const normalizedModelRuns = normalizeModelRunList(modelRuns);
 
     if (selectedTaskIdRef.current !== taskId) {
       return;
@@ -257,16 +270,16 @@ export function useBoardTaskDetail({
     }
 
     setSelectedTaskDetail(taskDetail);
-    setSelectedModelRuns(modelRuns);
+    setSelectedModelRuns(normalizedModelRuns);
     const nextSessionModelName =
-      modelRuns.some((run) => run.modelName === selectedSessionModelName)
+      normalizedModelRuns.some((run) => run.modelName === selectedSessionModelName)
         ? selectedSessionModelName
-        : buildSessionModelOptions(modelRuns, sourceModelName)[0]?.modelName ?? '';
+        : buildSessionModelOptions(normalizedModelRuns, sourceModelName)[0]?.modelName ?? '';
     setSelectedSessionModelName(nextSessionModelName);
     hydrateSessionDraftState(
       nextSessionModelName,
       taskDetail,
-      modelRuns,
+      normalizedModelRuns,
       latestTask,
     );
   };
@@ -319,6 +332,7 @@ export function useBoardTaskDetail({
         getTask(selected.id),
         listModelRuns(selected.id),
       ]);
+      const normalizedModelRuns = normalizeModelRunList(modelRuns);
       if (cancelled) {
         return;
       }
@@ -326,14 +340,14 @@ export function useBoardTaskDetail({
       setSelectedTaskDetail(taskDetail);
       setPromptDraft(taskDetail?.promptText ?? '');
       setPromptCopied(false);
-      setSelectedModelRuns(modelRuns);
+      setSelectedModelRuns(normalizedModelRuns);
       const initialSessionModelName =
-        buildSessionModelOptions(modelRuns, sourceModelName)[0]?.modelName ?? '';
+        buildSessionModelOptions(normalizedModelRuns, sourceModelName)[0]?.modelName ?? '';
       setSelectedSessionModelName(initialSessionModelName);
       hydrateSessionDraftState(
         initialSessionModelName,
         taskDetail,
-        modelRuns,
+        normalizedModelRuns,
         selected,
       );
       setDrawerLoading(false);
@@ -443,6 +457,7 @@ export function useBoardTaskDetail({
       getTask(taskId),
       listModelRuns(taskId),
     ]);
+    const normalizedModelRuns = normalizeModelRunList(modelRuns);
 
     const latestTask =
       useAppStore.getState().tasks.find((task) => task.id === taskId) ?? null;
@@ -451,16 +466,16 @@ export function useBoardTaskDetail({
     }
 
     setSelectedTaskDetail(taskDetail);
-    setSelectedModelRuns(modelRuns);
+    setSelectedModelRuns(normalizedModelRuns);
     const nextSessionModelName =
-      modelRuns.some((run) => run.modelName === selectedSessionModelName)
+      normalizedModelRuns.some((run) => run.modelName === selectedSessionModelName)
         ? selectedSessionModelName
-        : buildSessionModelOptions(modelRuns, sourceModelName)[0]?.modelName ?? '';
+        : buildSessionModelOptions(normalizedModelRuns, sourceModelName)[0]?.modelName ?? '';
     setSelectedSessionModelName(nextSessionModelName);
     hydrateSessionDraftState(
       nextSessionModelName,
       taskDetail,
-      modelRuns,
+      normalizedModelRuns,
       latestTask,
     );
   };
@@ -680,7 +695,7 @@ export function useBoardTaskDetail({
 
   useEffect(() => {
     getLlmProviders()
-      .then(setLlmProviders)
+      .then((providers) => setLlmProviders(normalizeLlmProviderList(providers)))
       .catch(() => setLlmProviders([]));
   }, []);
 
@@ -1181,7 +1196,7 @@ export function useBoardTaskDetail({
     refreshModelRuns: async () => {
       if (!selected) return;
       const runs = await listModelRuns(selected.id);
-      setSelectedModelRuns(runs);
+      setSelectedModelRuns(normalizeModelRunList(runs));
     },
   };
 }

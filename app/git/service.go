@@ -1,6 +1,7 @@
 package git
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -108,17 +109,24 @@ func (s *GitService) FetchConfiguredGitLabProjects(projectRefs []string) ([]GitL
 	return s.FetchGitLabProjects(projectRefs, url, token), nil
 }
 
-func (s *GitService) cloneProjectWithProgress(cloneURL, path, username, token string, onProgress func(string)) error {
+func (s *GitService) cloneProjectWithProgress(
+	ctx context.Context,
+	cloneURL,
+	path,
+	username,
+	token string,
+	onProgress func(string),
+) error {
 	progress := onProgress
 	if progress == nil {
 		progress = func(string) {}
 	}
-	return gitops.CloneWithProgress(cloneURL, path, username, token, progress)
+	return gitops.CloneWithProgress(ctx, cloneURL, path, username, token, progress)
 }
 
 func (s *GitService) CloneProject(cloneURL, path, username, token string) error {
 	app := application.Get()
-	return s.cloneProjectWithProgress(cloneURL, path, username, token, func(msg string) {
+	return s.cloneProjectWithProgress(context.Background(), cloneURL, path, username, token, func(msg string) {
 		app.Event.Emit("clone-progress", msg)
 	})
 }
@@ -130,7 +138,7 @@ func (s *GitService) CloneProjectWithProgress(
 	token string,
 	onProgress func(string),
 ) error {
-	return s.cloneProjectWithProgress(cloneURL, path, username, token, onProgress)
+	return s.cloneProjectWithProgress(context.Background(), cloneURL, path, username, token, onProgress)
 }
 
 func (s *GitService) CloneConfiguredProject(cloneURL, path string) error {
@@ -142,11 +150,20 @@ func (s *GitService) CloneConfiguredProjectWithProgress(
 	path string,
 	onProgress func(string),
 ) error {
+	return s.CloneConfiguredProjectWithContext(context.Background(), cloneURL, path, onProgress)
+}
+
+func (s *GitService) CloneConfiguredProjectWithContext(
+	ctx context.Context,
+	cloneURL,
+	path string,
+	onProgress func(string),
+) error {
 	_, username, token, err := s.loadConfiguredGitLabCredentials()
 	if err != nil {
 		return err
 	}
-	return s.cloneProjectWithProgress(cloneURL, path, username, token, onProgress)
+	return s.cloneProjectWithProgress(ctx, cloneURL, path, username, token, onProgress)
 }
 
 func (s *GitService) DownloadGitLabProject(projectID int64, url, token, destination string, sha *string) error {
@@ -212,27 +229,30 @@ func (s *GitService) PlanManagedClaimPaths(
 	}
 
 	normalizedBasePath := filepath.Clean(util.ExpandTilde(trimmedBasePath))
-	baseFolderName := util.BuildManagedTaskFolderName(projectName, taskType)
+	projectFolderPrefix := util.NormalizeManagedProjectFolderName(projectName)
 
-	folderMaxSequence, hasFolderMatch, err := collectManagedFolderSequenceInfo(normalizedBasePath, baseFolderName)
+	folderSequences, err := collectManagedFolderGlobalSequenceSet(normalizedBasePath, projectFolderPrefix)
 	if err != nil {
 		return nil, err
 	}
 
-	taskMaxSequence, hasTaskMatch, err := s.collectManagedTaskSequenceInfo(projectConfigID, projectID, taskType)
+	taskSequences, err := s.collectManagedTaskSequenceSet(projectConfigID, projectID, taskType)
 	if err != nil {
 		return nil, err
 	}
 
-	maxSequence := folderMaxSequence
-	if taskMaxSequence > maxSequence {
-		maxSequence = taskMaxSequence
+	usedSequences := make(map[int]struct{}, len(folderSequences)+len(taskSequences))
+	for seq := range folderSequences {
+		usedSequences[seq] = struct{}{}
 	}
-	startSequence := resolveManagedClaimStartSequence(maxSequence, hasFolderMatch || hasTaskMatch, count)
+	for seq := range taskSequences {
+		usedSequences[seq] = struct{}{}
+	}
+
+	sequences := resolveManagedClaimSequences(usedSequences, count)
 
 	plans := make([]ManagedClaimPathPlan, 0, count)
-	for index := 0; index < count; index++ {
-		sequence := startSequence + index
+	for _, sequence := range sequences {
 		taskPath := util.BuildManagedTaskFolderPathWithSequence(normalizedBasePath, projectName, taskType, sequence)
 		sourcePath := util.BuildManagedSourceFolderPathWithSequence(taskPath, projectID, taskType, sequence)
 		plans = append(plans, ManagedClaimPathPlan{
@@ -601,7 +621,7 @@ func taskPromptNeedsSync(task store.Task, promptText string) bool {
 	if task.PromptGenerationStatus != "done" || task.PromptGenerationError != nil {
 		return true
 	}
-	return task.Status != "PromptReady" && task.Status != "Submitted"
+	return task.Status != "PromptReady" && task.Status != "ExecutionCompleted" && task.Status != "Submitted"
 }
 
 func collectManagedFolderSequenceInfo(basePath, folderBaseName string) (int, bool, error) {
@@ -629,21 +649,55 @@ func collectManagedFolderSequenceInfo(basePath, folderBaseName string) (int, boo
 	return maxSequence, hasMatch, nil
 }
 
-func resolveManagedClaimStartSequence(maxSequence int, hasExisting bool, count int) int {
-	if count > 1 {
-		if maxSequence < 1 {
-			return 1
+// collectManagedFolderGlobalSequenceSet 扫描 basePath 下所有以 projectFolderPrefix+"-" 开头的文件夹，
+// 返回全部已使用序号的集合，用于保证同一 GitLab 项目跨任务类型的序号不冲突，并支持空位复用。
+func collectManagedFolderGlobalSequenceSet(basePath, projectFolderPrefix string) (map[int]struct{}, error) {
+	entries, err := os.ReadDir(util.ExpandTilde(basePath))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return map[int]struct{}{}, nil
 		}
-		return maxSequence + 1
+		return nil, err
 	}
 
-	if !hasExisting {
-		return 0
+	prefix := projectFolderPrefix + "-"
+	sequences := make(map[int]struct{})
+	for _, entry := range entries {
+		name := entry.Name()
+		if !strings.HasPrefix(name, prefix) {
+			continue
+		}
+		// 尝试提取末尾数字序号：name = prefix + suffix，suffix 可能是 "tasktype" 或 "tasktype-N"
+		lastDash := strings.LastIndex(name, "-")
+		if lastDash <= len(prefix)-1 {
+			// 无数字后缀，视为序号 1
+			sequences[1] = struct{}{}
+			continue
+		}
+		seq, convErr := strconv.Atoi(name[lastDash+1:])
+		if convErr != nil || seq <= 0 {
+			// 末尾不是数字，视为序号 1
+			sequences[1] = struct{}{}
+			continue
+		}
+		sequences[seq] = struct{}{}
 	}
-	if maxSequence < 1 {
-		return 1
+
+	return sequences, nil
+}
+
+// resolveManagedClaimSequences 从已使用序号集合中找出 count 个最小可用正整数序号，
+// 优先复用已删除任务留下的空位。
+func resolveManagedClaimSequences(usedSequences map[int]struct{}, count int) []int {
+	result := make([]int, 0, count)
+	seq := 1
+	for len(result) < count {
+		if _, used := usedSequences[seq]; !used {
+			result = append(result, seq)
+		}
+		seq++
 	}
-	return maxSequence + 1
+	return result
 }
 
 func managedClaimSequenceFromTask(task store.Task) (int, bool) {
@@ -705,9 +759,9 @@ func parseTrailingClaimSequence(name string) (int, bool) {
 	return sequence, true
 }
 
-func (s *GitService) collectManagedTaskSequenceInfo(projectConfigID string, projectID int64, taskType string) (int, bool, error) {
+func (s *GitService) collectManagedTaskSequenceSet(projectConfigID string, projectID int64, taskType string) (map[int]struct{}, error) {
 	if s.store == nil {
-		return 0, false, nil
+		return map[int]struct{}{}, nil
 	}
 
 	trimmedProjectConfigID := strings.TrimSpace(projectConfigID)
@@ -721,11 +775,10 @@ func (s *GitService) collectManagedTaskSequenceInfo(projectConfigID string, proj
 		tasks, err = s.store.ListTasks(nil)
 	}
 	if err != nil {
-		return 0, false, err
+		return nil, err
 	}
 
-	maxSequence := 0
-	hasMatch := false
+	sequences := make(map[int]struct{})
 	for _, task := range tasks {
 		if trimmedProjectConfigID == "" {
 			if task.ProjectConfigID != nil && strings.TrimSpace(*task.ProjectConfigID) != "" {
@@ -735,23 +788,20 @@ func (s *GitService) collectManagedTaskSequenceInfo(projectConfigID string, proj
 			continue
 		}
 
-		if task.GitLabProjectID != projectID || !strings.EqualFold(strings.TrimSpace(task.TaskType), strings.TrimSpace(taskType)) {
+		if task.GitLabProjectID != projectID {
 			continue
 		}
 
-		hasMatch = true
 		if sequence, ok := managedClaimSequenceFromTask(task); ok {
-			if sequence > maxSequence {
-				maxSequence = sequence
-			}
+			sequences[sequence] = struct{}{}
 			continue
 		}
-		if sequence, ok := parseTaskIDClaimSequence(task.ID, task.GitLabProjectID); ok && sequence > maxSequence {
-			maxSequence = sequence
+		if sequence, ok := parseTaskIDClaimSequence(task.ID, task.GitLabProjectID); ok {
+			sequences[sequence] = struct{}{}
 		}
 	}
 
-	return maxSequence, hasMatch, nil
+	return sequences, nil
 }
 
 func normalizeManagedDirectoryOnDisk(currentPath, desiredPath, directoryLabel string) (string, string, error) {

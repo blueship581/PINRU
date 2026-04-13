@@ -31,11 +31,15 @@ export function BoardLayerStack({
   availableTaskTypes,
   statusOptions,
   localFolderOpening,
+  contextMenuChildDirectories,
+  contextMenuChildDirectoriesLoading,
+  quickActionLoadingPath,
   actionError,
   onOpenLocalFolder,
   onTaskCardStatusChange,
   onTaskCardTaskTypeChange,
   onTaskCardGeneratePrompt,
+  onTaskCardQuickAiReview,
   showProjectOverview,
   activeProject,
   visibleProjectTaskSummaries,
@@ -65,11 +69,15 @@ export function BoardLayerStack({
   availableTaskTypes: string[];
   statusOptions: TaskStatus[];
   localFolderOpening: boolean;
+  contextMenuChildDirectories: import('../../../api/task').TaskChildDirectory[];
+  contextMenuChildDirectoriesLoading: boolean;
+  quickActionLoadingPath: string | null;
   actionError: string;
   onOpenLocalFolder: () => void;
   onTaskCardStatusChange: (status: TaskStatus) => void;
   onTaskCardTaskTypeChange: (taskType: string) => void;
   onTaskCardGeneratePrompt: (constraints: string[], scope: string) => void;
+  onTaskCardQuickAiReview?: (directory: import('../../../api/task').TaskChildDirectory) => void;
   showProjectOverview: boolean;
   activeProject: ProjectConfig | null;
   visibleProjectTaskSummaries: TaskTypeOverviewSummary[];
@@ -106,11 +114,15 @@ export function BoardLayerStack({
           statusChanging={detail.statusChanging}
           taskTypeChanging={detail.taskTypeChanging}
           localFolderOpening={localFolderOpening}
+          childDirectories={contextMenuChildDirectories}
+          childDirectoriesLoading={contextMenuChildDirectoriesLoading}
+          quickActionLoadingPath={quickActionLoadingPath}
           actionError={actionError}
           onOpenLocalFolder={onOpenLocalFolder}
           onStatusChange={onTaskCardStatusChange}
           onTaskTypeChange={onTaskCardTaskTypeChange}
           onGeneratePrompt={onTaskCardGeneratePrompt}
+          onQuickAiReview={onTaskCardQuickAiReview}
         />
       )}
 

@@ -28,7 +28,6 @@ import {
 } from '../../api/job';
 import { createTask } from '../../api/task';
 import {
-  consumeProjectQuota,
   DEFAULT_TASK_TYPE,
   getActiveProjectId,
   getGitLabSettings,
@@ -36,8 +35,8 @@ import {
   getProjectTaskSettings,
   getProjects,
   getTaskTypePresentation,
-  getTaskTypeQuotaRawValue,
   getTaskTypeQuotaValue,
+  normalizeTaskTypeName,
   normalizeProjectModels,
   type ProjectConfig,
   type TaskType,
@@ -59,9 +58,11 @@ import {
   getResultStatusMeta,
   isOriginModel,
   parseProjectIds,
+  partitionClaimsByProjectLimit,
   pickSourceModel,
   toErrorMessage,
 } from './utils/claimUtils';
+import { runWithConcurrency } from './utils/asyncPool';
 
 /* ─── Component ─── */
 
@@ -347,9 +348,40 @@ export default function Claim() {
 
   const validProjects = lookups.filter((l) => l.project);
   const requestedClaimCount = validProjects.length * claimSetCount;
-  const isClaimQuotaBlocked = claimTaskTypeRemaining !== null && (
-    claimTaskTypeRemaining <= 0 || requestedClaimCount > claimTaskTypeRemaining
-  );
+  const maxClaimSetCount =
+    claimTaskTypeRemaining !== null
+      ? Math.max(1, Math.floor(claimTaskTypeRemaining / Math.max(1, validProjects.length)))
+      : undefined;
+
+  useEffect(() => {
+    if (maxClaimSetCount !== undefined && claimSetCount > maxClaimSetCount) {
+      setClaimSetCount(maxClaimSetCount);
+    }
+  }, [maxClaimSetCount]);
+
+  // 超出配额的条目数：超出部分仍可提交，执行时逐条检查并告警跳过
+  const overQuotaCount =
+    claimTaskTypeRemaining !== null
+      ? Math.max(0, requestedClaimCount - claimTaskTypeRemaining)
+      : 0;
+  const withinQuotaCount = requestedClaimCount - overQuotaCount;
+
+  // 为 review 列表中的每个项目计算配额状态
+  // projects 按顺序消耗配额，超出的打上 over_quota 标记
+  const projectQuotaStatus = (() => {
+    if (claimTaskTypeRemaining === null) return new Map<string, 'ok' | 'over_quota'>();
+    let budget = claimTaskTypeRemaining;
+    const map = new Map<string, 'ok' | 'over_quota'>();
+    for (const proj of validProjects) {
+      if (budget <= 0) {
+        map.set(proj.id, 'over_quota');
+      } else {
+        map.set(proj.id, budget >= claimSetCount ? 'ok' : 'over_quota');
+        budget -= claimSetCount;
+      }
+    }
+    return map;
+  })();
 
   const buildPlannedClaims = async (): Promise<PlannedClaim[]> => {
     const plannedGroups = await Promise.all(
@@ -378,7 +410,7 @@ export default function Claim() {
 
   const handleClaim = async () => {
     if (!validProjects.length || !selectedModels.length) return;
-    if (isClaimQuotaBlocked) return;
+    if (withinQuotaCount <= 0) return;
 
     setSearchError('');
     let startedRun = false;
@@ -388,19 +420,56 @@ export default function Claim() {
         throw new Error('请先在设置页面配置 GitLab URL 和 Token');
       }
 
-      const plannedClaims = await buildPlannedClaims();
+      const allPlannedClaims = await buildPlannedClaims();
+
+      // 在执行前按配额快照预切分，超出部分不会进入执行循环，从根本上防止误下载
+      const budget = claimTaskTypeRemaining;
+      const budgetExecutableClaims =
+        budget !== null ? allPlannedClaims.slice(0, budget) : allPlannedClaims;
+      const quotaExceededClaims =
+        budget !== null ? allPlannedClaims.slice(budget) : [];
+      const perProjectLimit = getTaskTypeQuotaValue(quotas, claimTaskType);
+      const normalizedClaimTaskType = normalizeTaskTypeName(claimTaskType);
+      const existingCounts = new Map<string, number>();
+
+      for (const task of tasks) {
+        if (normalizeTaskTypeName(task.taskType) !== normalizedClaimTaskType) continue;
+        existingCounts.set(task.projectId, (existingCounts.get(task.projectId) ?? 0) + 1);
+      }
+
+      const { executableClaims, exceededClaims: taskTypeLimitExceededClaims } =
+        partitionClaimsByProjectLimit(
+          budgetExecutableClaims,
+          (claim) => claim.lookup.id,
+          existingCounts,
+          perProjectLimit,
+        );
+
       const sourceModelId = pickSourceModel(selectedModels, preferredSourceModelName).id;
-      const initialResults: ClaimResult[] = plannedClaims.map(({ lookup, plan, claimKey, displayProjectId }) => ({
+
+      const makeResult = (
+        { lookup, plan, claimKey, displayProjectId }: PlannedClaim,
+        status: ClaimResult['status'],
+        message: string,
+      ): ClaimResult => ({
         claimKey,
         projectId: lookup.id,
         displayProjectId,
         projectName: lookup.project!.name,
         claimSequence: plan.sequence,
         localPath: plan.taskPath,
-        status: 'pending',
-        message: '等待中',
-        modelStatuses: new Map(selectedModels.map((model) => [model.id, 'pending' as const])),
-      }));
+        status,
+        message,
+        modelStatuses: new Map(selectedModels.map((m) => [m.id, 'pending' as const])),
+      });
+
+      const initialResults: ClaimResult[] = [
+        ...executableClaims.map((c) => makeResult(c, 'pending', '等待中')),
+        ...taskTypeLimitExceededClaims.map((c) =>
+          makeResult(c, 'quota_exceeded', '单题上限已达，跳过'),
+        ),
+        ...quotaExceededClaims.map((c) => makeResult(c, 'quota_exceeded', '配额已满，跳过')),
+      ];
 
       setPhase('running');
       setClaimResults(initialResults);
@@ -408,13 +477,13 @@ export default function Claim() {
 
       let createdCount = 0;
 
-      for (const { lookup, plan, claimKey } of plannedClaims) {
+      await runWithConcurrency(executableClaims, 3, async ({ lookup, plan, claimKey }) => {
         const project = lookup.project!;
 
         setClaimResults((prev) =>
           prev.map((r) =>
             r.claimKey === claimKey
-              ? { ...r, status: 'running', message: '正在 clone 源码并为各模型初始化 Git...' }
+              ? { ...r, status: 'running', message: '正在 clone 并初始化...' }
               : r,
           ),
         );
@@ -449,22 +518,6 @@ export default function Claim() {
             projectConfigId: activeConfigId,
           });
 
-          // Consume quota if task type has a configured quota
-          if (activeConfigId) {
-            const currentQuota = getTaskTypeQuotaRawValue(quotas, claimTaskType);
-            if (currentQuota !== null) {
-              try {
-                await consumeProjectQuota(activeConfigId, claimTaskType);
-                setQuotas((prev) => ({
-                  ...prev,
-                  [claimTaskType]: (getTaskTypeQuotaRawValue(prev, claimTaskType) ?? 0) - 1,
-                }));
-              } catch {
-                // Non-fatal: quota decrement failed, continue
-              }
-            }
-          }
-
           createdCount += 1;
           const isPartial = result.failedModels.length > 0;
           setClaimResults((prev) =>
@@ -474,8 +527,8 @@ export default function Claim() {
                     ...r,
                     status: isPartial ? 'partial' : 'done',
                     message: isPartial
-                      ? `成功 ${result.successfulModels.length}/${selectedModels.length}；失败：${result.failedModels.map((f) => f.modelId).join('，')}`
-                      : `成功 ${result.successfulModels.length}/${selectedModels.length} 个副本`,
+                      ? `${result.successfulModels.length}/${selectedModels.length} 成功，失败：${result.failedModels.map((f) => f.modelId).join('，')}`
+                      : `${result.successfulModels.length} 个副本已创建`,
                   }
                 : r,
             ),
@@ -489,7 +542,7 @@ export default function Claim() {
             ),
           );
         }
-      }
+      });
 
       if (createdCount > 0) await loadTasks();
     } catch (error) {
@@ -712,46 +765,56 @@ export default function Claim() {
             <div className="max-h-64 overflow-y-auto -mx-1 px-1">
               <table className="w-full text-sm">
                 <tbody>
-                  {lookups.map((lookup) => (
-                    <tr
-                      key={lookup.id}
-                      className={`border-b border-stone-100 dark:border-stone-800 last:border-b-0 ${
-                        lookup.error ? 'text-red-500 dark:text-red-400' : ''
-                      }`}
-                    >
-                      <td className="py-2 pr-3 font-mono text-xs text-stone-400 w-12 tabular-nums">
-                        {lookup.id}
-                      </td>
-                      <td className="py-2 pr-3 truncate max-w-0">
-                        {lookup.project ? (
-                          <span className="font-medium text-stone-800 dark:text-stone-200">
-                            {lookup.project.name}
-                          </span>
-                        ) : (
-                          <span className="text-red-500 dark:text-red-400 text-xs">{lookup.error}</span>
-                        )}
-                      </td>
-                      <td className="py-2 pr-3 text-xs text-stone-400 dark:text-stone-500 hidden sm:table-cell w-24">
-                        {lookup.project && (
-                          <span className="flex items-center gap-1">
-                            <GitFork className="w-3 h-3 flex-shrink-0" />
-                            {lookup.project.default_branch || 'N/A'}
-                          </span>
-                        )}
-                      </td>
-                      <td className="py-2 text-right w-14">
-                        <span
-                          className={`inline-block rounded-full px-2 py-0.5 text-[10px] font-bold tracking-wider ${
-                            lookup.project
-                              ? 'bg-emerald-50 dark:bg-emerald-500/10 text-emerald-700 dark:text-emerald-400'
-                              : 'bg-red-50 dark:bg-red-900/20 text-red-600 dark:text-red-400'
-                          }`}
-                        >
-                          {lookup.project ? '可用' : '失败'}
-                        </span>
-                      </td>
-                    </tr>
-                  ))}
+                  {lookups.map((lookup) => {
+                    const quotaStatus = projectQuotaStatus.get(lookup.id);
+                    const isOverQuota = lookup.project && quotaStatus === 'over_quota';
+                    return (
+                      <tr
+                        key={lookup.id}
+                        className={`border-b border-stone-100 dark:border-stone-800 last:border-b-0 ${
+                          lookup.error ? 'text-red-500 dark:text-red-400' : ''
+                        }`}
+                      >
+                        <td className="py-2 pr-3 font-mono text-xs text-stone-400 w-12 tabular-nums">
+                          {lookup.id}
+                        </td>
+                        <td className="py-2 pr-3 truncate max-w-0">
+                          {lookup.project ? (
+                            <span className={`font-medium ${isOverQuota ? 'text-stone-400 dark:text-stone-500' : 'text-stone-800 dark:text-stone-200'}`}>
+                              {lookup.project.name}
+                            </span>
+                          ) : (
+                            <span className="text-red-500 dark:text-red-400 text-xs">{lookup.error}</span>
+                          )}
+                        </td>
+                        <td className="py-2 pr-3 text-xs text-stone-400 dark:text-stone-500 hidden sm:table-cell w-24">
+                          {lookup.project && (
+                            <span className="flex items-center gap-1">
+                              <GitFork className="w-3 h-3 flex-shrink-0" />
+                              {lookup.project.default_branch || 'N/A'}
+                            </span>
+                          )}
+                        </td>
+                        <td className="py-2 text-right w-20">
+                          {lookup.project ? (
+                            isOverQuota ? (
+                              <span className="inline-block rounded-full px-2 py-0.5 text-[10px] font-bold tracking-wider bg-orange-50 dark:bg-orange-500/10 text-orange-600 dark:text-orange-400">
+                                配额不足
+                              </span>
+                            ) : (
+                              <span className="inline-block rounded-full px-2 py-0.5 text-[10px] font-bold tracking-wider bg-emerald-50 dark:bg-emerald-500/10 text-emerald-700 dark:text-emerald-400">
+                                可用
+                              </span>
+                            )
+                          ) : (
+                            <span className="inline-block rounded-full px-2 py-0.5 text-[10px] font-bold tracking-wider bg-red-50 dark:bg-red-900/20 text-red-600 dark:text-red-400">
+                              失败
+                            </span>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
@@ -787,11 +850,20 @@ export default function Claim() {
                   <input
                     type="number"
                     min={1}
+                    max={maxClaimSetCount}
                     step={1}
                     value={claimSetCount}
                     onChange={(event) => {
                       const nextValue = Number.parseInt(event.target.value, 10);
-                      setClaimSetCount(Number.isFinite(nextValue) && nextValue > 0 ? nextValue : 1);
+                      if (!Number.isFinite(nextValue) || nextValue < 1) {
+                        setClaimSetCount(1);
+                        return;
+                      }
+                      setClaimSetCount(
+                        maxClaimSetCount !== undefined
+                          ? Math.min(nextValue, maxClaimSetCount)
+                          : nextValue,
+                      );
                     }}
                     className={`${inputCls} font-mono`}
                   />
@@ -814,7 +886,20 @@ export default function Claim() {
                   <span className="text-stone-300 dark:text-stone-600">=</span>
                   <span className="font-semibold">{requestedClaimCount}</span>
                   <span>个领题任务</span>
+                  {overQuotaCount > 0 && (
+                    <span className="ml-1 text-orange-500 dark:text-orange-400 font-semibold">
+                      （超出 {overQuotaCount} 套）
+                    </span>
+                  )}
                 </div>
+                {overQuotaCount > 0 && (
+                  <p className="mt-2 text-xs text-orange-500 dark:text-orange-400 flex items-start gap-1.5">
+                    <span className="flex-shrink-0">⚠</span>
+                    <span>
+                      配额剩余 {claimTaskTypeRemaining} 套，超出的 {overQuotaCount} 套将被跳过，不会下载文件。
+                    </span>
+                  </p>
+                )}
               </div>
 
               <div>
@@ -901,52 +986,48 @@ export default function Claim() {
               </div>
 
               <div className="pt-5 mt-5 border-t border-stone-100 dark:border-stone-800">
-                <div className="mb-3 flex items-center justify-between gap-3 text-xs">
-                  <span className="text-stone-500 dark:text-stone-400">
-                    当前将按
-                    <span className="mx-1 font-semibold text-stone-700 dark:text-stone-300">
-                      {getTaskTypePresentation(claimTaskType).label}
-                    </span>
-                    领题
-                    {claimTaskTypeRemaining !== null && (
-                      <span className="ml-1 text-stone-400 dark:text-stone-500">
-                        待完成 {claimTaskTypeRemaining}
-                      </span>
-                    )}
+                <div className="mb-3 text-xs text-stone-500 dark:text-stone-400">
+                  当前将按
+                  <span className="mx-1 font-semibold text-stone-700 dark:text-stone-300">
+                    {getTaskTypePresentation(claimTaskType).label}
                   </span>
-                  {isClaimQuotaBlocked && (
-                    <span className="text-red-500 dark:text-red-400">
-                      {claimTaskTypeRemaining !== null && claimTaskTypeRemaining > 0
-                        ? `当前仅剩 ${claimTaskTypeRemaining} 套，不足以创建 ${requestedClaimCount} 套`
-                        : '当前类型已经完成，请返回修改'}
+                  领题
+                  {claimTaskTypeRemaining !== null && (
+                    <span className="ml-1 text-stone-400 dark:text-stone-500">
+                      · 待完成 {claimTaskTypeRemaining} 套
                     </span>
                   )}
                 </div>
                 <div className="flex items-center justify-between">
-                <button
-                  onClick={() => {
-                    setPhase('input');
-                    setLookups([]);
-                    setSearchError('');
-                  }}
-                  className={btnSecondary}
-                >
-                  返回修改
-                </button>
-                <button
-                  onClick={handleClaim}
-                  disabled={selectedModels.length === 0 || isClaimQuotaBlocked}
-                  className={btnPrimary}
-                >
-                  <Rocket className="w-4 h-4" />
-                  开始领题
-                  {requestedClaimCount > 1 && (
-                    <span className="bg-white/20 dark:bg-black/20 px-1.5 py-0.5 rounded-md text-xs">
-                      {requestedClaimCount}
-                    </span>
-                  )}
-                </button>
+                  <button
+                    onClick={() => {
+                      setPhase('input');
+                      setLookups([]);
+                      setSearchError('');
+                    }}
+                    className={btnSecondary}
+                  >
+                    返回修改
+                  </button>
+                  <button
+                    onClick={handleClaim}
+                    disabled={selectedModels.length === 0 || withinQuotaCount <= 0}
+                    className={btnPrimary}
+                  >
+                    <Rocket className="w-4 h-4" />
+                    开始领题
+                    {withinQuotaCount > 0 && (
+                      <span className="bg-white/20 dark:bg-black/20 px-1.5 py-0.5 rounded-md text-xs">
+                        {withinQuotaCount}
+                      </span>
+                    )}
+                  </button>
                 </div>
+                {withinQuotaCount <= 0 && claimTaskTypeRemaining !== null && (
+                  <p className="mt-3 text-xs text-orange-500 dark:text-orange-400">
+                    ⚠ 配额已耗尽，请返回选择其他任务类型。
+                  </p>
+                )}
                 {searchError && (
                   <p className="mt-3 text-xs text-red-500 dark:text-red-400">{searchError}</p>
                 )}
@@ -978,7 +1059,13 @@ export default function Claim() {
           <div className={cardCls}>
             <div className="flex items-center gap-2 text-sm font-semibold text-stone-700 dark:text-stone-300 mb-3">
               <Loader2 className="w-4 h-4 animate-spin text-slate-500" />
-              正在处理 {claimResults.length} 个领题任务...
+              {(() => {
+                const executing = claimResults.filter((r) => r.status !== 'quota_exceeded').length;
+                const skipped = claimResults.filter((r) => r.status === 'quota_exceeded').length;
+                return skipped > 0
+                  ? `正在执行 ${executing} 套，${skipped} 套因配额跳过...`
+                  : `正在执行 ${executing} 套...`;
+              })()}
             </div>
             {cloneProgressMsg && (
               <p className="text-xs font-mono text-stone-500 dark:text-stone-400 truncate mb-3" title={cloneProgressMsg}>

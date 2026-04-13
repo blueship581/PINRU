@@ -77,6 +77,7 @@ vi.mock('./hooks/useBoardTaskDetail', () => ({
       panelCls: '',
     },
     selectedPromptGenerationError: null,
+    handleSessionSyncEvent: vi.fn(),
     handleStatusChange: vi.fn(),
     handleTaskTypeChange: vi.fn(),
     handlePromptSave: vi.fn(),
@@ -95,6 +96,7 @@ vi.mock('./hooks/useBoardTaskDetail', () => ({
     handleSessionListSave: vi.fn(),
     handleSessionModelChange: vi.fn(),
     handleOpenSubmit: vi.fn(),
+    refreshModelRuns: vi.fn(),
   }),
 }));
 

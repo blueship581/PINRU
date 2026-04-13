@@ -25,7 +25,8 @@ import {
   Wand2,
   X,
 } from 'lucide-react';
-import type { Task, TaskStatus } from '../../store';
+import { useAppStore, type Task, type TaskStatus } from '../../store';
+import type { AiReviewPayload, AiReviewResult, BackgroundJob } from '../../api/job';
 import type { ModelRunFromDB, PromptGenerationStatus, TaskFromDB } from '../../api/task';
 import type { GeneratePromptRequest, LlmProviderConfig } from '../../api/llm';
 import {
@@ -40,12 +41,45 @@ import {
   type EditableTaskSession,
 } from '../lib/sessionUtils';
 import { matchKindLabel } from '../lib/sessionCandidateUtils';
+import { formatModelRunDisplayLabel } from '../lib/sourceFolders';
 import { CopyIconButton } from './CopyIconButton';
 
-export type TaskDetailDrawerTab = 'sessions' | 'prompt' | 'model-runs';
+export type TaskDetailDrawerTab = 'sessions' | 'prompt' | 'model-runs' | 'ai-review';
 export type TaskDetailDrawerModelOption = {
   modelName: string;
   localPath: string | null;
+};
+
+type ParsedAiReviewJob = {
+  job: BackgroundJob;
+  input: AiReviewPayload | null;
+  output: AiReviewResult | null;
+  modelRunId: string | null;
+  localPath: string | null;
+  displayName: string;
+  details: AiReviewStructuredDetails | null;
+};
+
+type AiReviewStructuredDetails = {
+  isCompleted: boolean | null;
+  isSatisfied: boolean | null;
+  projectType: string | null;
+  changeScope: string | null;
+  keyLocations: string | null;
+};
+
+type AiReviewStatusEntry = {
+  key: string;
+  modelRunId: string | null;
+  displayName: string;
+  localPath: string | null;
+  reviewStatus: string;
+  reviewRound: number;
+  reviewNotes: string | null;
+  nextPrompt: string | null;
+  latestJob: ParsedAiReviewJob | null;
+  isUnlinked: boolean;
+  details: AiReviewStructuredDetails | null;
 };
 
 type StatusMetaMap = Record<TaskStatus, {
@@ -121,6 +155,7 @@ const TAB_ITEMS: Array<{ id: TaskDetailDrawerTab; label: string; icon: React.Com
   { id: 'sessions', label: 'Session 视图', icon: LayoutDashboard },
   { id: 'prompt', label: '提示词', icon: Terminal },
   { id: 'model-runs', label: '执行概况', icon: FileText },
+  { id: 'ai-review', label: 'AI复审', icon: CheckCircle2 },
 ];
 
 export default function TaskDetailDrawer({
@@ -177,6 +212,8 @@ export default function TaskDetailDrawer({
   onGeneratePrompt,
   onAiReview,
 }: TaskDetailDrawerProps) {
+  const aiReviewVisible = useAppStore((state) => state.aiReviewVisible);
+  const backgroundJobs = useAppStore((state) => state.backgroundJobs);
   const CONSTRAINT_OPTIONS = ['技术栈约束', '架构约束', '代码风格约束', '非代码回复约束', '业务逻辑约束', '无约束'];
   const SCOPE_OPTIONS = ['单文件', '模块内多文件', '跨模块多文件', '跨系统多模块'];
   const THINKING_OPTIONS: Array<{ value: string; label: string }> = [
@@ -203,9 +240,11 @@ export default function TaskDetailDrawer({
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [showRegenForm, setShowRegenForm] = useState(false);
   const [submitToast, setSubmitToast] = useState(false);
+  const safeLlmProviders = Array.isArray(llmProviders) ? llmProviders : [];
+  const safeSelectedModelRuns = Array.isArray(selectedModelRuns) ? selectedModelRuns : [];
   const promptLlmProviders = useMemo(
-    () => llmProviders.filter((provider) => provider.providerType === 'claude_code_acp'),
-    [llmProviders],
+    () => safeLlmProviders.filter((provider) => provider.providerType === 'claude_code_acp'),
+    [safeLlmProviders],
   );
 
   useEffect(() => {
@@ -328,16 +367,139 @@ export default function TaskDetailDrawer({
     ? getRemainingToCompleteValue(activeSession.taskType)
     : null;
   const executionRuns = useMemo(
-    () => selectedModelRuns.filter((run) => !isNonExecutionModel(run.modelName, sourceModelName)),
-    [selectedModelRuns, sourceModelName],
+    () => safeSelectedModelRuns.filter((run) => !isNonExecutionModel(run.modelName, sourceModelName)),
+    [safeSelectedModelRuns, sourceModelName],
   );
+  const taskAiReviewJobs = useMemo<ParsedAiReviewJob[]>(
+    () =>
+      backgroundJobs
+        .filter((job) => job.jobType === 'ai_review' && job.taskId === selected.id)
+        .slice()
+        .sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0))
+        .map((job) => {
+          const input = parseAiReviewPayload(job.inputPayload);
+          const output = parseAiReviewResult(job.outputPayload);
+          const details =
+            extractAiReviewDetailsFromResult(output) ??
+            parseAiReviewProgressDetails(job.progressMessage);
+          const modelRunId = trimToNull(output?.modelRunId) ?? trimToNull(input?.modelRunId);
+          const localPath = trimToNull(input?.localPath);
+          return {
+            job,
+            input,
+            output,
+            modelRunId,
+            localPath,
+            displayName:
+              trimToNull(output?.modelName) ??
+              trimToNull(input?.modelName) ??
+              basenameOrFallback(localPath, job.id),
+            details,
+          };
+        }),
+    [backgroundJobs, selected.id],
+  );
+  const latestAiReviewJobByKey = useMemo(() => {
+    const map = new Map<string, ParsedAiReviewJob>();
+    taskAiReviewJobs.forEach((entry) => {
+      const key = buildAiReviewKey(entry.modelRunId, entry.localPath);
+      if (key && !map.has(key)) {
+        map.set(key, entry);
+      }
+    });
+    return map;
+  }, [taskAiReviewJobs]);
+  const aiReviewStatusEntries = useMemo<AiReviewStatusEntry[]>(() => {
+    const entries: AiReviewStatusEntry[] = [];
+    const seenRunIds = new Set<string>();
+    const seenPaths = new Set<string>();
+
+    safeSelectedModelRuns.forEach((run) => {
+      const normalizedRunId = trimToNull(run.id);
+      const normalizedPath = trimToNull(run.localPath);
+      if (!normalizedPath && run.reviewStatus === 'none') {
+        return;
+      }
+
+      const latestJob =
+        latestAiReviewJobByKey.get(buildAiReviewKey(run.id, run.localPath) ?? '') ??
+        latestAiReviewJobByKey.get(buildAiReviewKey(null, run.localPath) ?? '') ??
+        null;
+      const latestOutput = latestJob?.output ?? null;
+      entries.push({
+        key: normalizedRunId ?? normalizedPath ?? `run:${run.modelName}`,
+        modelRunId: normalizedRunId,
+        displayName: formatModelRunDisplayLabel(
+          run.modelName,
+          run.localPath,
+          sourceModelName,
+        ),
+        localPath: normalizedPath,
+        reviewStatus: run.reviewStatus,
+        reviewRound: run.reviewRound,
+        reviewNotes:
+          meaningfulAiReviewText(latestOutput?.reviewNotes) ??
+          meaningfulAiReviewText(run.reviewNotes),
+        nextPrompt: meaningfulAiReviewText(latestOutput?.nextPrompt),
+        latestJob,
+        isUnlinked: false,
+        details: latestJob?.details ?? null,
+      });
+      if (normalizedRunId) {
+        seenRunIds.add(normalizedRunId);
+      }
+      if (normalizedPath) {
+        seenPaths.add(normalizedPath);
+      }
+    });
+
+    latestAiReviewJobByKey.forEach((jobEntry, key) => {
+      const normalizedRunId = trimToNull(jobEntry.modelRunId);
+      const normalizedPath = trimToNull(jobEntry.localPath);
+      if ((normalizedRunId && seenRunIds.has(normalizedRunId)) || (normalizedPath && seenPaths.has(normalizedPath))) {
+        return;
+      }
+
+      entries.push({
+        key,
+        modelRunId: normalizedRunId,
+        displayName: jobEntry.displayName,
+        localPath: normalizedPath,
+        reviewStatus: deriveReviewStatusFromJob(jobEntry),
+        reviewRound: jobEntry.output?.reviewRound ?? 0,
+        reviewNotes:
+          meaningfulAiReviewText(jobEntry.output?.reviewNotes) ??
+          trimToNull(jobEntry.job.errorMessage),
+        nextPrompt: meaningfulAiReviewText(jobEntry.output?.nextPrompt),
+        latestJob: jobEntry,
+        isUnlinked: !normalizedRunId,
+        details: jobEntry.details,
+      });
+    });
+
+    return entries;
+  }, [latestAiReviewJobByKey, safeSelectedModelRuns, sourceModelName]);
+  const aiReviewPassCount = aiReviewStatusEntries.filter((entry) => entry.reviewStatus === 'pass').length;
+  const aiReviewWarningCount = aiReviewStatusEntries.filter((entry) => entry.reviewStatus === 'warning').length;
+  const aiReviewRunningCount = aiReviewStatusEntries.filter((entry) => entry.reviewStatus === 'running').length;
+  const availableTabItems = useMemo(
+    () => TAB_ITEMS.filter((tab) => aiReviewVisible || tab.id !== 'ai-review'),
+    [aiReviewVisible],
+  );
+  const effectiveActiveDrawerTab =
+    !aiReviewVisible && activeDrawerTab === 'ai-review'
+      ? 'model-runs'
+      : activeDrawerTab;
   const createdAtText = new Date(selected.createdAt * 1000).toLocaleString('zh-CN');
 
   const handleTabSwitch = (tab: TaskDetailDrawerTab) => {
-    if (tab === activeDrawerTab) {
+    if (!aiReviewVisible && tab === 'ai-review') {
       return;
     }
-    if (activeDrawerTab === 'sessions' && activeSessionLocalId) {
+    if (tab === effectiveActiveDrawerTab) {
+      return;
+    }
+    if (effectiveActiveDrawerTab === 'sessions' && activeSessionLocalId) {
       void onSessionEditorBlur(activeSessionLocalId);
     }
     onTabChange(tab);
@@ -1102,8 +1264,9 @@ export default function TaskDetailDrawer({
   const renderModelRunsWorkspace = () => (
     <div className="h-full overflow-y-auto px-4 py-5 sm:px-6 lg:px-8">
       <div className="mx-auto max-w-5xl space-y-6 pb-6">
-        <div className="grid gap-3 md:grid-cols-4">
-          <InfoTile label="模型副本">{String(executionRuns.length)}</InfoTile>
+        <div className="grid gap-3 md:grid-cols-5">
+          <InfoTile label="模型记录">{String(safeSelectedModelRuns.length)}</InfoTile>
+          <InfoTile label="执行副本">{String(executionRuns.length)}</InfoTile>
           <InfoTile label="待处理">{String(executionRuns.filter((run) => run.status === 'pending').length)}</InfoTile>
           <InfoTile label="执行中">{String(executionRuns.filter((run) => run.status === 'running').length)}</InfoTile>
           <InfoTile label="已完成">{String(executionRuns.filter((run) => run.status === 'done').length)}</InfoTile>
@@ -1122,18 +1285,23 @@ export default function TaskDetailDrawer({
         <SectionBlock
           icon={LayoutDashboard}
           title="模型执行"
-          description="跟踪每个模型副本的目录、分支和 PR 状态。"
+          description="模型记录包含源码模型和执行副本；执行副本才会计入看板上的执行进度。"
         >
-          {selectedModelRuns.length === 0 ? (
+          {safeSelectedModelRuns.length === 0 ? (
             <div className="rounded-2xl border border-dashed border-zinc-800 bg-zinc-900/20 px-4 py-10 text-center text-sm text-zinc-500">
-              当前任务还没有模型记录
+              当前任务还没有模型记录。先到项目配置里的“模型列表”添加源码模型和执行副本。
             </div>
           ) : (
             <div className="space-y-3">
-              {selectedModelRuns.map((run) => {
+              {safeSelectedModelRuns.map((run) => {
                 const presentation = modelRunPresentation(run.status);
                 const reviewMeta = reviewStatusPresentation(run.reviewStatus, run.reviewRound);
                 const codeLink = resolveModelRunCodeLink(run, sourceModelName);
+                const displayLabel = formatModelRunDisplayLabel(
+                  run.modelName,
+                  run.localPath,
+                  sourceModelName,
+                );
                 return (
                   <div
                     key={run.id}
@@ -1147,7 +1315,7 @@ export default function TaskDetailDrawer({
                       <div className="min-w-0">
                         <div className="flex flex-wrap items-center gap-2">
                           <presentation.icon className={clsx('h-4 w-4', presentation.iconCls)} />
-                          <span className="font-mono text-sm text-zinc-100">{run.modelName}</span>
+                          <span className="font-mono text-sm text-zinc-100">{displayLabel}</span>
                           {isSourceModel(run.modelName, sourceModelName) && <WorkspaceBadge tone="neutral">源码</WorkspaceBadge>}
                           {isOriginModel(run.modelName) && <WorkspaceBadge tone="neutral">ORIGIN</WorkspaceBadge>}
                           <span className={clsx('inline-flex rounded-full px-2 py-0.5 text-[10px] font-semibold', presentation.badgeCls)}>
@@ -1176,19 +1344,39 @@ export default function TaskDetailDrawer({
                           <p className="mt-2 text-[11px] text-amber-400/80 line-clamp-2">{run.reviewNotes}</p>
                         )}
                       </div>
-                      {codeLink.url ? (
-                        <a
-                          href={codeLink.url}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="inline-flex items-center gap-1.5 text-xs font-medium text-zinc-300 transition hover:text-white"
-                        >
-                          {codeLink.label === '源代码地址' ? '打开源码' : '打开代码'}
-                          <ExternalLink className="h-3.5 w-3.5" />
-                        </a>
-                      ) : (
-                        <span className="text-xs text-zinc-500">未生成代码地址</span>
-                      )}
+                      <div className="flex flex-col items-start gap-2 lg:items-end">
+                        {onAiReview && aiReviewVisible && (
+                          <button
+                            type="button"
+                            aria-label={run.reviewStatus === 'running' ? '复审中…' : 'AI 复审'}
+                            disabled={!run.localPath || run.reviewStatus === 'running'}
+                            onClick={() => {
+                              onAiReview(run);
+                              handleTabSwitch('ai-review');
+                            }}
+                            title={!run.localPath ? '需要先记录副本目录后才能发起 AI 复审' : undefined}
+                            className="inline-flex items-center gap-1.5 rounded-xl border border-violet-500/25 bg-violet-500/10 px-3 py-1.5 text-xs font-medium text-violet-200 transition hover:bg-violet-500/15 disabled:cursor-not-allowed disabled:opacity-40"
+                          >
+                            <span className="flex h-5 w-5 items-center justify-center rounded-md border border-violet-500/20 bg-violet-500/10 text-[10px] font-semibold text-violet-300">
+                              AI
+                            </span>
+                            {run.reviewStatus === 'running' ? '复审中…' : 'AI 复审'}
+                          </button>
+                        )}
+                        {codeLink.url ? (
+                          <a
+                            href={codeLink.url}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="inline-flex items-center gap-1.5 text-xs font-medium text-zinc-300 transition hover:text-white"
+                          >
+                            {codeLink.label === '源代码地址' ? '打开源码' : '打开代码'}
+                            <ExternalLink className="h-3.5 w-3.5" />
+                          </a>
+                        ) : (
+                          <span className="text-xs text-zinc-500">未生成代码地址</span>
+                        )}
+                      </div>
                     </div>
                   </div>
                 );
@@ -1197,7 +1385,7 @@ export default function TaskDetailDrawer({
           )}
 
           {/* Model run right-click context menu */}
-          {runContextMenu && (
+          {runContextMenu && aiReviewVisible && (
             <>
               <div
                 className="fixed inset-0 z-40"
@@ -1216,7 +1404,10 @@ export default function TaskDetailDrawer({
                     type="button"
                     disabled={!runContextMenu.run.localPath || runContextMenu.run.reviewStatus === 'running'}
                     onClick={() => {
-                      if (onAiReview) onAiReview(runContextMenu.run);
+                      if (onAiReview) {
+                        onAiReview(runContextMenu.run);
+                        handleTabSwitch('ai-review');
+                      }
                       setRunContextMenu(null);
                     }}
                     className="flex w-full items-center gap-2.5 px-3.5 py-2.5 text-left text-[13px] font-medium text-zinc-200 transition hover:bg-zinc-800/70 disabled:opacity-40 disabled:cursor-not-allowed cursor-default"
@@ -1229,6 +1420,234 @@ export default function TaskDetailDrawer({
                 </div>
               </div>
             </>
+          )}
+        </SectionBlock>
+      </div>
+    </div>
+  );
+
+  const renderAiReviewWorkspace = () => (
+    <div className="h-full overflow-y-auto px-4 py-5 sm:px-6 lg:px-8">
+      <div className="mx-auto max-w-5xl space-y-6 pb-6">
+        <div className="grid gap-3 md:grid-cols-5">
+          <InfoTile label="已跟踪目录">{String(aiReviewStatusEntries.length)}</InfoTile>
+          <InfoTile label="复审通过">{String(aiReviewPassCount)}</InfoTile>
+          <InfoTile label="复审未过">{String(aiReviewWarningCount)}</InfoTile>
+          <InfoTile label="复审中">{String(aiReviewRunningCount)}</InfoTile>
+          <InfoTile label="最近任务">{String(taskAiReviewJobs.length)}</InfoTile>
+        </div>
+
+        <SectionBlock
+          icon={CheckCircle2}
+          title="当前复审状态"
+          description="这里显示当前任务下各个模型或目录的最新复审状态。直接右键发起的目录复审，结果会同步出现在下方任务记录里。"
+        >
+          {aiReviewStatusEntries.length === 0 ? (
+            <div className="rounded-2xl border border-dashed border-zinc-800 bg-zinc-900/20 px-4 py-10 text-center text-sm text-zinc-500">
+              还没有可展示的复审结果。先在任务卡右键菜单或“执行概况”里发起一次 AI 复审。
+            </div>
+          ) : (
+            <div className="space-y-3">
+              {aiReviewStatusEntries.map((entry) => {
+                const reviewMeta = reviewStatusPresentation(entry.reviewStatus, entry.reviewRound);
+                const latestNotes = entry.reviewNotes;
+                const latestNextPrompt = entry.nextPrompt;
+                const latestJob = entry.latestJob;
+                const details = entry.details;
+                const latestJobStatus = latestJob
+                  ? backgroundJobStatusPresentation(latestJob.job.status)
+                  : null;
+
+                return (
+                  <div
+                    key={entry.key}
+                    className="rounded-2xl border border-zinc-800/70 bg-zinc-900/35 px-4 py-4"
+                  >
+                    <div className="min-w-0">
+                      <div>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="font-mono text-sm text-zinc-100">{entry.displayName}</span>
+                          {entry.reviewStatus === 'none' ? (
+                            <WorkspaceBadge tone="neutral">未复审</WorkspaceBadge>
+                          ) : (
+                            <span
+                              className={clsx('inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold', reviewMeta.badgeCls)}
+                              title={entry.reviewNotes ?? undefined}
+                            >
+                              {reviewMeta.icon}
+                              {reviewMeta.label}
+                            </span>
+                          )}
+                          {entry.isUnlinked && (
+                            <WorkspaceBadge tone="warning">未关联模型</WorkspaceBadge>
+                          )}
+                          {latestJobStatus && (
+                            <WorkspaceBadge tone={latestJobStatus.tone}>
+                              任务{latestJobStatus.label}
+                            </WorkspaceBadge>
+                          )}
+                        </div>
+                        <div className="mt-3 space-y-1.5 text-xs text-zinc-400">
+                          <p className="break-all">{entry.localPath || '未记录目录'}</p>
+                          {latestJob && (
+                            <p>
+                              最近复审：{formatAiReviewTimestamp(latestJob.job.finishedAt ?? latestJob.job.startedAt ?? latestJob.job.createdAt)}
+                            </p>
+                          )}
+                        </div>
+                        {details && (
+                          <div className="mt-3 flex flex-wrap gap-2">
+                            <AiReviewDecisionBadge label="是否完成" value={details.isCompleted} />
+                            <AiReviewDecisionBadge label="是否满意" value={details.isSatisfied} />
+                            {details.projectType && (
+                              <WorkspaceBadge tone="blue">{details.projectType}</WorkspaceBadge>
+                            )}
+                            {details.changeScope && (
+                              <WorkspaceBadge tone="neutral">{details.changeScope}</WorkspaceBadge>
+                            )}
+                          </div>
+                        )}
+                        {details?.keyLocations && (
+                          <div className="mt-3 rounded-2xl border border-zinc-800/70 bg-black/20 px-3 py-2.5">
+                            <p className="text-[10px] font-semibold uppercase tracking-[0.22em] text-zinc-500">
+                              关键代码位置
+                            </p>
+                            <p className="mt-2 break-all font-mono text-xs leading-6 text-zinc-300">
+                              {details.keyLocations}
+                            </p>
+                          </div>
+                        )}
+                      </div>
+                      {(latestNotes || latestNextPrompt) && (
+                        <div className="mt-3 grid gap-3 lg:grid-cols-2">
+                          {latestNotes && (
+                            <AiReviewTextCard
+                              title="不满意点评"
+                              value={latestNotes}
+                              copyLabel={`复制 ${entry.displayName} 不满意点评`}
+                              tone="warning"
+                            />
+                          )}
+                          {latestNextPrompt && (
+                            <AiReviewTextCard
+                              title="下一轮提示词"
+                              value={latestNextPrompt}
+                              copyLabel={`复制 ${entry.displayName} 下一轮提示词`}
+                              tone="indigo"
+                            />
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </SectionBlock>
+
+        <SectionBlock
+          icon={FileText}
+          title="最近复审记录"
+          description="保留每次 ai_review 的后台任务结果，包括未关联模型的子目录复审。"
+          badge={<WorkspaceBadge tone="neutral">最近 {taskAiReviewJobs.length} 条</WorkspaceBadge>}
+        >
+          {taskAiReviewJobs.length === 0 ? (
+            <div className="rounded-2xl border border-dashed border-zinc-800 bg-zinc-900/20 px-4 py-10 text-center text-sm text-zinc-500">
+              当前任务还没有 AI 复审记录。
+            </div>
+          ) : (
+            <div className="space-y-3">
+              {taskAiReviewJobs.map((entry) => {
+                const taskStatus = backgroundJobStatusPresentation(entry.job.status);
+                const reviewMeta = entry.output
+                  ? reviewStatusPresentation(entry.output.reviewStatus, entry.output.reviewRound)
+                  : null;
+                const reviewNotes = meaningfulAiReviewText(entry.output?.reviewNotes);
+                const nextPrompt = meaningfulAiReviewText(entry.output?.nextPrompt);
+                const progressMessage = trimToNull(entry.job.progressMessage);
+                const errorMessage = trimToNull(entry.job.errorMessage);
+                const details = entry.details;
+
+                return (
+                  <div
+                    key={entry.job.id}
+                    className="rounded-2xl border border-zinc-800/70 bg-zinc-950/60 px-4 py-4"
+                  >
+                    <div className="min-w-0">
+                      <div>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="font-mono text-sm text-zinc-100">{entry.displayName}</span>
+                          <WorkspaceBadge tone={taskStatus.tone}>{taskStatus.label}</WorkspaceBadge>
+                          {reviewMeta && (
+                            <span className={clsx('inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold', reviewMeta.badgeCls)}>
+                              {reviewMeta.icon}
+                              {reviewMeta.label}
+                            </span>
+                          )}
+                          {!entry.modelRunId && (
+                            <WorkspaceBadge tone="warning">未关联模型</WorkspaceBadge>
+                          )}
+                        </div>
+                        <div className="mt-3 space-y-1.5 text-xs text-zinc-400">
+                          <p className="break-all">{entry.localPath || '未记录目录'}</p>
+                          <p>提交时间：{formatAiReviewTimestamp(entry.job.createdAt)}</p>
+                          <p>完成时间：{formatAiReviewTimestamp(entry.job.finishedAt)}</p>
+                        </div>
+                        {details && (
+                          <div className="mt-3 flex flex-wrap gap-2">
+                            <AiReviewDecisionBadge label="是否完成" value={details.isCompleted} />
+                            <AiReviewDecisionBadge label="是否满意" value={details.isSatisfied} />
+                            {details.projectType && (
+                              <WorkspaceBadge tone="blue">{details.projectType}</WorkspaceBadge>
+                            )}
+                            {details.changeScope && (
+                              <WorkspaceBadge tone="neutral">{details.changeScope}</WorkspaceBadge>
+                            )}
+                          </div>
+                        )}
+                        {progressMessage && entry.job.status !== 'done' && entry.job.status !== 'error' && (
+                          <p className="mt-3 text-sm leading-6 text-zinc-300">{progressMessage}</p>
+                        )}
+                        {details?.keyLocations && (
+                          <div className="mt-3 rounded-2xl border border-zinc-800/70 bg-black/20 px-3 py-2.5">
+                            <p className="text-[10px] font-semibold uppercase tracking-[0.22em] text-zinc-500">
+                              关键代码位置
+                            </p>
+                            <p className="mt-2 break-all font-mono text-xs leading-6 text-zinc-300">
+                              {details.keyLocations}
+                            </p>
+                          </div>
+                        )}
+                        {errorMessage && (
+                          <p className="mt-3 text-sm leading-6 text-red-300">{errorMessage}</p>
+                        )}
+                      </div>
+                      {(reviewNotes || nextPrompt) && (
+                        <div className="mt-3 grid gap-3 lg:grid-cols-2">
+                          {reviewNotes && (
+                            <AiReviewTextCard
+                              title="不满意点评"
+                              value={reviewNotes}
+                              copyLabel={`复制 ${entry.displayName} 不满意点评`}
+                              tone="warning"
+                            />
+                          )}
+                          {nextPrompt && (
+                            <AiReviewTextCard
+                              title="下一轮提示词"
+                              value={nextPrompt}
+                              copyLabel={`复制 ${entry.displayName} 下一轮提示词`}
+                              tone="indigo"
+                            />
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
           )}
         </SectionBlock>
       </div>
@@ -1293,9 +1712,9 @@ export default function TaskDetailDrawer({
 
               <div className="flex flex-wrap items-center gap-3">
                 <div className="inline-flex rounded-xl border border-zinc-800 bg-zinc-900/80 p-1">
-                  {TAB_ITEMS.map((tab) => {
+                  {availableTabItems.map((tab) => {
                     const Icon = tab.icon;
-                    const active = activeDrawerTab === tab.id;
+                    const active = effectiveActiveDrawerTab === tab.id;
                     return (
                       <button
                         key={tab.id}
@@ -1344,9 +1763,10 @@ export default function TaskDetailDrawer({
               <div className="flex h-full items-center justify-center text-sm text-zinc-500">正在加载任务详情…</div>
             ) : (
               <>
-                {activeDrawerTab === 'sessions' && renderSessionsWorkspace()}
-                {activeDrawerTab === 'prompt' && renderPromptWorkspace()}
-                {activeDrawerTab === 'model-runs' && renderModelRunsWorkspace()}
+                {effectiveActiveDrawerTab === 'sessions' && renderSessionsWorkspace()}
+                {effectiveActiveDrawerTab === 'prompt' && renderPromptWorkspace()}
+                {effectiveActiveDrawerTab === 'model-runs' && renderModelRunsWorkspace()}
+                {effectiveActiveDrawerTab === 'ai-review' && aiReviewVisible && renderAiReviewWorkspace()}
               </>
             )}
           </div>
@@ -1653,6 +2073,72 @@ function BinaryChoiceGroup({
   );
 }
 
+function AiReviewDecisionBadge({
+  label,
+  value,
+}: {
+  label: string;
+  value: boolean | null;
+}) {
+  if (value === null) {
+    return <WorkspaceBadge tone="neutral">{label}：未记录</WorkspaceBadge>;
+  }
+
+  return (
+    <WorkspaceBadge tone={value ? 'success' : 'danger'}>
+      {label}：{value ? '是' : '否'}
+    </WorkspaceBadge>
+  );
+}
+
+function AiReviewTextCard({
+  title,
+  value,
+  copyLabel,
+  tone,
+}: {
+  title: string;
+  value: string;
+  copyLabel: string;
+  tone: 'warning' | 'indigo';
+}) {
+  const styles = tone === 'warning'
+    ? {
+      panel: 'border-amber-500/20 bg-amber-500/10',
+      title: 'text-amber-300',
+      text: 'text-amber-100',
+      button:
+        'border-amber-500/20 bg-amber-500/10 text-amber-200 hover:border-amber-400/40 hover:bg-amber-500/15 hover:text-amber-100',
+    }
+    : {
+      panel: 'border-indigo-500/20 bg-indigo-500/10',
+      title: 'text-indigo-300',
+      text: 'text-indigo-100',
+      button:
+        'border-indigo-500/20 bg-indigo-500/10 text-indigo-200 hover:border-indigo-400/40 hover:bg-indigo-500/15 hover:text-indigo-100',
+    };
+
+  return (
+    <div className={clsx('rounded-2xl border px-4 py-3', styles.panel)}>
+      <div className="flex items-center justify-between gap-3">
+        <p className={clsx('text-[10px] font-semibold uppercase tracking-[0.22em]', styles.title)}>
+          {title}
+        </p>
+        <CopyIconButton
+          value={value}
+          label={copyLabel}
+          className={clsx(
+            'inline-flex h-7 w-7 items-center justify-center rounded-lg transition',
+            styles.button,
+          )}
+          iconClassName="h-3.5 w-3.5"
+        />
+      </div>
+      <p className={clsx('mt-2 text-sm leading-6', styles.text)}>{value}</p>
+    </div>
+  );
+}
+
 function taskStatusTone(status: TaskStatus) {
   switch (status) {
     case 'Claimed':
@@ -1723,6 +2209,186 @@ function resolveModelRunCodeLink(run: ModelRunFromDB, sourceModelName: string) {
     label: '代码地址',
     url: run.prUrl,
   };
+}
+
+function trimToNull(value: string | null | undefined) {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : null;
+}
+
+function basenameOrFallback(path: string | null, fallback: string) {
+  if (!path) {
+    return fallback;
+  }
+  const normalized = path.replace(/\/+$/, '');
+  const parts = normalized.split('/');
+  return parts[parts.length - 1] || fallback;
+}
+
+function parseAiReviewPayload(raw: string | null | undefined): AiReviewPayload | null {
+  const text = trimToNull(raw);
+  if (!text) {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(text) as Partial<AiReviewPayload>;
+    return {
+      modelRunId: parsed.modelRunId ?? null,
+      modelName: typeof parsed.modelName === 'string' ? parsed.modelName : '',
+      localPath: typeof parsed.localPath === 'string' ? parsed.localPath : '',
+    };
+  } catch {
+    return null;
+  }
+}
+
+function parseAiReviewResult(raw: string | null | undefined): AiReviewResult | null {
+  const text = trimToNull(raw);
+  if (!text) {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(text) as Partial<AiReviewResult>;
+    if (
+      (parsed.reviewStatus !== 'pass' && parsed.reviewStatus !== 'warning') ||
+      typeof parsed.modelName !== 'string'
+    ) {
+      return null;
+    }
+    return {
+      modelRunId: typeof parsed.modelRunId === 'string' ? parsed.modelRunId : '',
+      modelName: parsed.modelName,
+      reviewStatus: parsed.reviewStatus,
+      reviewRound: typeof parsed.reviewRound === 'number' ? parsed.reviewRound : 0,
+      reviewNotes: typeof parsed.reviewNotes === 'string' ? parsed.reviewNotes : '',
+      nextPrompt: typeof parsed.nextPrompt === 'string' ? parsed.nextPrompt : '',
+      isCompleted: typeof parsed.isCompleted === 'boolean' ? parsed.isCompleted : undefined,
+      isSatisfied: typeof parsed.isSatisfied === 'boolean' ? parsed.isSatisfied : undefined,
+      projectType: typeof parsed.projectType === 'string' ? parsed.projectType : undefined,
+      changeScope: typeof parsed.changeScope === 'string' ? parsed.changeScope : undefined,
+      keyLocations: typeof parsed.keyLocations === 'string' ? parsed.keyLocations : undefined,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function extractAiReviewDetailsFromResult(
+  result: AiReviewResult | null | undefined,
+): AiReviewStructuredDetails | null {
+  if (!result) {
+    return null;
+  }
+
+  const details: AiReviewStructuredDetails = {
+    isCompleted: typeof result.isCompleted === 'boolean' ? result.isCompleted : null,
+    isSatisfied: typeof result.isSatisfied === 'boolean' ? result.isSatisfied : null,
+    projectType: trimToNull(result.projectType),
+    changeScope: trimToNull(result.changeScope),
+    keyLocations: trimToNull(result.keyLocations),
+  };
+
+  return hasAiReviewDetails(details) ? details : null;
+}
+
+function parseAiReviewProgressDetails(
+  raw: string | null | undefined,
+): AiReviewStructuredDetails | null {
+  const text = trimToNull(raw);
+  if (!text) {
+    return null;
+  }
+
+  const jsonStart = text.indexOf('{');
+  if (jsonStart < 0) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(text.slice(jsonStart)) as Partial<AiReviewResult>;
+    return extractAiReviewDetailsFromResult({
+      modelRunId: typeof parsed.modelRunId === 'string' ? parsed.modelRunId : '',
+      modelName: typeof parsed.modelName === 'string' ? parsed.modelName : '',
+      reviewStatus: parsed.reviewStatus === 'pass' || parsed.reviewStatus === 'warning' ? parsed.reviewStatus : 'warning',
+      reviewRound: typeof parsed.reviewRound === 'number' ? parsed.reviewRound : 0,
+      reviewNotes: typeof parsed.reviewNotes === 'string' ? parsed.reviewNotes : '',
+      nextPrompt: typeof parsed.nextPrompt === 'string' ? parsed.nextPrompt : '',
+      isCompleted: typeof parsed.isCompleted === 'boolean' ? parsed.isCompleted : undefined,
+      isSatisfied: typeof parsed.isSatisfied === 'boolean' ? parsed.isSatisfied : undefined,
+      projectType: typeof parsed.projectType === 'string' ? parsed.projectType : undefined,
+      changeScope: typeof parsed.changeScope === 'string' ? parsed.changeScope : undefined,
+      keyLocations: typeof parsed.keyLocations === 'string' ? parsed.keyLocations : undefined,
+    });
+  } catch {
+    return null;
+  }
+}
+
+function hasAiReviewDetails(details: AiReviewStructuredDetails) {
+  return Boolean(
+    details.projectType ||
+      details.changeScope ||
+      details.keyLocations ||
+      details.isCompleted !== null ||
+      details.isSatisfied !== null,
+  );
+}
+
+function meaningfulAiReviewText(value: string | null | undefined) {
+  const trimmed = trimToNull(value);
+  if (!trimmed || trimmed === '无') {
+    return null;
+  }
+  return trimmed;
+}
+
+function buildAiReviewKey(modelRunId: string | null | undefined, localPath: string | null | undefined) {
+  const normalizedRunId = trimToNull(modelRunId);
+  if (normalizedRunId) {
+    return `run:${normalizedRunId}`;
+  }
+  const normalizedPath = trimToNull(localPath);
+  if (normalizedPath) {
+    return `path:${normalizedPath}`;
+  }
+  return null;
+}
+
+function deriveReviewStatusFromJob(entry: ParsedAiReviewJob) {
+  if (entry.output?.reviewStatus === 'pass' || entry.output?.reviewStatus === 'warning') {
+    return entry.output.reviewStatus;
+  }
+  if (entry.job.status === 'running' || entry.job.status === 'pending') {
+    return 'running';
+  }
+  if (entry.job.status === 'error' || entry.job.status === 'cancelled') {
+    return 'warning';
+  }
+  return 'none';
+}
+
+function backgroundJobStatusPresentation(status: BackgroundJob['status']) {
+  switch (status) {
+    case 'pending':
+      return { label: '排队中', tone: 'neutral' as const };
+    case 'running':
+      return { label: '执行中', tone: 'purple' as const };
+    case 'done':
+      return { label: '已完成', tone: 'success' as const };
+    case 'error':
+      return { label: '失败', tone: 'danger' as const };
+    case 'cancelled':
+      return { label: '已取消', tone: 'warning' as const };
+    default:
+      return { label: status, tone: 'neutral' as const };
+  }
+}
+
+function formatAiReviewTimestamp(timestamp: number | null | undefined) {
+  if (!timestamp) {
+    return '未记录';
+  }
+  return new Date(timestamp * 1000).toLocaleString('zh-CN');
 }
 
 function reviewStatusPresentation(reviewStatus: string, reviewRound: number) {

@@ -107,3 +107,24 @@ export function getPathBase(path: string | null | undefined): string {
   const parts = path.split(/[\\/]+/).filter(Boolean);
   return parts[parts.length - 1] ?? '';
 }
+
+export function formatModelRunDisplayLabel(
+  modelName: string,
+  localPath: string | null | undefined,
+  sourceModelName = 'ORIGIN',
+): string {
+  const trimmedModelName = modelName.trim();
+  const pathBase = getPathBase(localPath);
+  const normalizedModelName = trimmedModelName.toUpperCase();
+  const normalizedSourceModelName = sourceModelName.trim().toUpperCase() || 'ORIGIN';
+  const isSourceModel =
+    normalizedModelName === normalizedSourceModelName || normalizedModelName === 'ORIGIN';
+
+  if (!trimmedModelName) {
+    return pathBase;
+  }
+  if (!isSourceModel || !pathBase || pathBase.toUpperCase() === normalizedModelName) {
+    return trimmedModelName;
+  }
+  return `${pathBase} · ${trimmedModelName}`;
+}
