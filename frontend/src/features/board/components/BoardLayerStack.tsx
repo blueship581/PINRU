@@ -63,6 +63,7 @@ export function BoardLayerStack({
   onCloseProjectPanel,
   onProjectSaved,
   onAiReview,
+  onDeleteAiReviewRecord,
 }: {
   taskCardContextMenu: TaskCardContextMenuState | null;
   taskCardContextMenuRef: RefObject<HTMLDivElement | null>;
@@ -101,6 +102,7 @@ export function BoardLayerStack({
   onCloseProjectPanel: () => void;
   onProjectSaved: (updated: ProjectConfig) => void;
   onAiReview?: (run: import('../../../api/task').ModelRunFromDB) => void;
+  onDeleteAiReviewRecord?: (jobId: string) => void | Promise<void>;
 }) {
   return (
     <AnimatePresence>
@@ -230,6 +232,7 @@ export function BoardLayerStack({
           promptGenerating={detail.promptGenerating}
           onGeneratePrompt={(config) => void detail.handleGeneratePrompt(config)}
           onAiReview={onAiReview}
+          onDeleteAiReviewRecord={onDeleteAiReviewRecord}
         />
       )}
 

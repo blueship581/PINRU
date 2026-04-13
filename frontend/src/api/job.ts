@@ -126,3 +126,7 @@ export async function retryJob(id: string): Promise<BackgroundJob> {
 export async function cancelJob(id: string): Promise<void> {
   return callService('JobService', 'CancelJob', id);
 }
+
+export async function deleteAiReviewJob(id: string): Promise<void> {
+  return callService('JobService', 'DeleteAiReviewJob', id);
+}

@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from '@testing-library/react';
+import { act, fireEvent, render, screen } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import TaskDetailDrawer from './TaskDetailDrawer';
 import { useAppStore, type Task } from '../../store';
@@ -173,7 +173,7 @@ function createBackgroundJob(overrides: Partial<BackgroundJob> = {}): Background
       modelName: 'model-a',
       reviewStatus: 'warning',
       reviewRound: 2,
-      reviewNotes: '导出逻辑还缺异常兜底',
+      reviewNotes: '导出逻辑还缺异常处理',
       nextPrompt: '把导出失败提示和空数据保护补齐，再复审一轮。',
     }),
     retryCount: overrides.retryCount ?? 0,
@@ -187,16 +187,20 @@ function createBackgroundJob(overrides: Partial<BackgroundJob> = {}): Background
 
 beforeEach(() => {
   useAppStore.setState({ backgroundJobs: [], aiReviewVisible: false });
+  vi.restoreAllMocks();
 });
 
 describe('TaskDetailDrawer session copy affordance', () => {
-  it('copies the active session id from the Session ID tile icon', () => {
+  it('keeps session id copy on the keyboard shortcut after the session card switched to user conversation', () => {
     const { draft, onCopySessionId } = renderDrawer();
 
-    fireEvent.click(screen.getByRole('button', { name: '复制 Session ID' }));
+    expect(screen.queryByRole('button', { name: '复制 Session ID' })).not.toBeInTheDocument();
+    expect(screen.getByText('用户对话')).toBeInTheDocument();
+    expect(screen.getByLabelText('编辑 Session ID')).toHaveValue(draft.sessionId);
+
+    fireEvent.keyDown(window, { key: 'C', ctrlKey: true, shiftKey: true });
 
     expect(onCopySessionId).toHaveBeenCalledWith(draft.localId, draft.sessionId);
-    expect(screen.getByText('快捷复制：⌘/Ctrl + Shift + C')).toBeInTheDocument();
   });
 
   it('supports the keyboard shortcut outside editable fields', () => {
@@ -472,7 +476,7 @@ describe('TaskDetailDrawer session copy affordance', () => {
           modelName: '01874-代码生成',
           reviewStatus: 'warning',
           reviewRound: 2,
-          reviewNotes: '导出逻辑还缺异常兜底',
+          reviewNotes: '导出逻辑还缺异常处理',
           nextPrompt: '把导出失败提示和空数据保护补齐，再复审一轮。',
         }),
       })],
@@ -548,7 +552,7 @@ describe('TaskDetailDrawer session copy affordance', () => {
 
     expect(screen.getByText('当前复审状态')).toBeInTheDocument();
     expect(screen.getByText('最近复审记录')).toBeInTheDocument();
-    expect(screen.getAllByText('导出逻辑还缺异常兜底')).toHaveLength(2);
+    expect(screen.getAllByText('导出逻辑还缺异常处理')).toHaveLength(2);
     expect(screen.getAllByText('把导出失败提示和空数据保护补齐，再复审一轮。')).toHaveLength(2);
     expect(screen.getAllByText('未关联模型').length).toBeGreaterThan(0);
     expect(screen.getAllByText('第 2 轮').length).toBeGreaterThan(0);
@@ -563,5 +567,91 @@ describe('TaskDetailDrawer session copy affordance', () => {
     expect(screen.getAllByText('下一轮提示词')).toHaveLength(2);
     expect(screen.getAllByRole('button', { name: '复制 01874-代码生成 不满意点评' })).toHaveLength(2);
     expect(screen.getAllByRole('button', { name: '复制 01874-代码生成 下一轮提示词' })).toHaveLength(2);
+  });
+
+  it('supports deleting a finished ai review record from the dedicated tab', async () => {
+    useAppStore.setState({ aiReviewVisible: true });
+    useAppStore.setState({
+      backgroundJobs: [createBackgroundJob()],
+    });
+    const onDeleteAiReviewRecord = vi.fn().mockImplementation(
+      () => new Promise<void>(() => {}),
+    );
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+
+    render(
+      <TaskDetailDrawer
+        selected={createTask()}
+        selectedTaskDetail={createTaskDetail()}
+        selectedModelRuns={[createModelRun({ reviewStatus: 'warning', reviewRound: 2 })]}
+        drawerLoading={false}
+        drawerError=""
+        statusChanging={false}
+        taskTypeChanging={false}
+        sessionListDraft={[createSessionDraft('Bug修复')]}
+        sessionListSaving={false}
+        sessionSaveState="idle"
+        hasUnsavedSessionChanges={false}
+        sessionExtracting={false}
+        openSessionEditors={new Set()}
+        copiedSessionId={null}
+        promptDraft=""
+        promptSaving={false}
+        promptSaveState="idle"
+        promptCopied={false}
+        activeDrawerTab="ai-review"
+        sessionModelOptions={[]}
+        selectedSessionModelName=""
+        sessionTaskTypeOptions={['Bug修复']}
+        taskTypeRemainingToCompleteByType={{ Bug修复: 8 }}
+        sourceModelName="ORIGIN"
+        selectedPromptGenerationStatus={'idle' as PromptGenerationStatus}
+        selectedPromptGenerationMeta={{
+          label: '空闲',
+          badgeCls: '',
+          panelCls: '',
+        }}
+        selectedPromptGenerationError={null}
+        escCloseHintVisible={false}
+        statusMeta={{
+          Claimed: { label: '已领取', dotCls: 'bg-blue-500', badgeCls: '' },
+          Downloading: { label: '下载中', dotCls: 'bg-amber-500', badgeCls: '' },
+          Downloaded: { label: '已下载', dotCls: 'bg-zinc-500', badgeCls: '' },
+          PromptReady: { label: '提示词完成', dotCls: 'bg-indigo-500', badgeCls: '' },
+          ExecutionCompleted: { label: '执行完成', dotCls: 'bg-cyan-500', badgeCls: '' },
+          Submitted: { label: '已提交', dotCls: 'bg-emerald-500', badgeCls: '' },
+          Error: { label: '错误', dotCls: 'bg-red-500', badgeCls: '' },
+        }}
+        statusOptions={['Claimed', 'Downloading', 'Downloaded', 'PromptReady', 'ExecutionCompleted', 'Submitted', 'Error']}
+        onClose={() => {}}
+        onStatusChange={() => {}}
+        onTabChange={() => {}}
+        onAddSession={() => {}}
+        onAutoExtractSessions={() => {}}
+        onSessionChange={() => {}}
+        onToggleSessionEditor={() => {}}
+        onSessionEditorBlur={() => {}}
+        onCopySessionId={() => {}}
+        onRemoveSession={() => {}}
+        onResetSessions={() => {}}
+        onSaveSessionList={() => {}}
+        onPromptDraftChange={() => {}}
+        onPromptCopy={() => {}}
+        onPromptReset={() => {}}
+        onPromptSave={() => {}}
+        onSessionModelChange={() => {}}
+        onOpenSubmit={() => {}}
+        llmProviders={[]}
+        promptGenerating={false}
+        onGeneratePrompt={() => {}}
+        onDeleteAiReviewRecord={onDeleteAiReviewRecord}
+      />,
+    );
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: '删除 model-a 复审记录' }));
+    });
+
+    expect(onDeleteAiReviewRecord).toHaveBeenCalledWith('job-1');
   });
 });

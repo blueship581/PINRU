@@ -13,7 +13,6 @@ import {
   FileText,
   Hash,
   LayoutDashboard,
-  MessageSquare,
   PlayCircle,
   Plus,
   RefreshCw,
@@ -149,6 +148,7 @@ interface TaskDetailDrawerProps {
   promptGenerating: boolean;
   onGeneratePrompt: (config: Omit<GeneratePromptRequest, 'taskId'>) => void | Promise<void>;
   onAiReview?: (run: ModelRunFromDB) => void;
+  onDeleteAiReviewRecord?: (jobId: string) => void | Promise<void>;
 }
 
 const TAB_ITEMS: Array<{ id: TaskDetailDrawerTab; label: string; icon: React.ComponentType<{ className?: string }> }> = [
@@ -211,6 +211,7 @@ export default function TaskDetailDrawer({
   promptGenerating,
   onGeneratePrompt,
   onAiReview,
+  onDeleteAiReviewRecord,
 }: TaskDetailDrawerProps) {
   const aiReviewVisible = useAppStore((state) => state.aiReviewVisible);
   const backgroundJobs = useAppStore((state) => state.backgroundJobs);
@@ -240,6 +241,10 @@ export default function TaskDetailDrawer({
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [showRegenForm, setShowRegenForm] = useState(false);
   const [submitToast, setSubmitToast] = useState(false);
+  const [deletingAiReviewJobId, setDeletingAiReviewJobId] = useState<string | null>(null);
+  const [deleteAiReviewError, setDeleteAiReviewError] = useState('');
+  const [conversationEditMode, setConversationEditMode] = useState<string | null>(null);
+  const [copiedConversation, setCopiedConversation] = useState<string | null>(null);
   const safeLlmProviders = Array.isArray(llmProviders) ? llmProviders : [];
   const safeSelectedModelRuns = Array.isArray(selectedModelRuns) ? selectedModelRuns : [];
   const promptLlmProviders = useMemo(
@@ -275,6 +280,11 @@ export default function TaskDetailDrawer({
       setGenTaskType(preferred);
     }
   }, [sessionTaskTypeOptions, selected.taskType]);
+
+  useEffect(() => {
+    setDeletingAiReviewJobId(null);
+    setDeleteAiReviewError('');
+  }, [selected.id]);
 
   const toggleGenConstraint = (c: string) => {
     setGenConstraints(prev => {
@@ -514,6 +524,27 @@ export default function TaskDetailDrawer({
     }
     onToggleSessionEditor(localId);
     setActiveSessionLocalId(localId);
+  };
+
+  const handleDeleteAiReviewRecord = async (entry: ParsedAiReviewJob) => {
+    if (!onDeleteAiReviewRecord) {
+      return;
+    }
+
+    const label = entry.displayName || '当前记录';
+    if (!window.confirm(`确定删除“${label}”的这条复审记录吗？`)) {
+      return;
+    }
+
+    setDeleteAiReviewError('');
+    setDeletingAiReviewJobId(entry.job.id);
+    try {
+      await onDeleteAiReviewRecord(entry.job.id);
+    } catch (error) {
+      setDeleteAiReviewError(error instanceof Error ? error.message : '删除复审记录失败');
+    } finally {
+      setDeletingAiReviewJobId((current) => (current === entry.job.id ? null : current));
+    }
   };
 
   useEffect(() => {
@@ -769,33 +800,51 @@ export default function TaskDetailDrawer({
                 description="保留原始 sessionId，同时允许直接修正记录值。"
               >
                 <div className="grid gap-3 lg:grid-cols-2">
-                  <div className="rounded-2xl border border-zinc-800/70 bg-zinc-900/40 px-4 py-3">
+                  <div
+                    className="group rounded-2xl border border-zinc-800/70 bg-zinc-900/40 px-4 py-3"
+                    onDoubleClick={() => {
+                      if (conversationEditMode !== activeSession.localId) {
+                        setConversationEditMode(activeSession.localId);
+                      }
+                    }}
+                    title={conversationEditMode === activeSession.localId ? undefined : '双击编辑用户对话'}
+                  >
                     <div className="flex items-start justify-between gap-3">
                       <div className="min-w-0 flex-1">
                         <p className="text-[10px] font-semibold uppercase tracking-[0.22em] text-zinc-500">
-                          Session ID
+                          用户对话
                         </p>
-                        <div className="mt-2 break-all font-mono text-xs leading-6 text-zinc-200">
-                          {activeSession.sessionId.trim() || '未填写'}
-                        </div>
-                        {activeSession.sessionId.trim() && (
-                          <p className="mt-2 text-[11px] text-zinc-500">
-                            快捷复制：⌘/Ctrl + Shift + C
-                          </p>
+                        {conversationEditMode === activeSession.localId ? (
+                          <textarea
+                            autoFocus
+                            value={activeSession.userConversation ?? ''}
+                            onChange={(e) => onSessionChange(activeSession.localId, { userConversation: e.target.value })}
+                            onBlur={() => setConversationEditMode(null)}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Escape') setConversationEditMode(null);
+                            }}
+                            rows={5}
+                            className="mt-2 w-full resize-none rounded-xl border border-indigo-500/40 bg-black/30 px-2 py-1.5 text-xs leading-6 text-zinc-200 outline-none focus:ring-1 focus:ring-indigo-500/40"
+                          />
+                        ) : (
+                          <div className="mt-2 line-clamp-6 cursor-text text-xs leading-6 text-zinc-200">
+                            {activeSession.userConversation?.trim() || (
+                              <span className="text-zinc-600">双击添加用户对话…</span>
+                            )}
+                          </div>
                         )}
                       </div>
-                      {activeSession.sessionId.trim() && (
+                      {activeSession.userConversation?.trim() && conversationEditMode !== activeSession.localId && (
                         <ActionIconButton
-                          label={
-                            copiedSessionId === activeSession.localId
-                              ? 'Session ID 已复制'
-                              : '复制 Session ID'
-                          }
-                          onClick={() =>
-                            void onCopySessionId(activeSession.localId, activeSession.sessionId)
-                          }
+                          label={copiedConversation === activeSession.localId ? '已复制' : '复制用户对话'}
+                          onClick={() => {
+                            void navigator.clipboard.writeText(activeSession.userConversation ?? '').then(() => {
+                              setCopiedConversation(activeSession.localId);
+                              setTimeout(() => setCopiedConversation(null), 2000);
+                            });
+                          }}
                         >
-                          {copiedSessionId === activeSession.localId ? (
+                          {copiedConversation === activeSession.localId ? (
                             <Check className="h-4 w-4" />
                           ) : (
                             <Copy className="h-4 w-4" />
@@ -853,21 +902,6 @@ export default function TaskDetailDrawer({
                     </div>
                   </div>
                 )}
-              </SectionBlock>
-
-              <SectionBlock
-                icon={MessageSquare}
-                title="用户对话信息"
-                description="自动提取后可继续人工修订，确保后续出题和追踪上下文准确。"
-                badge={<WorkspaceBadge tone="purple">自动提取 · 可编辑</WorkspaceBadge>}
-              >
-                <textarea
-                  value={activeSession.userConversation ?? ''}
-                  onChange={(event) => onSessionChange(activeSession.localId, { userConversation: event.target.value })}
-                  placeholder="提取到的用户对话会显示在这里"
-                  rows={6}
-                  className="w-full rounded-2xl border border-zinc-800 bg-zinc-950/60 px-4 py-3 text-sm leading-6 text-zinc-200 outline-none transition placeholder:text-zinc-600 focus:border-indigo-500/60 focus:ring-1 focus:ring-indigo-500/40"
-                />
               </SectionBlock>
 
               <SectionBlock
@@ -1557,6 +1591,11 @@ export default function TaskDetailDrawer({
           description="保留每次 ai_review 的后台任务结果，包括未关联模型的子目录复审。"
           badge={<WorkspaceBadge tone="neutral">最近 {taskAiReviewJobs.length} 条</WorkspaceBadge>}
         >
+          {deleteAiReviewError && (
+            <p className="mb-3 rounded-2xl border border-red-500/20 bg-red-500/10 px-3 py-2 text-sm text-red-200">
+              {deleteAiReviewError}
+            </p>
+          )}
           {taskAiReviewJobs.length === 0 ? (
             <div className="rounded-2xl border border-dashed border-zinc-800 bg-zinc-900/20 px-4 py-10 text-center text-sm text-zinc-500">
               当前任务还没有 AI 复审记录。
@@ -1581,21 +1620,41 @@ export default function TaskDetailDrawer({
                   >
                     <div className="min-w-0">
                       <div>
-                        <div className="flex flex-wrap items-center gap-2">
-                          <span className="font-mono text-sm text-zinc-100">{entry.displayName}</span>
-                          {entry.output?.reviewRound ? (
-                            <WorkspaceBadge tone="blue">第 {entry.output.reviewRound} 轮</WorkspaceBadge>
-                          ) : null}
-                          <WorkspaceBadge tone={taskStatus.tone}>{taskStatus.label}</WorkspaceBadge>
-                          {reviewMeta && (
-                            <span className={clsx('inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold', reviewMeta.badgeCls)}>
-                              {reviewMeta.icon}
-                              {reviewMeta.label}
-                            </span>
-                          )}
-                          {!entry.modelRunId && (
-                            <WorkspaceBadge tone="warning">未关联模型</WorkspaceBadge>
-                          )}
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="font-mono text-sm text-zinc-100">{entry.displayName}</span>
+                            {entry.output?.reviewRound ? (
+                              <WorkspaceBadge tone="blue">第 {entry.output.reviewRound} 轮</WorkspaceBadge>
+                            ) : null}
+                            <WorkspaceBadge tone={taskStatus.tone}>{taskStatus.label}</WorkspaceBadge>
+                            {reviewMeta && (
+                              <span className={clsx('inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold', reviewMeta.badgeCls)}>
+                                {reviewMeta.icon}
+                                {reviewMeta.label}
+                              </span>
+                            )}
+                            {!entry.modelRunId && (
+                              <WorkspaceBadge tone="warning">未关联模型</WorkspaceBadge>
+                            )}
+                          </div>
+                          {onDeleteAiReviewRecord &&
+                            entry.job.status !== 'pending' &&
+                            entry.job.status !== 'running' && (
+                              <ActionIconButton
+                                label={`删除 ${entry.displayName} 复审记录`}
+                                danger
+                                disabled={deletingAiReviewJobId === entry.job.id}
+                                onClick={() => {
+                                  void handleDeleteAiReviewRecord(entry);
+                                }}
+                              >
+                                {deletingAiReviewJobId === entry.job.id ? (
+                                  <RefreshCw className="h-4 w-4 animate-spin" />
+                                ) : (
+                                  <Trash2 className="h-4 w-4" />
+                                )}
+                              </ActionIconButton>
+                            )}
                         </div>
                         <div className="mt-3 space-y-1.5 text-xs text-zinc-400">
                           <p className="break-all">{entry.localPath || '未记录目录'}</p>
@@ -1799,11 +1858,13 @@ export default function TaskDetailDrawer({
 function ActionIconButton({
   children,
   danger,
+  disabled,
   label,
   onClick,
 }: {
   children: React.ReactNode;
   danger?: boolean;
+  disabled?: boolean;
   label: string;
   onClick: () => void;
 }) {
@@ -1813,11 +1874,13 @@ function ActionIconButton({
       aria-label={label}
       title={label}
       onClick={onClick}
+      disabled={disabled}
       className={clsx(
         'inline-flex h-9 w-9 items-center justify-center rounded-xl border transition',
         danger
           ? 'border-red-500/20 bg-red-500/10 text-red-300 hover:bg-red-500/15'
           : 'border-zinc-700/70 bg-zinc-900 text-zinc-300 hover:border-zinc-600 hover:bg-zinc-800 hover:text-white',
+        disabled && 'cursor-not-allowed opacity-50 hover:border-red-500/20 hover:bg-red-500/10 hover:text-red-300',
       )}
     >
       {children}

@@ -778,7 +778,7 @@ func buildCodexReviewPrompt(project *pgCodeProjectContext) string {
 1. 【严格限制】只能基于任务提示词、git 变更、最近更新文件以及你实际读取过的文件下结论。允许主动读取和评审的仓库文件仍限于 git 变更文件（git status / git diff 列出的文件）以及最近更新文件。
 2. 严禁猜测运行效果、页面视觉、接口返回、测试结果或用户体验。
 3. keyLocations 只能填写 git 变更文件或最近更新文件中 1 到 3 个你实际核验过的代码位置，写不出时可留空。
-4. 当主要功能实现度达到 90% 以上时，isCompleted 和 isSatisfied 均可填 true，允许存在少量非关键细节缺失或边缘情况未覆盖。
+4. 当主要功能实现度达到 80% 以上时，isCompleted 和 isSatisfied 均可填 true，允许存在少量非关键细节缺失或边缘情况未覆盖。
 5. 找不到任务提示词或有效改动时，reviewNotes 注明”依据不足”，isCompleted 和 isSatisfied 均填 false。
 6. projectType 和 changeScope 按最符合实际情况的选项填写。
 7. 预采集上下文里的 prompt_sources 已包含候选提示词正文，可能来自项目内、同层目录或上一级目录；若存在多份，请优先依据正文判断原始需求，prompt_candidates 仅作路径参考。

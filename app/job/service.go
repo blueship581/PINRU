@@ -247,7 +247,7 @@ func (s *JobService) CancelJob(id string) error {
 	if err := s.store.CancelBackgroundJob(id); err != nil {
 		return err
 	}
-	if err := s.restoreAiReviewStateAfterCancel(job); err != nil {
+	if err := s.restoreAiReviewStateAfterRemoval(job); err != nil {
 		return err
 	}
 
@@ -259,7 +259,77 @@ func (s *JobService) CancelJob(id string) error {
 	return nil
 }
 
-func (s *JobService) restoreAiReviewStateAfterCancel(job *store.BackgroundJob) error {
+func (s *JobService) DeleteAiReviewJob(id string) error {
+	job, err := s.store.GetBackgroundJob(id)
+	if err != nil {
+		return err
+	}
+	if job == nil {
+		return fmt.Errorf("任务不存在: %s", id)
+	}
+	if job.JobType != "ai_review" {
+		return fmt.Errorf("只能删除 AI 复审记录")
+	}
+	if job.Status == "pending" || job.Status == "running" {
+		return fmt.Errorf("复审任务仍在进行中，请先取消后再删除")
+	}
+
+	shouldSync, err := s.shouldSyncAiReviewStateAfterRemoval(job)
+	if err != nil {
+		return err
+	}
+	if err := s.store.DeleteBackgroundJob(id); err != nil {
+		return err
+	}
+	if shouldSync {
+		if err := s.restoreAiReviewStateAfterRemoval(job); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (s *JobService) shouldSyncAiReviewStateAfterRemoval(job *store.BackgroundJob) (bool, error) {
+	if job == nil || job.JobType != "ai_review" || job.TaskID == nil {
+		return false, nil
+	}
+
+	payload, ok := parseAiReviewPayloadForDedup(job.InputPayload)
+	if !ok || payload.ModelRunID == nil {
+		return false, nil
+	}
+
+	targetKey := buildAiReviewTargetKey(payload.ModelRunID, payload.LocalPath)
+	if targetKey == "" {
+		return false, nil
+	}
+
+	jobs, err := s.store.ListBackgroundJobs(&store.JobFilter{TaskID: job.TaskID})
+	if err != nil {
+		return false, fmt.Errorf("查询历史复审记录失败: %w", err)
+	}
+
+	for _, historyJob := range jobs {
+		if historyJob.JobType != "ai_review" || historyJob.Status == "cancelled" {
+			continue
+		}
+
+		historyPayload, ok := parseAiReviewPayloadForDedup(historyJob.InputPayload)
+		if !ok {
+			continue
+		}
+		if buildAiReviewTargetKey(historyPayload.ModelRunID, historyPayload.LocalPath) != targetKey {
+			continue
+		}
+
+		return historyJob.ID == job.ID, nil
+	}
+
+	return false, nil
+}
+
+func (s *JobService) restoreAiReviewStateAfterRemoval(job *store.BackgroundJob) error {
 	if job == nil || job.JobType != "ai_review" || job.TaskID == nil {
 		return nil
 	}
@@ -673,7 +743,7 @@ func (s *JobService) executeGitClone(
 			return result, nil
 		}
 		if contextErr := gitCloneContextErr(ctx); contextErr != nil {
-			return jobExecutionResult{}, contextErr
+			return jobExecutionResult{}, cleanupGitCloneTargetsAfterAbort(payload, contextErr)
 		}
 		lastErr = err
 		if attempt == gitCloneRetryAttempts {
@@ -700,6 +770,9 @@ func (s *JobService) executeGitClone(
 
 	if lastErr == nil {
 		lastErr = fmt.Errorf("git clone 失败")
+	}
+	if cleanupErr := cleanupGitCloneTargets(payload); cleanupErr != nil {
+		lastErr = errors.Join(lastErr, fmt.Errorf("失败后清理目录失败: %w", cleanupErr))
 	}
 	return jobExecutionResult{}, fmt.Errorf("git clone 连续失败 %d 次: %w", gitCloneRetryAttempts, lastErr)
 }
@@ -1285,6 +1358,17 @@ func cleanupGitCloneTargets(payload GitClonePayload) error {
 		}
 	}
 	return nil
+}
+
+func cleanupGitCloneTargetsAfterAbort(payload GitClonePayload, abortErr error) error {
+	if err := cleanupGitCloneTargets(payload); err != nil {
+		slog.Error("git clone cleanup after abort failed",
+			"source_path", payload.SourcePath,
+			"error", err,
+		)
+		return errors.Join(abortErr, fmt.Errorf("清理中断残留目录失败: %w", err))
+	}
+	return abortErr
 }
 
 func gitCloneTargetPaths(payload GitClonePayload) []string {

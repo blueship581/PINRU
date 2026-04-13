@@ -17,6 +17,7 @@ import {
   submitJob,
   submitSessionSyncJob,
   submitAiReviewJob,
+  deleteAiReviewJob,
   type JobProgressEvent,
 } from '../../api/job';
 import type { ModelRunFromDB, TaskChildDirectory } from '../../api/task';
@@ -553,6 +554,15 @@ export default function Board() {
     }, 600);
   };
 
+  const handleDeleteAiReviewRecord = async (jobId: string) => {
+    await deleteAiReviewJob(jobId);
+    await Promise.all([
+      loadTasks(),
+      detail.refreshModelRuns(),
+      useAppStore.getState().loadBackgroundJobs(),
+    ]);
+  };
+
   const handleAfterBatchApply = async (
     field: 'status' | 'taskType',
     value: string,
@@ -791,6 +801,7 @@ export default function Board() {
           setShowProjectPanel(false);
         }}
         onAiReview={aiReviewVisible ? handleAiReview : undefined}
+        onDeleteAiReviewRecord={aiReviewVisible ? handleDeleteAiReviewRecord : undefined}
       />
 
       {selectionMode && selectedTaskIds.size > 0 && (

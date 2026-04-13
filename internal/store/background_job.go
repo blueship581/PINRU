@@ -145,6 +145,11 @@ func (s *Store) CancelBackgroundJob(id string) error {
 	return err
 }
 
+func (s *Store) DeleteBackgroundJob(id string) error {
+	res, err := s.DB.Exec("DELETE FROM background_jobs WHERE id = ?", id)
+	return ensureRowsAffected(res, err, "background job %q not found", id)
+}
+
 func (s *Store) IncrementBackgroundJobRetry(id string) error {
 	_, err := s.DB.Exec(
 		`UPDATE background_jobs SET retry_count = retry_count + 1, status = 'pending',

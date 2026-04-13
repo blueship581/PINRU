@@ -3,6 +3,7 @@ package job
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	appcli "github.com/blueship581/pinru/app/cli"
+	appgit "github.com/blueship581/pinru/app/git"
 	"github.com/blueship581/pinru/app/testutil"
 	"github.com/blueship581/pinru/internal/store"
 	"github.com/blueship581/pinru/internal/util"
@@ -67,6 +69,21 @@ func TestHelperProcess(t *testing.T) {
 			const jsonOut = `{"isCompleted":true,"isSatisfied":false,"projectType":"Bug修复","changeScope":"单文件","reviewNotes":"needs work","nextPrompt":"fix it","keyLocations":"a.go:1"}`
 			os.WriteFile(outPath, []byte(jsonOut), 0o644) //nolint:errcheck
 		}
+		os.Exit(0)
+	case "git_clone_fail_after_mkdir":
+		cloneDest := strings.TrimSpace(os.Getenv("GO_TEST_CLONE_DEST"))
+		if cloneDest != "" {
+			os.MkdirAll(cloneDest, 0o755) //nolint:errcheck
+		}
+		fmt.Fprintln(os.Stderr, "fake clone failed after mkdir")
+		os.Exit(1)
+	case "git_clone_create_dir_then_sleep":
+		cloneDest := strings.TrimSpace(os.Getenv("GO_TEST_CLONE_DEST"))
+		if cloneDest != "" {
+			os.MkdirAll(cloneDest, 0o755) //nolint:errcheck
+		}
+		fmt.Fprintln(os.Stderr, "fake clone created directory and is waiting")
+		time.Sleep(24 * time.Hour)
 		os.Exit(0)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown GO_TEST_SUBPROCESS_MODE: %s\n", os.Getenv("GO_TEST_SUBPROCESS_MODE"))
@@ -130,6 +147,94 @@ func createMockCodexExecutable(t *testing.T, mode string, extraEnv map[string]st
 		t.Fatalf("os.WriteFile(%s) error = %v", path, err)
 	}
 	return path
+}
+
+func createMockGitCloneFailureExecutable(t *testing.T) string {
+	t.Helper()
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatalf("os.Executable() error = %v", err)
+	}
+	dir := t.TempDir()
+	if runtime.GOOS == "windows" {
+		path := filepath.Join(dir, "git.bat")
+		var sb strings.Builder
+		sb.WriteString("@echo off\r\n")
+		sb.WriteString("setlocal enabledelayedexpansion\r\n")
+		sb.WriteString("set GO_TEST_SUBPROCESS=1\r\n")
+		sb.WriteString("set GO_TEST_SUBPROCESS_MODE=git_clone_fail_after_mkdir\r\n")
+		sb.WriteString("set GO_TEST_CLONE_DEST=\r\n")
+		sb.WriteString(":capture_last\r\n")
+		sb.WriteString("if \"%~1\"==\"\" goto run\r\n")
+		sb.WriteString("set GO_TEST_CLONE_DEST=%~1\r\n")
+		sb.WriteString("shift /1\r\n")
+		sb.WriteString("goto capture_last\r\n")
+		sb.WriteString(":run\r\n")
+		fmt.Fprintf(&sb, "\"%s\" -test.run=TestHelperProcess\r\n", exe)
+		sb.WriteString("exit /b %errorlevel%\r\n")
+		if err := os.WriteFile(path, []byte(sb.String()), 0o755); err != nil {
+			t.Fatalf("os.WriteFile(%s) error = %v", path, err)
+		}
+		return dir
+	}
+
+	path := filepath.Join(dir, "git")
+	content := fmt.Sprintf(`#!/bin/sh
+clone_dest=""
+for arg in "$@"; do
+	clone_dest="$arg"
+done
+export GO_TEST_CLONE_DEST="$clone_dest"
+GO_TEST_SUBPROCESS=1 GO_TEST_SUBPROCESS_MODE=git_clone_fail_after_mkdir exec %q -test.run=TestHelperProcess
+`, exe)
+	if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
+		t.Fatalf("os.WriteFile(%s) error = %v", path, err)
+	}
+	return dir
+}
+
+func createMockGitCloneHangingExecutable(t *testing.T) string {
+	t.Helper()
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatalf("os.Executable() error = %v", err)
+	}
+	dir := t.TempDir()
+	if runtime.GOOS == "windows" {
+		path := filepath.Join(dir, "git.bat")
+		var sb strings.Builder
+		sb.WriteString("@echo off\r\n")
+		sb.WriteString("setlocal enabledelayedexpansion\r\n")
+		sb.WriteString("set GO_TEST_SUBPROCESS=1\r\n")
+		sb.WriteString("set GO_TEST_SUBPROCESS_MODE=git_clone_create_dir_then_sleep\r\n")
+		sb.WriteString("set GO_TEST_CLONE_DEST=\r\n")
+		sb.WriteString(":capture_last\r\n")
+		sb.WriteString("if \"%~1\"==\"\" goto run\r\n")
+		sb.WriteString("set GO_TEST_CLONE_DEST=%~1\r\n")
+		sb.WriteString("shift /1\r\n")
+		sb.WriteString("goto capture_last\r\n")
+		sb.WriteString(":run\r\n")
+		fmt.Fprintf(&sb, "\"%s\" -test.run=TestHelperProcess\r\n", exe)
+		sb.WriteString("exit /b %errorlevel%\r\n")
+		if err := os.WriteFile(path, []byte(sb.String()), 0o755); err != nil {
+			t.Fatalf("os.WriteFile(%s) error = %v", path, err)
+		}
+		return dir
+	}
+
+	path := filepath.Join(dir, "git")
+	content := fmt.Sprintf(`#!/bin/sh
+clone_dest=""
+for arg in "$@"; do
+	clone_dest="$arg"
+done
+export GO_TEST_CLONE_DEST="$clone_dest"
+GO_TEST_SUBPROCESS=1 GO_TEST_SUBPROCESS_MODE=git_clone_create_dir_then_sleep exec %q -test.run=TestHelperProcess
+`, exe)
+	if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
+		t.Fatalf("os.WriteFile(%s) error = %v", path, err)
+	}
+	return dir
 }
 
 func TestExecuteAiReviewRunsSingleRoundPerSubmission(t *testing.T) {
@@ -202,6 +307,139 @@ func TestExecuteAiReviewRunsSingleRoundPerSubmission(t *testing.T) {
 	}
 	if output.ReviewRound != 1 {
 		t.Fatalf("ReviewRound = %d, want 1", output.ReviewRound)
+	}
+}
+
+func TestExecuteGitCloneCleansResidualDirectoriesAfterFinalFailure(t *testing.T) {
+	testStore := testutil.OpenTestStore(t)
+	defer testStore.Close()
+
+	if err := testStore.SetConfig("gitlab_url", "https://gitlab.example.com"); err != nil {
+		t.Fatalf("SetConfig(gitlab_url) error = %v", err)
+	}
+	if err := testStore.SetConfig("gitlab_token", "glpat-test"); err != nil {
+		t.Fatalf("SetConfig(gitlab_token) error = %v", err)
+	}
+	if err := testStore.SetConfig("gitlab_username", "oauth2"); err != nil {
+		t.Fatalf("SetConfig(gitlab_username) error = %v", err)
+	}
+
+	fakeGitDir := createMockGitCloneFailureExecutable(t)
+	t.Setenv("PATH", fakeGitDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	root := t.TempDir()
+	sourcePath := filepath.Join(root, "01872-代码测试-3")
+	copyPath := filepath.Join(root, "cotv21-pro")
+
+	payloadJSON, err := json.Marshal(GitClonePayload{
+		CloneURL:      "https://gitlab.example.com/prompt2repo/label-01872.git",
+		SourcePath:    sourcePath,
+		SourceModelID: "ORIGIN",
+		CopyTargets: []GitCloneCopyTarget{
+			{ModelID: "cotv21-pro", Path: copyPath},
+		},
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal(payload) error = %v", err)
+	}
+
+	jobSvc := &JobService{
+		store:   testStore,
+		gitSvc:  appgit.New(testStore),
+		running: make(map[string]context.CancelFunc),
+	}
+
+	_, err = jobSvc.executeGitClone(context.Background(), "job-git-clone-failure", SubmitJobRequest{
+		JobType:      "git_clone",
+		InputPayload: string(payloadJSON),
+	})
+	if err == nil {
+		t.Fatalf("executeGitClone() error = nil, want failure")
+	}
+	if !strings.Contains(err.Error(), "git clone 连续失败") {
+		t.Fatalf("executeGitClone() error = %q, want retry failure summary", err)
+	}
+
+	for _, path := range []string{sourcePath, copyPath} {
+		if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+			t.Fatalf("expected %s to be cleaned up, stat err = %v", path, statErr)
+		}
+	}
+}
+
+func TestExecuteGitCloneCleansResidualDirectoriesAfterCancellation(t *testing.T) {
+	testStore := testutil.OpenTestStore(t)
+	defer testStore.Close()
+
+	if err := testStore.SetConfig("gitlab_url", "https://gitlab.example.com"); err != nil {
+		t.Fatalf("SetConfig(gitlab_url) error = %v", err)
+	}
+	if err := testStore.SetConfig("gitlab_token", "glpat-test"); err != nil {
+		t.Fatalf("SetConfig(gitlab_token) error = %v", err)
+	}
+	if err := testStore.SetConfig("gitlab_username", "oauth2"); err != nil {
+		t.Fatalf("SetConfig(gitlab_username) error = %v", err)
+	}
+
+	fakeGitDir := createMockGitCloneHangingExecutable(t)
+	t.Setenv("PATH", fakeGitDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	root := t.TempDir()
+	sourcePath := filepath.Join(root, "01872-代码测试-3")
+	copyPath := filepath.Join(root, "cotv21-pro")
+
+	payloadJSON, err := json.Marshal(GitClonePayload{
+		CloneURL:      "https://gitlab.example.com/prompt2repo/label-01872.git",
+		SourcePath:    sourcePath,
+		SourceModelID: "ORIGIN",
+		CopyTargets: []GitCloneCopyTarget{
+			{ModelID: "cotv21-pro", Path: copyPath},
+		},
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal(payload) error = %v", err)
+	}
+
+	jobSvc := &JobService{
+		store:   testStore,
+		gitSvc:  appgit.New(testStore),
+		running: make(map[string]context.CancelFunc),
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		_, runErr := jobSvc.executeGitClone(ctx, "job-git-clone-cancel", SubmitJobRequest{
+			JobType:      "git_clone",
+			InputPayload: string(payloadJSON),
+		})
+		done <- runErr
+	}()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, statErr := os.Stat(sourcePath); statErr == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("source path %s was not created before timeout", sourcePath)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	cancel()
+
+	runErr := <-done
+	if !errors.Is(runErr, context.Canceled) {
+		t.Fatalf("executeGitClone() error = %v, want context canceled", runErr)
+	}
+
+	for _, path := range []string{sourcePath, copyPath} {
+		if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+			t.Fatalf("expected %s to be cleaned up after cancellation, stat err = %v", path, statErr)
+		}
 	}
 }
 
@@ -524,6 +762,242 @@ func TestCancelJobClearsAiReviewRunningStateWithoutHistory(t *testing.T) {
 	}
 	if run.ReviewNotes != nil {
 		t.Fatalf("ReviewNotes = %v, want nil", run.ReviewNotes)
+	}
+}
+
+func TestDeleteAiReviewJobRestoresPreviousResultWhenDeletingLatestRecord(t *testing.T) {
+	testStore := testutil.OpenTestStore(t)
+
+	taskID := "task-delete-review-latest"
+	workDir := t.TempDir()
+	task := store.Task{
+		ID:              taskID,
+		GitLabProjectID: 1849,
+		ProjectName:     "label-01849",
+		TaskType:        "Bug修复",
+	}
+	modelRuns := []store.ModelRun{{
+		ID:           "run-delete-review-latest",
+		TaskID:       taskID,
+		ModelName:    "cotv21-pro",
+		LocalPath:    &workDir,
+		ReviewStatus: "warning",
+		ReviewRound:  2,
+	}}
+	if err := testStore.CreateTaskWithModelRuns(task, modelRuns); err != nil {
+		t.Fatalf("CreateTaskWithModelRuns() error = %v", err)
+	}
+	if err := testStore.UpdateModelRunReview("run-delete-review-latest", "warning", 2, strPtr("latest result")); err != nil {
+		t.Fatalf("UpdateModelRunReview() error = %v", err)
+	}
+
+	payloadJSON, err := json.Marshal(AiReviewPayload{
+		ModelRunID: strPtr("run-delete-review-latest"),
+		ModelName:  "cotv21-pro",
+		LocalPath:  workDir,
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal(payload) error = %v", err)
+	}
+	resultRound1, err := json.Marshal(AiReviewResult{
+		ModelRunID:   "run-delete-review-latest",
+		ModelName:    "cotv21-pro",
+		ReviewStatus: "pass",
+		ReviewRound:  1,
+		ReviewNotes:  "first pass",
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal(resultRound1) error = %v", err)
+	}
+	resultRound2, err := json.Marshal(AiReviewResult{
+		ModelRunID:   "run-delete-review-latest",
+		ModelName:    "cotv21-pro",
+		ReviewStatus: "warning",
+		ReviewRound:  2,
+		ReviewNotes:  "latest result",
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal(resultRound2) error = %v", err)
+	}
+
+	taskIDPtr := taskID
+	if err := testStore.CreateBackgroundJob(store.BackgroundJob{
+		ID:             "job-review-round-1",
+		JobType:        "ai_review",
+		TaskID:         &taskIDPtr,
+		Status:         "done",
+		Progress:       100,
+		InputPayload:   string(payloadJSON),
+		MaxRetries:     1,
+		TimeoutSeconds: 600,
+		CreatedAt:      1,
+	}); err != nil {
+		t.Fatalf("CreateBackgroundJob(round1) error = %v", err)
+	}
+	resultRound1Str := string(resultRound1)
+	if err := testStore.CompleteBackgroundJob("job-review-round-1", &resultRound1Str); err != nil {
+		t.Fatalf("CompleteBackgroundJob(round1) error = %v", err)
+	}
+	if err := testStore.CreateBackgroundJob(store.BackgroundJob{
+		ID:             "job-review-round-2",
+		JobType:        "ai_review",
+		TaskID:         &taskIDPtr,
+		Status:         "done",
+		Progress:       100,
+		InputPayload:   string(payloadJSON),
+		MaxRetries:     1,
+		TimeoutSeconds: 600,
+		CreatedAt:      2,
+	}); err != nil {
+		t.Fatalf("CreateBackgroundJob(round2) error = %v", err)
+	}
+	resultRound2Str := string(resultRound2)
+	if err := testStore.CompleteBackgroundJob("job-review-round-2", &resultRound2Str); err != nil {
+		t.Fatalf("CompleteBackgroundJob(round2) error = %v", err)
+	}
+
+	jobSvc := &JobService{store: testStore, running: make(map[string]context.CancelFunc)}
+	if err := jobSvc.DeleteAiReviewJob("job-review-round-2"); err != nil {
+		t.Fatalf("DeleteAiReviewJob() error = %v", err)
+	}
+
+	deletedJob, err := testStore.GetBackgroundJob("job-review-round-2")
+	if err != nil {
+		t.Fatalf("GetBackgroundJob(deleted) error = %v", err)
+	}
+	if deletedJob != nil {
+		t.Fatalf("GetBackgroundJob(deleted) = %v, want nil", deletedJob)
+	}
+
+	run, err := testStore.GetModelRunByID("run-delete-review-latest")
+	if err != nil {
+		t.Fatalf("GetModelRunByID() error = %v", err)
+	}
+	if run == nil {
+		t.Fatalf("GetModelRunByID() = nil")
+	}
+	if run.ReviewStatus != "pass" {
+		t.Fatalf("ReviewStatus = %q, want pass", run.ReviewStatus)
+	}
+	if run.ReviewRound != 1 {
+		t.Fatalf("ReviewRound = %d, want 1", run.ReviewRound)
+	}
+	if run.ReviewNotes == nil || *run.ReviewNotes != "first pass" {
+		t.Fatalf("ReviewNotes = %v, want first pass", run.ReviewNotes)
+	}
+}
+
+func TestDeleteAiReviewJobKeepsCurrentResultWhenDeletingOlderRecord(t *testing.T) {
+	testStore := testutil.OpenTestStore(t)
+
+	taskID := "task-delete-review-old"
+	workDir := t.TempDir()
+	task := store.Task{
+		ID:              taskID,
+		GitLabProjectID: 1849,
+		ProjectName:     "label-01849",
+		TaskType:        "Bug修复",
+	}
+	modelRuns := []store.ModelRun{{
+		ID:           "run-delete-review-old",
+		TaskID:       taskID,
+		ModelName:    "cotv21-pro",
+		LocalPath:    &workDir,
+		ReviewStatus: "warning",
+		ReviewRound:  2,
+	}}
+	if err := testStore.CreateTaskWithModelRuns(task, modelRuns); err != nil {
+		t.Fatalf("CreateTaskWithModelRuns() error = %v", err)
+	}
+	if err := testStore.UpdateModelRunReview("run-delete-review-old", "warning", 2, strPtr("keep latest")); err != nil {
+		t.Fatalf("UpdateModelRunReview() error = %v", err)
+	}
+
+	payloadJSON, err := json.Marshal(AiReviewPayload{
+		ModelRunID: strPtr("run-delete-review-old"),
+		ModelName:  "cotv21-pro",
+		LocalPath:  workDir,
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal(payload) error = %v", err)
+	}
+	resultRound1, err := json.Marshal(AiReviewResult{
+		ModelRunID:   "run-delete-review-old",
+		ModelName:    "cotv21-pro",
+		ReviewStatus: "pass",
+		ReviewRound:  1,
+		ReviewNotes:  "older result",
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal(resultRound1) error = %v", err)
+	}
+	resultRound2, err := json.Marshal(AiReviewResult{
+		ModelRunID:   "run-delete-review-old",
+		ModelName:    "cotv21-pro",
+		ReviewStatus: "warning",
+		ReviewRound:  2,
+		ReviewNotes:  "keep latest",
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal(resultRound2) error = %v", err)
+	}
+
+	taskIDPtr := taskID
+	if err := testStore.CreateBackgroundJob(store.BackgroundJob{
+		ID:             "job-review-old-1",
+		JobType:        "ai_review",
+		TaskID:         &taskIDPtr,
+		Status:         "done",
+		Progress:       100,
+		InputPayload:   string(payloadJSON),
+		MaxRetries:     1,
+		TimeoutSeconds: 600,
+		CreatedAt:      1,
+	}); err != nil {
+		t.Fatalf("CreateBackgroundJob(round1) error = %v", err)
+	}
+	resultRound1Str := string(resultRound1)
+	if err := testStore.CompleteBackgroundJob("job-review-old-1", &resultRound1Str); err != nil {
+		t.Fatalf("CompleteBackgroundJob(round1) error = %v", err)
+	}
+	if err := testStore.CreateBackgroundJob(store.BackgroundJob{
+		ID:             "job-review-old-2",
+		JobType:        "ai_review",
+		TaskID:         &taskIDPtr,
+		Status:         "done",
+		Progress:       100,
+		InputPayload:   string(payloadJSON),
+		MaxRetries:     1,
+		TimeoutSeconds: 600,
+		CreatedAt:      2,
+	}); err != nil {
+		t.Fatalf("CreateBackgroundJob(round2) error = %v", err)
+	}
+	resultRound2Str := string(resultRound2)
+	if err := testStore.CompleteBackgroundJob("job-review-old-2", &resultRound2Str); err != nil {
+		t.Fatalf("CompleteBackgroundJob(round2) error = %v", err)
+	}
+
+	jobSvc := &JobService{store: testStore, running: make(map[string]context.CancelFunc)}
+	if err := jobSvc.DeleteAiReviewJob("job-review-old-1"); err != nil {
+		t.Fatalf("DeleteAiReviewJob() error = %v", err)
+	}
+
+	run, err := testStore.GetModelRunByID("run-delete-review-old")
+	if err != nil {
+		t.Fatalf("GetModelRunByID() error = %v", err)
+	}
+	if run == nil {
+		t.Fatalf("GetModelRunByID() = nil")
+	}
+	if run.ReviewStatus != "warning" {
+		t.Fatalf("ReviewStatus = %q, want warning", run.ReviewStatus)
+	}
+	if run.ReviewRound != 2 {
+		t.Fatalf("ReviewRound = %d, want 2", run.ReviewRound)
+	}
+	if run.ReviewNotes == nil || *run.ReviewNotes != "keep latest" {
+		t.Fatalf("ReviewNotes = %v, want keep latest", run.ReviewNotes)
 	}
 }
 

@@ -155,6 +155,7 @@ export type WailsServiceContract = {
     GetJob: ServiceMethod<[id: string], BackgroundJob | null>;
     RetryJob: ServiceMethod<[id: string], BackgroundJob>;
     CancelJob: ServiceMethod<[id: string], void>;
+    DeleteAiReviewJob: ServiceMethod<[id: string], void>;
   };
   TaskService: {
     ListTasks: ServiceMethod<[projectConfigId: string | null], TaskFromDB[]>;
