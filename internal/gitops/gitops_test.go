@@ -41,10 +41,12 @@ func createMockGitExecutable(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	if runtime.GOOS == "windows" {
-		// Use Windows built-in timeout.exe to block — no test binary is spawned,
-		// so gitops.test.exe cannot be file-locked during cleanup.
+		// timeout.exe exits immediately with code 1 when there is no console
+		// (non-interactive CI). Use ping to 127.0.0.1 instead — it works without
+		// a console, keeps running for ~34 s, and does not spawn the test binary
+		// (which would file-lock gitops.test.exe during cleanup).
 		path := filepath.Join(dir, "git.bat")
-		content := "@echo off\r\necho fake clone starting 1>&2\r\ntimeout /t 30 /nobreak >nul\r\n"
+		content := "@echo off\r\necho fake clone starting 1>&2\r\nping -n 35 127.0.0.1 >nul 2>&1\r\n"
 		if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
 			t.Fatalf("os.WriteFile(%s) error = %v", path, err)
 		}
