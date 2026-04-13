@@ -39,21 +39,20 @@ func TestHelperProcess(t *testing.T) {
 // that pretends to be git and blocks until killed.
 func createMockGitExecutable(t *testing.T) string {
 	t.Helper()
-	testExe, err := os.Executable()
-	if err != nil {
-		t.Fatalf("os.Executable() error = %v", err)
-	}
 	dir := t.TempDir()
 	if runtime.GOOS == "windows" {
+		// Use Windows built-in timeout.exe to block — no test binary is spawned,
+		// so gitops.test.exe cannot be file-locked during cleanup.
 		path := filepath.Join(dir, "git.bat")
-		content := fmt.Sprintf(
-			"@echo off\r\nset GO_TEST_SUBPROCESS=1\r\nset GO_TEST_SUBPROCESS_MODE=git_sleep\r\n\"%s\" -test.run=TestHelperProcess\r\nexit /b %%errorlevel%%\r\n",
-			testExe,
-		)
+		content := "@echo off\r\necho fake clone starting 1>&2\r\ntimeout /t 30 /nobreak >nul\r\n"
 		if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
 			t.Fatalf("os.WriteFile(%s) error = %v", path, err)
 		}
 		return dir
+	}
+	testExe, err := os.Executable()
+	if err != nil {
+		t.Fatalf("os.Executable() error = %v", err)
 	}
 	path := filepath.Join(dir, "git")
 	content := fmt.Sprintf(
