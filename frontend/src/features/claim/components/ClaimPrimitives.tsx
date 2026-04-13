@@ -10,10 +10,19 @@ import type { ClaimResult, ModelEntry } from '../types';
 
 export const DoneSummary: FC<{ results: ClaimResult[] }> = ({ results }) => {
   const doneCount = results.filter(
-    (result) => result.status === 'done' || result.status === 'partial',
+    (r) => r.status === 'done' || r.status === 'partial',
   ).length;
-  const errorCount = results.filter((result) => result.status === 'error').length;
-  const allSuccess = errorCount === 0;
+  const errorCount = results.filter((r) => r.status === 'error').length;
+  const skippedCount = results.filter((r) => r.status === 'quota_exceeded').length;
+  const allSuccess = errorCount === 0 && skippedCount === 0;
+  const hasIssue = errorCount > 0 || skippedCount > 0;
+
+  const lines: string[] = [];
+  if (doneCount > 0) lines.push(`${doneCount} 套已创建`);
+  if (errorCount > 0) lines.push(`${errorCount} 套失败`);
+  if (skippedCount > 0) lines.push(`${skippedCount} 套配额不足已跳过`);
+
+  const title = allSuccess ? '全部完成' : errorCount > 0 ? '部分完成' : '执行完成';
 
   return (
     <div className="bg-white dark:bg-stone-900 border border-stone-200 dark:border-stone-800 rounded-3xl p-6 text-center">
@@ -31,13 +40,9 @@ export const DoneSummary: FC<{ results: ClaimResult[] }> = ({ results }) => {
         )}
       </div>
       <h2 className="text-xl font-bold text-stone-900 dark:text-stone-50 mb-1.5 tracking-tight">
-        {allSuccess ? '全部完成' : '部分完成'}
+        {title}
       </h2>
-      <p className="text-sm text-stone-500 dark:text-stone-400">
-        {doneCount > 0 && `${doneCount} 个领题任务已创建`}
-        {doneCount > 0 && errorCount > 0 && '，'}
-        {errorCount > 0 && `${errorCount} 个失败`}
-      </p>
+      <p className="text-sm text-stone-500 dark:text-stone-400">{lines.join('，')}</p>
     </div>
   );
 };

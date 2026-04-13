@@ -3,13 +3,21 @@ import { CheckSquare, ChevronDown, X } from 'lucide-react';
 import { batchUpdateTasks } from '../../../api/task';
 import type { TaskStatus } from '../../../store';
 
-const STATUS_OPTIONS: TaskStatus[] = ['Claimed', 'Downloaded', 'PromptReady', 'Submitted', 'Error'];
+const STATUS_OPTIONS: TaskStatus[] = [
+  'Claimed',
+  'Downloaded',
+  'PromptReady',
+  'ExecutionCompleted',
+  'Submitted',
+  'Error',
+];
 
 const STATUS_LABELS: Record<TaskStatus, string> = {
   Claimed: '已领题',
   Downloading: '下载中',
   Downloaded: '已下载',
   PromptReady: '提示词就绪',
+  ExecutionCompleted: '执行完成',
   Submitted: '已提交',
   Error: '错误',
 };
@@ -18,12 +26,18 @@ export function BatchActionBar({
   selectedCount,
   selectedTaskIds,
   availableTaskTypes,
+  onAfterApply,
   onDone,
   onCancel,
 }: {
   selectedCount: number;
   selectedTaskIds: Set<string>;
   availableTaskTypes: string[];
+  onAfterApply?: (
+    field: 'status' | 'taskType',
+    value: string,
+    taskIds: string[],
+  ) => void | Promise<void>;
   onDone: () => void;
   onCancel: () => void;
 }) {
@@ -38,15 +52,17 @@ export function BatchActionBar({
     if (loading) return;
     setLoading(true);
     setResultMsg('');
+    const taskIds = Array.from(selectedTaskIds);
     try {
       const result = await batchUpdateTasks({
-        taskIds: Array.from(selectedTaskIds),
+        taskIds,
         field,
         value,
       });
       if (result.failed.length > 0) {
         setResultMsg(`${result.succeeded} 成功，${result.failed.length} 失败`);
       } else {
+        await onAfterApply?.(field, value, taskIds);
         setResultMsg(`${result.succeeded} 个已更新`);
         setTimeout(() => { onDone(); }, 800);
       }

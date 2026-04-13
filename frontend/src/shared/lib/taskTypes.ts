@@ -33,6 +33,40 @@ export const DEFAULT_TASK_TYPES = [
   '代码测试',
 ] as const;
 
+export type QuotaPreset = {
+  id: string;
+  label: string;
+  description: string;
+  taskTypes: string[];
+  totals: TaskTypeQuotas;
+};
+
+export const QUOTA_PRESETS: QuotaPreset[] = [
+  {
+    id: 'standard-13',
+    label: '标准 13 题',
+    description: '3 Bug修复 + 3 Feature迭代 + 1 代码理解 + 1 代码重构 + 1 工程化 + 1 代码测试 + 3 代码生成',
+    taskTypes: ['Bug修复', 'Feature迭代', '代码理解', '代码重构', '工程化', '代码测试', '代码生成'],
+    totals: {
+      'Bug修复': 3,
+      'Feature迭代': 3,
+      '代码理解': 1,
+      '代码重构': 1,
+      '工程化': 1,
+      '代码测试': 1,
+      '代码生成': 3,
+    },
+  },
+];
+
+export function createNewProjectTaskSettings(): ProjectTaskSettings {
+  return {
+    taskTypes: [...DEFAULT_TASK_TYPES],
+    quotas: {},
+    totals: {},
+  };
+}
+
 const TASK_TYPE_ALIASES: Record<string, string> = {
   uncategorized: DEFAULT_TASK_TYPE,
   unclassified: DEFAULT_TASK_TYPE,
@@ -257,15 +291,60 @@ export function serializeProjectTaskTypes(taskTypes: string[]) {
 
 export function serializeProjectTaskSettings(
   taskTypes: string[],
+  quotas: TaskTypeQuotas,
   totals: TaskTypeQuotas,
 ): SerializedProjectTaskSettings {
-  const serializedTotals = serializeTaskTypeQuotas(totals, taskTypes);
-
   return {
     taskTypes: serializeProjectTaskTypes(taskTypes),
-    taskTypeQuotas: serializedTotals,
-    taskTypeTotals: serializedTotals,
+    taskTypeQuotas: serializeTaskTypeQuotas(quotas, taskTypes),
+    taskTypeTotals: serializeTaskTypeQuotas(totals, taskTypes),
   };
+}
+
+export function deriveTaskTypeUsedCounts(
+  totals: TaskTypeQuotas,
+  quotas: TaskTypeQuotas,
+  taskTypes: string[] = [],
+) {
+  const usedCounts: TaskTypeQuotas = {};
+  const knownTaskTypes = dedupeTaskTypes([
+    ...taskTypes,
+    ...Object.keys(totals),
+    ...Object.keys(quotas),
+  ]);
+
+  for (const taskType of knownTaskTypes) {
+    const totalValue = getTaskTypeQuotaRawValue(totals, taskType);
+    const remainingValue = getTaskTypeQuotaRawValue(quotas, taskType);
+    if (totalValue === null || remainingValue === null) continue;
+
+    usedCounts[taskType] = totalValue - remainingValue;
+  }
+
+  return usedCounts;
+}
+
+export function deriveRemainingTaskTypeQuotas(
+  taskTypes: string[],
+  totals: TaskTypeQuotas,
+  usedCounts: TaskTypeQuotas = {},
+) {
+  const remainingQuotas: TaskTypeQuotas = {};
+  const knownTaskTypes = dedupeTaskTypes([
+    ...taskTypes,
+    ...Object.keys(totals),
+    ...Object.keys(usedCounts),
+  ]);
+
+  for (const taskType of knownTaskTypes) {
+    const totalValue = getTaskTypeQuotaRawValue(totals, taskType);
+    if (totalValue === null) continue;
+
+    const usedCount = getTaskTypeQuotaRawValue(usedCounts, taskType) ?? 0;
+    remainingQuotas[taskType] = totalValue - usedCount;
+  }
+
+  return remainingQuotas;
 }
 
 export function getTaskTypeQuotaValue(quotas: TaskTypeQuotas, taskType: string) {

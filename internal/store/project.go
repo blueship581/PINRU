@@ -379,28 +379,6 @@ func (s *Store) UpdateProject(p Project) error {
 		return err
 	}
 
-	desiredTotals, err := parseTaskTypeCountMap(totals)
-	if err != nil {
-		return err
-	}
-
-	usedCounts, err := s.countProjectUsedQuotaByTaskType(p.ID)
-	if err != nil {
-		return err
-	}
-
-	recomputedQuotas := make(map[string]int, len(desiredTotals))
-	for taskType, total := range desiredTotals {
-		recomputedQuotas[taskType] = total - usedCounts[taskType]
-	}
-
-	if totals, err = marshalTaskTypeCountMap(desiredTotals); err != nil {
-		return err
-	}
-	if quotas, err = marshalTaskTypeCountMap(recomputedQuotas); err != nil {
-		return err
-	}
-
 	assignments := []string{
 		"name=?",
 		"gitlab_url=?",

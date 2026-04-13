@@ -1,12 +1,15 @@
 package gitops
 
 import (
+	"context"
 	"encoding/base64"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestBuildGitAuthEnvUsesExtraHeader(t *testing.T) {
@@ -39,6 +42,48 @@ func TestBuildGitAuthEnvUsesExtraHeader(t *testing.T) {
 	}
 	if string(decoded) != "alice:secret-token" {
 		t.Fatalf("decoded header = %q, want alice:secret-token", decoded)
+	}
+}
+
+func TestBuildGitAuthEnvDisablesPromptWithoutCredentials(t *testing.T) {
+	env := buildGitAuthEnv("https://github.com/example/repo.git", "", "")
+	if len(env) != 1 || env[0] != "GIT_TERMINAL_PROMPT=0" {
+		t.Fatalf("env = %v, want only GIT_TERMINAL_PROMPT=0", env)
+	}
+}
+
+func TestCloneWithProgressHonorsContextCancellation(t *testing.T) {
+	root := t.TempDir()
+	fakeBin := filepath.Join(root, "bin")
+	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
+		t.Fatalf("MkdirAll(fakeBin) error = %v", err)
+	}
+
+	gitPath := filepath.Join(fakeBin, "git")
+	script := strings.Join([]string{
+		"#!/bin/sh",
+		"trap 'exit 143' TERM INT",
+		"printf 'fake clone starting\\n' >&2",
+		"sleep 10",
+	}, "\n")
+	if err := os.WriteFile(gitPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("WriteFile(gitPath) error = %v", err)
+	}
+
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	err := CloneWithProgress(ctx, "https://example.com/demo.git", filepath.Join(root, "clone"), "", "", func(string) {})
+	elapsed := time.Since(start)
+
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("CloneWithProgress() error = %v, want context deadline exceeded", err)
+	}
+	if elapsed > 2*time.Second {
+		t.Fatalf("CloneWithProgress() elapsed = %v, want prompt cancellation", elapsed)
 	}
 }
 

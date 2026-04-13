@@ -24,13 +24,14 @@ export function matchKindLabel(matchKind: string) {
 }
 
 export function buildSessionModelOptions(
-  modelRuns: ModelRunFromDB[],
+  modelRuns: ModelRunFromDB[] | null | undefined,
   sourceModelName: string,
 ): SessionModelOption[] {
-  const executionRuns = modelRuns.filter(
+  const normalizedModelRuns = Array.isArray(modelRuns) ? modelRuns : [];
+  const executionRuns = normalizedModelRuns.filter(
     (run) => !isOriginModel(run.modelName) && !isSourceModel(run.modelName, sourceModelName),
   );
-  const runs = executionRuns.length > 0 ? executionRuns : modelRuns;
+  const runs = executionRuns.length > 0 ? executionRuns : normalizedModelRuns;
   return runs
     .filter((run) => Boolean(run.localPath?.trim()))
     .map((run) => ({
@@ -40,20 +41,22 @@ export function buildSessionModelOptions(
 }
 
 export function filterCandidatesForModel(
-  candidates: ExtractTaskSessionCandidate[],
-  modelRuns: ModelRunFromDB[],
+  candidates: ExtractTaskSessionCandidate[] | null | undefined,
+  modelRuns: ModelRunFromDB[] | null | undefined,
   modelName: string,
 ): ExtractTaskSessionCandidate[] {
+  const normalizedCandidates = Array.isArray(candidates) ? candidates : [];
+  const normalizedModelRuns = Array.isArray(modelRuns) ? modelRuns : [];
   if (!modelName.trim()) {
-    return candidates;
+    return normalizedCandidates;
   }
 
-  const targetRun = modelRuns.find((run) => run.modelName === modelName);
+  const targetRun = normalizedModelRuns.find((run) => run.modelName === modelName);
   if (!targetRun?.localPath?.trim()) {
-    return candidates;
+    return normalizedCandidates;
   }
 
-  return candidates.filter((candidate) => candidateMatchesModelRun(candidate, targetRun));
+  return normalizedCandidates.filter((candidate) => candidateMatchesModelRun(candidate, targetRun));
 }
 
 export function resolveCandidateModelName(

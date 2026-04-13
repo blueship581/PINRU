@@ -140,6 +140,56 @@ func TestCreateTaskAllowsMultipleClaimSetsWithinSameProject(t *testing.T) {
 	}
 }
 
+func TestCreateTaskEnforcesPerProjectTaskTypeUpperLimit(t *testing.T) {
+	testStore := testutil.OpenTestStore(t)
+	defer testStore.Close()
+
+	project := store.Project{
+		ID:             "project-limit",
+		Name:           "Demo",
+		GitLabURL:      "https://gitlab.example.com",
+		GitLabToken:    "glpat-demo",
+		CloneBasePath:  t.TempDir(),
+		Models:         "ORIGIN",
+		TaskTypes:      `["Bug修复"]`,
+		TaskTypeQuotas: `{"Bug修复":2}`,
+		TaskTypeTotals: `{"Bug修复":10}`,
+	}
+	if err := testStore.CreateProject(project); err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+
+	s := &TaskService{store: testStore}
+
+	for _, sequence := range []int{1, 2} {
+		if _, err := s.CreateTask(CreateTaskRequest{
+			GitLabProjectID: 1849,
+			ProjectName:     "label-01849",
+			TaskType:        "Bug修复",
+			ClaimSequence:   intPtr(sequence),
+			Models:          []string{"ORIGIN"},
+			ProjectConfigID: &project.ID,
+		}); err != nil {
+			t.Fatalf("CreateTask(sequence=%d) error = %v", sequence, err)
+		}
+	}
+
+	_, err := s.CreateTask(CreateTaskRequest{
+		GitLabProjectID: 1849,
+		ProjectName:     "label-01849",
+		TaskType:        "Bug修复",
+		ClaimSequence:   intPtr(3),
+		Models:          []string{"ORIGIN"},
+		ProjectConfigID: &project.ID,
+	})
+	if err == nil {
+		t.Fatalf("expected upper-limit error")
+	}
+	if !strings.Contains(err.Error(), "已达上限 2") {
+		t.Fatalf("unexpected upper-limit error = %q", err.Error())
+	}
+}
+
 func TestCreateTaskNormalizesStoredPaths(t *testing.T) {
 	testStore := testutil.OpenTestStore(t)
 	defer testStore.Close()
@@ -444,6 +494,97 @@ func TestResolveTaskLocalFolderReturnsSingleModelPath(t *testing.T) {
 	}
 	if resolved != modelPath {
 		t.Fatalf("resolveTaskLocalFolder() = %q, want %q", resolved, modelPath)
+	}
+}
+
+func TestListTaskChildDirectoriesIncludesImmediateChildrenAndMatchesModelRuns(t *testing.T) {
+	testStore := testutil.OpenTestStore(t)
+	defer testStore.Close()
+
+	s := &TaskService{store: testStore}
+	taskRoot := filepath.Join(t.TempDir(), "label-01849-Bug修复")
+	sourcePath := filepath.Join(taskRoot, "01849-bug修复")
+	modelPath := filepath.Join(taskRoot, "cotv21-pro")
+	scratchPath := filepath.Join(taskRoot, "scratch")
+	if err := os.MkdirAll(sourcePath, 0o755); err != nil {
+		t.Fatalf("MkdirAll(sourcePath) error = %v", err)
+	}
+	if err := os.MkdirAll(modelPath, 0o755); err != nil {
+		t.Fatalf("MkdirAll(modelPath) error = %v", err)
+	}
+	if err := os.MkdirAll(scratchPath, 0o755); err != nil {
+		t.Fatalf("MkdirAll(scratchPath) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(taskRoot, "任务提示词.md"), []byte("prompt"), 0o644); err != nil {
+		t.Fatalf("WriteFile(prompt) error = %v", err)
+	}
+
+	task := store.Task{
+		ID:              "task-child-directories",
+		GitLabProjectID: 1849,
+		ProjectName:     "label-01849",
+		TaskType:        "Bug修复",
+		LocalPath:       &taskRoot,
+	}
+	modelRuns := []store.ModelRun{
+		{
+			ID:           "run-origin",
+			TaskID:       task.ID,
+			ModelName:    "ORIGIN",
+			LocalPath:    &sourcePath,
+			ReviewStatus: "pass",
+			ReviewRound:  2,
+		},
+		{
+			ID:        "run-model",
+			TaskID:    task.ID,
+			ModelName: "cotv21-pro",
+			LocalPath: &modelPath,
+		},
+	}
+	if err := testStore.CreateTaskWithModelRuns(task, modelRuns); err != nil {
+		t.Fatalf("CreateTaskWithModelRuns() error = %v", err)
+	}
+	if err := testStore.UpdateModelRunReview("run-origin", "pass", 2, nil); err != nil {
+		t.Fatalf("UpdateModelRunReview(run-origin) error = %v", err)
+	}
+
+	children, err := s.ListTaskChildDirectories(task.ID)
+	if err != nil {
+		t.Fatalf("ListTaskChildDirectories() error = %v", err)
+	}
+	if len(children) != 3 {
+		t.Fatalf("ListTaskChildDirectories() count = %d, want 3", len(children))
+	}
+	if children[0].Name != "01849-bug修复" || !children[0].IsSource {
+		t.Fatalf("first child = %+v, want source directory first", children[0])
+	}
+
+	byName := make(map[string]TaskChildDirectory, len(children))
+	for _, child := range children {
+		byName[child.Name] = child
+	}
+
+	sourceChild, ok := byName["01849-bug修复"]
+	if !ok {
+		t.Fatalf("missing source child: %+v", children)
+	}
+	if sourceChild.ModelRunID == nil || *sourceChild.ModelRunID != "run-origin" {
+		t.Fatalf("source child modelRunId = %v, want run-origin", sourceChild.ModelRunID)
+	}
+	if sourceChild.ModelName == nil || *sourceChild.ModelName != "ORIGIN" {
+		t.Fatalf("source child modelName = %v, want ORIGIN", sourceChild.ModelName)
+	}
+	if sourceChild.ReviewStatus != "pass" || sourceChild.ReviewRound != 2 {
+		t.Fatalf("source child review = %q/%d, want pass/2", sourceChild.ReviewStatus, sourceChild.ReviewRound)
+	}
+
+	scratchChild, ok := byName["scratch"]
+	if !ok {
+		t.Fatalf("missing scratch child: %+v", children)
+	}
+	if scratchChild.ModelRunID != nil || scratchChild.ModelName != nil {
+		t.Fatalf("scratch child should not map to model run: %+v", scratchChild)
 	}
 }
 

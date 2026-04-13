@@ -48,7 +48,7 @@ func main() {
 	cliSvc := appcli.New()
 	promptSvc := appprompt.New(db, cliSvc)
 	chatSvc := appchat.New(db, cliSvc)
-	jobSvc := appjob.New(db, promptSvc, gitSvc, submitSvc)
+	jobSvc := appjob.New(db, promptSvc, gitSvc, submitSvc, taskSvc, cliSvc)
 
 	// Pre-install bundled skills and execution manuals on every launch.
 	// Manuals are extracted to ~/.pinru/manuals/; skills are written to
