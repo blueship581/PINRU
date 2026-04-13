@@ -3,12 +3,74 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 )
+
+// TestHelperProcess is not a real test. It is invoked as a subprocess by other
+// tests to provide a cross-platform mock for external CLI binaries.
+// Run via createMockCodexExecutable; do not call directly.
+func TestHelperProcess(t *testing.T) {
+	if os.Getenv("GO_TEST_SUBPROCESS") != "1" {
+		return
+	}
+	// Find the "--" separator; everything after it are the forwarded CLI args.
+	args := os.Args
+	for len(args) > 0 {
+		if args[0] == "--" {
+			args = args[1:]
+			break
+		}
+		args = args[1:]
+	}
+	switch os.Getenv("GO_TEST_SUBPROCESS_MODE") {
+	case "codex_error":
+		fmt.Fprintln(os.Stderr, "ERROR: invalid schema")
+		fmt.Fprintln(os.Stderr, "ERROR: additionalProperties must be false")
+		os.Exit(1)
+	default:
+		fmt.Fprintf(os.Stderr, "unknown GO_TEST_SUBPROCESS_MODE: %s\n", os.Getenv("GO_TEST_SUBPROCESS_MODE"))
+		os.Exit(1)
+	}
+}
+
+// createMockCodexExecutable returns a path to a platform-appropriate executable
+// that behaves according to mode when invoked as "codex". On Unix it creates a
+// shell script; on Windows a .bat wrapper — both delegate to the test binary
+// via the TestHelperProcess helper-process pattern.
+func createMockCodexExecutable(t *testing.T, mode string) string {
+	t.Helper()
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatalf("os.Executable() error = %v", err)
+	}
+	dir := t.TempDir()
+	if runtime.GOOS == "windows" {
+		path := filepath.Join(dir, "codex.bat")
+		content := fmt.Sprintf(
+			"@echo off\r\nset GO_TEST_SUBPROCESS=1\r\nset GO_TEST_SUBPROCESS_MODE=%s\r\n\"%s\" -test.run=TestHelperProcess -- %%*\r\nexit /b %%errorlevel%%\r\n",
+			mode, exe,
+		)
+		if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
+			t.Fatalf("os.WriteFile(%s) error = %v", path, err)
+		}
+		return path
+	}
+	path := filepath.Join(dir, "codex")
+	content := fmt.Sprintf(
+		"#!/bin/sh\nGO_TEST_SUBPROCESS=1 GO_TEST_SUBPROCESS_MODE=%s exec %q -test.run=TestHelperProcess -- \"$@\"\n",
+		mode, exe,
+	)
+	if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
+		t.Fatalf("os.WriteFile(%s) error = %v", path, err)
+	}
+	return path
+}
 
 func TestValidatePermissionMode(t *testing.T) {
 	if err := validatePermissionMode(""); err != nil {
@@ -172,20 +234,13 @@ func TestPgCodeReviewSchemaDisallowsAdditionalProperties(t *testing.T) {
 
 func TestRunCodexReviewIncludesRecentCliOutputInError(t *testing.T) {
 	repoDir := t.TempDir()
-	scriptPath := filepath.Join(t.TempDir(), "codex")
-	script := "#!/bin/sh\n" +
-		"echo 'ERROR: invalid schema' >&2\n" +
-		"echo 'ERROR: additionalProperties must be false' >&2\n" +
-		"exit 1\n"
-	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
-		t.Fatalf("os.WriteFile(scriptPath) error = %v", err)
-	}
+	mockPath := createMockCodexExecutable(t, "codex_error")
 
 	svc := NewWithResolver(func(name string) (string, error) {
 		if name != "codex" {
 			t.Fatalf("unexpected CLI lookup: %s", name)
 		}
-		return scriptPath, nil
+		return mockPath, nil
 	})
 
 	_, err := svc.RunCodexReview(context.Background(), repoDir, nil)
