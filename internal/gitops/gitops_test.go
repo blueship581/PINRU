@@ -23,8 +23,12 @@ func TestHelperProcess(t *testing.T) {
 	switch os.Getenv("GO_TEST_SUBPROCESS_MODE") {
 	case "git_sleep":
 		fmt.Fprintln(os.Stderr, "fake clone starting")
-		// Block until killed; context cancellation sends SIGKILL on Windows.
-		select {}
+		// Sleep until killed by the OS. time.Sleep keeps a timer goroutine alive,
+		// so the Go deadlock detector does not fire prematurely. select{} would
+		// cause all goroutines to be permanently parked, triggering the detector
+		// in ~10 ms and exiting before the context deadline.
+		time.Sleep(24 * time.Hour)
+		os.Exit(0)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown GO_TEST_SUBPROCESS_MODE: %s\n", os.Getenv("GO_TEST_SUBPROCESS_MODE"))
 		os.Exit(1)
