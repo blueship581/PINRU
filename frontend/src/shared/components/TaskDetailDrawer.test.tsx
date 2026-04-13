@@ -18,6 +18,8 @@ function createTask(overrides: Partial<Task> = {}): Task {
     promptGenerationError: overrides.promptGenerationError ?? null,
     createdAt: overrides.createdAt ?? 1,
     executionRounds: overrides.executionRounds ?? 1,
+    aiReviewRounds: overrides.aiReviewRounds ?? 0,
+    aiReviewStatus: overrides.aiReviewStatus ?? 'none',
     progress: overrides.progress ?? 0,
     totalModels: overrides.totalModels ?? 0,
     runningModels: overrides.runningModels ?? 0,
@@ -549,6 +551,7 @@ describe('TaskDetailDrawer session copy affordance', () => {
     expect(screen.getAllByText('导出逻辑还缺异常兜底')).toHaveLength(2);
     expect(screen.getAllByText('把导出失败提示和空数据保护补齐，再复审一轮。')).toHaveLength(2);
     expect(screen.getAllByText('未关联模型').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('第 2 轮').length).toBeGreaterThan(0);
     expect(screen.getAllByText('01874-代码生成')).toHaveLength(2);
     expect(screen.queryByText(/"isCompleted":true/)).not.toBeInTheDocument();
     expect(screen.getAllByText('是否完成：是').length).toBeGreaterThan(0);

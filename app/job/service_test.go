@@ -205,6 +205,98 @@ func TestExecuteAiReviewRunsSingleRoundPerSubmission(t *testing.T) {
 	}
 }
 
+func TestExecuteAiReviewIncrementsReviewRoundAcrossSubmissions(t *testing.T) {
+	testStore := testutil.OpenTestStore(t)
+
+	taskID := "task-review-round"
+	workDir := t.TempDir()
+	task := store.Task{
+		ID:              taskID,
+		GitLabProjectID: 1849,
+		ProjectName:     "label-01849",
+		TaskType:        "Bug修复",
+	}
+	modelRuns := []store.ModelRun{{
+		ID:        "run-review-round",
+		TaskID:    taskID,
+		ModelName: "cotv21-pro",
+		LocalPath: &workDir,
+	}}
+	if err := testStore.CreateTaskWithModelRuns(task, modelRuns); err != nil {
+		t.Fatalf("CreateTaskWithModelRuns() error = %v", err)
+	}
+	if err := testStore.UpdateModelRunReview("run-review-round", "warning", 2, nil); err != nil {
+		t.Fatalf("UpdateModelRunReview() error = %v", err)
+	}
+
+	if err := testStore.CreateBackgroundJob(store.BackgroundJob{
+		ID:             "job-review-round",
+		JobType:        "ai_review",
+		TaskID:         &taskID,
+		Status:         "pending",
+		Progress:       0,
+		InputPayload:   "{}",
+		MaxRetries:     1,
+		TimeoutSeconds: 60,
+		CreatedAt:      1,
+	}); err != nil {
+		t.Fatalf("CreateBackgroundJob() error = %v", err)
+	}
+
+	countFile := filepath.Join(t.TempDir(), "count.txt")
+	mockPath := createMockCodexExecutable(t, "codex_single_round", map[string]string{
+		"GO_TEST_COUNT_FILE": countFile,
+	})
+
+	cliSvc := appcli.NewWithResolver(func(name string) (string, error) {
+		if name != "codex" {
+			t.Fatalf("unexpected CLI lookup: %s", name)
+		}
+		return mockPath, nil
+	})
+	jobSvc := &JobService{store: testStore, cliSvc: cliSvc}
+
+	payloadJSON, err := json.Marshal(AiReviewPayload{
+		ModelRunID: strPtr("run-review-round"),
+		ModelName:  "cotv21-pro",
+		LocalPath:  workDir,
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal(payload) error = %v", err)
+	}
+
+	result, err := jobSvc.executeAiReview(context.Background(), "job-review-round", SubmitJobRequest{
+		JobType:      "ai_review",
+		TaskID:       taskID,
+		InputPayload: string(payloadJSON),
+	})
+	if err != nil {
+		t.Fatalf("executeAiReview() error = %v", err)
+	}
+	if result.outputPayload == nil {
+		t.Fatalf("executeAiReview() outputPayload = nil")
+	}
+
+	var output AiReviewResult
+	if err := json.Unmarshal([]byte(*result.outputPayload), &output); err != nil {
+		t.Fatalf("json.Unmarshal(outputPayload) error = %v", err)
+	}
+	if output.ReviewRound != 3 {
+		t.Fatalf("ReviewRound = %d, want 3", output.ReviewRound)
+	}
+
+	updatedRun, err := testStore.GetModelRunByID("run-review-round")
+	if err != nil {
+		t.Fatalf("GetModelRunByID() error = %v", err)
+	}
+	if updatedRun == nil {
+		t.Fatalf("GetModelRunByID() = nil")
+	}
+	if updatedRun.ReviewRound != 3 {
+		t.Fatalf("updated review round = %d, want 3", updatedRun.ReviewRound)
+	}
+}
+
 func TestSubmitJobDeduplicatesActiveAiReviewJobs(t *testing.T) {
 	testStore := testutil.OpenTestStore(t)
 
@@ -253,6 +345,185 @@ func TestSubmitJobDeduplicatesActiveAiReviewJobs(t *testing.T) {
 	}
 	if len(jobs) != 1 {
 		t.Fatalf("ListBackgroundJobs() count = %d, want 1", len(jobs))
+	}
+}
+
+func TestCancelJobRestoresPreviousAiReviewResult(t *testing.T) {
+	testStore := testutil.OpenTestStore(t)
+
+	taskID := "task-cancel-review-restore"
+	workDir := t.TempDir()
+	task := store.Task{
+		ID:              taskID,
+		GitLabProjectID: 1849,
+		ProjectName:     "label-01849",
+		TaskType:        "Bug修复",
+	}
+	modelRuns := []store.ModelRun{{
+		ID:           "run-cancel-review-restore",
+		TaskID:       taskID,
+		ModelName:    "cotv21-pro",
+		LocalPath:    &workDir,
+		ReviewStatus: "running",
+		ReviewRound:  3,
+	}}
+	if err := testStore.CreateTaskWithModelRuns(task, modelRuns); err != nil {
+		t.Fatalf("CreateTaskWithModelRuns() error = %v", err)
+	}
+	if err := testStore.UpdateModelRunReview("run-cancel-review-restore", "running", 3, nil); err != nil {
+		t.Fatalf("UpdateModelRunReview() error = %v", err)
+	}
+
+	payloadJSON, err := json.Marshal(AiReviewPayload{
+		ModelRunID: strPtr("run-cancel-review-restore"),
+		ModelName:  "cotv21-pro",
+		LocalPath:  workDir,
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal(payload) error = %v", err)
+	}
+	resultJSON, err := json.Marshal(AiReviewResult{
+		ModelRunID:   "run-cancel-review-restore",
+		ModelName:    "cotv21-pro",
+		ReviewStatus: "warning",
+		ReviewRound:  2,
+		ReviewNotes:  "previous result",
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal(result) error = %v", err)
+	}
+	taskIDPtr := taskID
+	if err := testStore.CreateBackgroundJob(store.BackgroundJob{
+		ID:             "job-review-history",
+		JobType:        "ai_review",
+		TaskID:         &taskIDPtr,
+		Status:         "pending",
+		Progress:       0,
+		InputPayload:   string(payloadJSON),
+		MaxRetries:     1,
+		TimeoutSeconds: 600,
+		CreatedAt:      1,
+	}); err != nil {
+		t.Fatalf("CreateBackgroundJob(history) error = %v", err)
+	}
+	resultStr := string(resultJSON)
+	if err := testStore.CompleteBackgroundJob("job-review-history", &resultStr); err != nil {
+		t.Fatalf("CompleteBackgroundJob(history) error = %v", err)
+	}
+	if err := testStore.CreateBackgroundJob(store.BackgroundJob{
+		ID:             "job-review-running",
+		JobType:        "ai_review",
+		TaskID:         &taskIDPtr,
+		Status:         "running",
+		Progress:       45,
+		InputPayload:   string(payloadJSON),
+		MaxRetries:     1,
+		TimeoutSeconds: 600,
+		CreatedAt:      2,
+	}); err != nil {
+		t.Fatalf("CreateBackgroundJob(running) error = %v", err)
+	}
+
+	jobSvc := &JobService{store: testStore, running: make(map[string]context.CancelFunc)}
+	if err := jobSvc.CancelJob("job-review-running"); err != nil {
+		t.Fatalf("CancelJob() error = %v", err)
+	}
+
+	cancelledJob, err := testStore.GetBackgroundJob("job-review-running")
+	if err != nil {
+		t.Fatalf("GetBackgroundJob() error = %v", err)
+	}
+	if cancelledJob == nil || cancelledJob.Status != "cancelled" {
+		t.Fatalf("cancelled job status = %v, want cancelled", cancelledJob)
+	}
+
+	run, err := testStore.GetModelRunByID("run-cancel-review-restore")
+	if err != nil {
+		t.Fatalf("GetModelRunByID() error = %v", err)
+	}
+	if run == nil {
+		t.Fatalf("GetModelRunByID() = nil")
+	}
+	if run.ReviewStatus != "warning" {
+		t.Fatalf("ReviewStatus = %q, want warning", run.ReviewStatus)
+	}
+	if run.ReviewRound != 2 {
+		t.Fatalf("ReviewRound = %d, want 2", run.ReviewRound)
+	}
+	if run.ReviewNotes == nil || *run.ReviewNotes != "previous result" {
+		t.Fatalf("ReviewNotes = %v, want previous result", run.ReviewNotes)
+	}
+}
+
+func TestCancelJobClearsAiReviewRunningStateWithoutHistory(t *testing.T) {
+	testStore := testutil.OpenTestStore(t)
+
+	taskID := "task-cancel-review-clear"
+	workDir := t.TempDir()
+	task := store.Task{
+		ID:              taskID,
+		GitLabProjectID: 1849,
+		ProjectName:     "label-01849",
+		TaskType:        "Bug修复",
+	}
+	modelRuns := []store.ModelRun{{
+		ID:           "run-cancel-review-clear",
+		TaskID:       taskID,
+		ModelName:    "cotv21-pro",
+		LocalPath:    &workDir,
+		ReviewStatus: "running",
+		ReviewRound:  1,
+	}}
+	if err := testStore.CreateTaskWithModelRuns(task, modelRuns); err != nil {
+		t.Fatalf("CreateTaskWithModelRuns() error = %v", err)
+	}
+	if err := testStore.UpdateModelRunReview("run-cancel-review-clear", "running", 1, nil); err != nil {
+		t.Fatalf("UpdateModelRunReview() error = %v", err)
+	}
+
+	payloadJSON, err := json.Marshal(AiReviewPayload{
+		ModelRunID: strPtr("run-cancel-review-clear"),
+		ModelName:  "cotv21-pro",
+		LocalPath:  workDir,
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal(payload) error = %v", err)
+	}
+	taskIDPtr := taskID
+	if err := testStore.CreateBackgroundJob(store.BackgroundJob{
+		ID:             "job-review-clear",
+		JobType:        "ai_review",
+		TaskID:         &taskIDPtr,
+		Status:         "running",
+		Progress:       30,
+		InputPayload:   string(payloadJSON),
+		MaxRetries:     1,
+		TimeoutSeconds: 600,
+		CreatedAt:      1,
+	}); err != nil {
+		t.Fatalf("CreateBackgroundJob() error = %v", err)
+	}
+
+	jobSvc := &JobService{store: testStore, running: make(map[string]context.CancelFunc)}
+	if err := jobSvc.CancelJob("job-review-clear"); err != nil {
+		t.Fatalf("CancelJob() error = %v", err)
+	}
+
+	run, err := testStore.GetModelRunByID("run-cancel-review-clear")
+	if err != nil {
+		t.Fatalf("GetModelRunByID() error = %v", err)
+	}
+	if run == nil {
+		t.Fatalf("GetModelRunByID() = nil")
+	}
+	if run.ReviewStatus != "none" {
+		t.Fatalf("ReviewStatus = %q, want none", run.ReviewStatus)
+	}
+	if run.ReviewRound != 0 {
+		t.Fatalf("ReviewRound = %d, want 0", run.ReviewRound)
+	}
+	if run.ReviewNotes != nil {
+		t.Fatalf("ReviewNotes = %v, want nil", run.ReviewNotes)
 	}
 }
 

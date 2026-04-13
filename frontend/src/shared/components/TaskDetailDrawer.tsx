@@ -1470,13 +1470,18 @@ export default function TaskDetailDrawer({
                           {entry.reviewStatus === 'none' ? (
                             <WorkspaceBadge tone="neutral">未复审</WorkspaceBadge>
                           ) : (
-                            <span
-                              className={clsx('inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold', reviewMeta.badgeCls)}
-                              title={entry.reviewNotes ?? undefined}
-                            >
-                              {reviewMeta.icon}
-                              {reviewMeta.label}
-                            </span>
+                            <>
+                              {entry.reviewRound > 0 && (
+                                <WorkspaceBadge tone="blue">第 {entry.reviewRound} 轮</WorkspaceBadge>
+                              )}
+                              <span
+                                className={clsx('inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold', reviewMeta.badgeCls)}
+                                title={entry.reviewNotes ?? undefined}
+                              >
+                                {reviewMeta.icon}
+                                {reviewMeta.label}
+                              </span>
+                            </>
                           )}
                           {entry.isUnlinked && (
                             <WorkspaceBadge tone="warning">未关联模型</WorkspaceBadge>
@@ -1578,6 +1583,9 @@ export default function TaskDetailDrawer({
                       <div>
                         <div className="flex flex-wrap items-center gap-2">
                           <span className="font-mono text-sm text-zinc-100">{entry.displayName}</span>
+                          {entry.output?.reviewRound ? (
+                            <WorkspaceBadge tone="blue">第 {entry.output.reviewRound} 轮</WorkspaceBadge>
+                          ) : null}
                           <WorkspaceBadge tone={taskStatus.tone}>{taskStatus.label}</WorkspaceBadge>
                           {reviewMeta && (
                             <span className={clsx('inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold', reviewMeta.badgeCls)}>
@@ -2361,7 +2369,7 @@ function deriveReviewStatusFromJob(entry: ParsedAiReviewJob) {
   if (entry.job.status === 'running' || entry.job.status === 'pending') {
     return 'running';
   }
-  if (entry.job.status === 'error' || entry.job.status === 'cancelled') {
+  if (entry.job.status === 'error') {
     return 'warning';
   }
   return 'none';

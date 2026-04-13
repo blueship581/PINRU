@@ -6,6 +6,7 @@ import {
   type TaskSession,
   type ModelRunFromDB,
   type PromptGenerationStatus,
+  type ReviewStatus,
 } from './api/task';
 import {
   DEFAULT_TASK_TYPE,
@@ -41,6 +42,8 @@ export interface Task {
   promptGenerationError: string | null;
   createdAt: number;
   executionRounds: number;
+  aiReviewRounds: number;
+  aiReviewStatus: ReviewStatus;
   progress: number;
   totalModels: number;
   runningModels: number;
@@ -81,6 +84,29 @@ function getPersistedExecutionRounds(
   return getExecutionRounds(dbTask);
 }
 
+function getPersistedAiReviewRounds(modelRuns: ModelRunFromDB[]): number {
+  return modelRuns.reduce((maxRounds, run) => Math.max(maxRounds, run.reviewRound ?? 0), 0);
+}
+
+function getPersistedAiReviewStatus(modelRuns: ModelRunFromDB[]): ReviewStatus {
+  const reviewRounds = getPersistedAiReviewRounds(modelRuns);
+  if (reviewRounds <= 0) {
+    return 'none';
+  }
+
+  const latestRoundRuns = modelRuns.filter((run) => (run.reviewRound ?? 0) === reviewRounds);
+  if (latestRoundRuns.some((run) => run.reviewStatus === 'running')) {
+    return 'running';
+  }
+  if (latestRoundRuns.some((run) => run.reviewStatus === 'warning')) {
+    return 'warning';
+  }
+  if (latestRoundRuns.some((run) => run.reviewStatus === 'pass')) {
+    return 'pass';
+  }
+  return 'none';
+}
+
 function mapDbTaskToTask(dbTask: TaskFromDB, modelRuns: ModelRunFromDB[]): Task {
   const persistedSessionList = buildPersistedTaskSessionList(dbTask, modelRuns);
   return {
@@ -94,6 +120,8 @@ function mapDbTaskToTask(dbTask: TaskFromDB, modelRuns: ModelRunFromDB[]): Task 
     promptGenerationError: dbTask.promptGenerationError,
     createdAt: dbTask.createdAt,
     executionRounds: getPersistedExecutionRounds(dbTask, modelRuns),
+    aiReviewRounds: getPersistedAiReviewRounds(modelRuns),
+    aiReviewStatus: getPersistedAiReviewStatus(modelRuns),
     progress: 0,
     totalModels: 0,
     runningModels: 0,

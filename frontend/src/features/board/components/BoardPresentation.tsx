@@ -10,7 +10,7 @@ import {
 import type { MouseEvent } from 'react';
 import type { Task, TaskStatus } from '../../../store';
 import { getTaskTypePresentation } from '../../../api/config';
-import type { PromptGenerationStatus } from '../../../api/task';
+import type { PromptGenerationStatus, ReviewStatus } from '../../../api/task';
 import type { TaskTypeOverviewSummary } from '../../../shared/lib/taskTypeOverview';
 
 export type CardSize = 'sm' | 'md' | 'lg';
@@ -141,6 +141,43 @@ export function TaskRoundBadge({
   );
 }
 
+function TaskAiReviewBadge({
+  rounds,
+  status,
+  compact = false,
+}: {
+  rounds: number;
+  status: ReviewStatus;
+  compact?: boolean;
+}) {
+  if (rounds <= 0 || status === 'none') {
+    return null;
+  }
+
+  const toneClass =
+    status === 'running'
+      ? 'border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-500/20 dark:bg-amber-500/10 dark:text-amber-300'
+      : status === 'warning'
+        ? 'border-orange-200 bg-orange-50 text-orange-700 dark:border-orange-500/20 dark:bg-orange-500/10 dark:text-orange-300'
+        : 'border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-500/20 dark:bg-emerald-500/10 dark:text-emerald-300';
+  const label =
+    status === 'running'
+      ? `复审中 · 第 ${rounds} 轮`
+      : status === 'warning'
+        ? `复审未过 · 第 ${rounds} 轮`
+        : `复审通过 · 第 ${rounds} 轮`;
+
+  return (
+    <span
+      className={`inline-flex items-center rounded-full border font-semibold ${toneClass} ${
+        compact ? 'px-2 py-0.5 text-[10px]' : 'px-2.5 py-1 text-[11px]'
+      }`}
+    >
+      {label}
+    </span>
+  );
+}
+
 export function TaskCard({
   task,
   size,
@@ -229,6 +266,7 @@ export function TaskCard({
             {typePresentation.label}
           </span>
           <TaskRoundBadge rounds={task.executionRounds} compact />
+          <TaskAiReviewBadge rounds={task.aiReviewRounds} status={task.aiReviewStatus} compact />
         </div>
         {task.totalModels > 0 && (
           <div className="mt-2.5 flex items-center gap-1.5">
@@ -291,6 +329,7 @@ export function TaskCard({
               {typePresentation.label}
             </span>
             <TaskRoundBadge rounds={task.executionRounds} />
+            <TaskAiReviewBadge rounds={task.aiReviewRounds} status={task.aiReviewStatus} />
           </div>
           {!selectionMode && (
             <button
@@ -393,6 +432,7 @@ export function TaskCard({
           {typePresentation.label}
         </span>
         <TaskRoundBadge rounds={task.executionRounds} />
+        <TaskAiReviewBadge rounds={task.aiReviewRounds} status={task.aiReviewStatus} />
       </div>
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-1.5 text-xs text-stone-500 dark:text-stone-400">

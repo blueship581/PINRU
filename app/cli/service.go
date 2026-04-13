@@ -760,11 +760,11 @@ func buildCodexReviewPrompt(project *pgCodeProjectContext) string {
 	parts = append(parts, "/pg-code")
 	parts = append(parts, strings.TrimSpace(`
 补充规则：
-1. 只能基于任务提示词、git 变更、最近更新文件以及你实际读取过的文件下结论。
+1. 【严格限制】只能读取和评审 git 变更文件（git status / git diff 列出的文件）以及最近更新文件。禁止主动读取或评审这些范围之外的任何文件，即使读取了也不能据此下结论。
 2. 严禁猜测运行效果、页面视觉、接口返回、测试结果或用户体验。
-3. keyLocations 填写 1 到 3 个你实际核验过的代码位置，尽量支撑结论，写不出时可留空。
+3. keyLocations 只能填写 git 变更文件或最近更新文件中 1 到 3 个你实际核验过的代码位置，写不出时可留空。
 4. 当主要功能实现度达到 90% 以上时，isCompleted 和 isSatisfied 均可填 true，允许存在少量非关键细节缺失或边缘情况未覆盖。
-5. 找不到任务提示词或有效改动时，reviewNotes 注明”依据不足”，但不影响对已有代码的判断。
+5. 找不到任务提示词或有效改动时，reviewNotes 注明”依据不足”，isCompleted 和 isSatisfied 均填 false。
 6. projectType 和 changeScope 按最符合实际情况的选项填写。
 `))
 

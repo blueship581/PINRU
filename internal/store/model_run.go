@@ -79,6 +79,36 @@ func (s *Store) UpdateModelRun(taskID, modelName, status string, branchName, prU
 	return ensureRowsAffected(res, err, "model run %q/%q not found", taskID, modelName)
 }
 
+func (s *Store) GetModelRunByID(id string) (*ModelRun, error) {
+	var r ModelRun
+	query := fmt.Sprintf(
+		`SELECT id, task_id, model_name, branch_name, local_path, pr_url, origin_url, gsb_score,
+		        status, %s, %s, session_id, conversation_rounds, %s, submit_error, session_list,
+		        review_status, review_round, review_notes
+		 FROM model_runs WHERE id = ?`,
+		nullableUnixTimestampExpr("started_at"),
+		nullableUnixTimestampExpr("finished_at"),
+		nullableUnixTimestampExpr("conversation_date"),
+	)
+	var rawSessionList string
+	err := s.DB.QueryRow(query, id).
+		Scan(&r.ID, &r.TaskID, &r.ModelName, &r.BranchName, &r.LocalPath,
+			&r.PrURL, &r.OriginURL, &r.GsbScore, &r.Status, &r.StartedAt, &r.FinishedAt,
+			&r.SessionID, &r.ConversationRounds, &r.ConversationDate, &r.SubmitError, &rawSessionList,
+			&r.ReviewStatus, &r.ReviewRound, &r.ReviewNotes)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	r.SessionList, err = parseOptionalTaskSessionList(rawSessionList, defaultTaskType)
+	if err != nil {
+		return nil, err
+	}
+	return &r, nil
+}
+
 func (s *Store) GetModelRun(taskID, modelName string) (*ModelRun, error) {
 	var r ModelRun
 	query := fmt.Sprintf(

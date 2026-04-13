@@ -16,6 +16,8 @@ function createTask(overrides: Partial<Task> = {}): Task {
     promptGenerationError: overrides.promptGenerationError ?? null,
     createdAt: overrides.createdAt ?? 1,
     executionRounds: overrides.executionRounds ?? 1,
+    aiReviewRounds: overrides.aiReviewRounds ?? 0,
+    aiReviewStatus: overrides.aiReviewStatus ?? 'none',
     progress: overrides.progress ?? 0,
     totalModels: overrides.totalModels ?? 0,
     runningModels: overrides.runningModels ?? 0,

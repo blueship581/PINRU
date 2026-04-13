@@ -95,7 +95,9 @@ func (s *Store) ListBackgroundJobs(filter *JobFilter) ([]BackgroundJob, error) {
 
 func (s *Store) UpdateBackgroundJobProgress(id string, progress int, message string) error {
 	_, err := s.DB.Exec(
-		`UPDATE background_jobs SET progress = ?, progress_message = ?, status = 'running' WHERE id = ?`,
+		`UPDATE background_jobs
+		 SET progress = ?, progress_message = ?, status = 'running'
+		 WHERE id = ? AND status != 'cancelled'`,
 		progress, message, id,
 	)
 	return err
@@ -104,7 +106,9 @@ func (s *Store) UpdateBackgroundJobProgress(id string, progress int, message str
 func (s *Store) StartBackgroundJob(id string) error {
 	now := time.Now().Unix()
 	_, err := s.DB.Exec(
-		`UPDATE background_jobs SET status = 'running', started_at = ? WHERE id = ?`,
+		`UPDATE background_jobs
+		 SET status = 'running', started_at = ?
+		 WHERE id = ? AND status != 'cancelled'`,
 		now, id,
 	)
 	return err
@@ -113,7 +117,9 @@ func (s *Store) StartBackgroundJob(id string) error {
 func (s *Store) CompleteBackgroundJob(id string, outputPayload *string) error {
 	now := time.Now().Unix()
 	_, err := s.DB.Exec(
-		`UPDATE background_jobs SET status = 'done', progress = 100, output_payload = ?, finished_at = ? WHERE id = ?`,
+		`UPDATE background_jobs
+		 SET status = 'done', progress = 100, output_payload = ?, finished_at = ?
+		 WHERE id = ? AND status != 'cancelled'`,
 		outputPayload, now, id,
 	)
 	return err
@@ -122,7 +128,9 @@ func (s *Store) CompleteBackgroundJob(id string, outputPayload *string) error {
 func (s *Store) FailBackgroundJob(id string, errMsg string) error {
 	now := time.Now().Unix()
 	_, err := s.DB.Exec(
-		`UPDATE background_jobs SET status = 'error', error_message = ?, finished_at = ? WHERE id = ?`,
+		`UPDATE background_jobs
+		 SET status = 'error', error_message = ?, finished_at = ?
+		 WHERE id = ? AND status != 'cancelled'`,
 		errMsg, now, id,
 	)
 	return err

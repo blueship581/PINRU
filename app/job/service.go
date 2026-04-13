@@ -229,6 +229,14 @@ func (s *JobService) RetryJob(id string) (*store.BackgroundJob, error) {
 }
 
 func (s *JobService) CancelJob(id string) error {
+	job, err := s.store.GetBackgroundJob(id)
+	if err != nil {
+		return err
+	}
+	if job == nil {
+		return fmt.Errorf("任务不存在: %s", id)
+	}
+
 	s.mu.Lock()
 	cancel, ok := s.running[id]
 	s.mu.Unlock()
@@ -236,7 +244,92 @@ func (s *JobService) CancelJob(id string) error {
 	if ok {
 		cancel()
 	}
-	return s.store.CancelBackgroundJob(id)
+	if err := s.store.CancelBackgroundJob(id); err != nil {
+		return err
+	}
+	if err := s.restoreAiReviewStateAfterCancel(job); err != nil {
+		return err
+	}
+
+	taskID := ""
+	if job.TaskID != nil {
+		taskID = *job.TaskID
+	}
+	s.emitProgress(id, job.JobType, taskID, "cancelled", job.Progress, strPtr("已取消"), nil)
+	return nil
+}
+
+func (s *JobService) restoreAiReviewStateAfterCancel(job *store.BackgroundJob) error {
+	if job == nil || job.JobType != "ai_review" || job.TaskID == nil {
+		return nil
+	}
+
+	payload, ok := parseAiReviewPayloadForDedup(job.InputPayload)
+	if !ok || payload.ModelRunID == nil {
+		return nil
+	}
+
+	modelRunID := strings.TrimSpace(*payload.ModelRunID)
+	if modelRunID == "" {
+		return nil
+	}
+
+	targetKey := buildAiReviewTargetKey(payload.ModelRunID, payload.LocalPath)
+	if targetKey == "" {
+		return s.store.UpdateModelRunReview(modelRunID, "none", 0, nil)
+	}
+
+	jobs, err := s.store.ListBackgroundJobs(&store.JobFilter{TaskID: job.TaskID})
+	if err != nil {
+		return fmt.Errorf("查询历史复审记录失败: %w", err)
+	}
+
+	for _, historyJob := range jobs {
+		if historyJob.ID == job.ID || historyJob.JobType != "ai_review" {
+			continue
+		}
+		if historyJob.Status != "done" && historyJob.Status != "error" {
+			continue
+		}
+
+		historyPayload, ok := parseAiReviewPayloadForDedup(historyJob.InputPayload)
+		if !ok {
+			continue
+		}
+		if buildAiReviewTargetKey(historyPayload.ModelRunID, historyPayload.LocalPath) != targetKey {
+			continue
+		}
+
+		result, ok := parseAiReviewResultPayload(historyJob.OutputPayload)
+		if !ok || result.ReviewRound <= 0 {
+			continue
+		}
+		if result.ReviewStatus != "pass" && result.ReviewStatus != "warning" {
+			continue
+		}
+
+		var notes *string
+		if trimmed := strings.TrimSpace(result.ReviewNotes); trimmed != "" {
+			notes = &trimmed
+		}
+		return s.store.UpdateModelRunReview(modelRunID, result.ReviewStatus, result.ReviewRound, notes)
+	}
+
+	return s.store.UpdateModelRunReview(modelRunID, "none", 0, nil)
+}
+
+func parseAiReviewResultPayload(raw *string) (AiReviewResult, bool) {
+	if raw == nil || strings.TrimSpace(*raw) == "" {
+		return AiReviewResult{}, false
+	}
+
+	var result AiReviewResult
+	if err := json.Unmarshal([]byte(*raw), &result); err != nil {
+		return AiReviewResult{}, false
+	}
+	result.ReviewStatus = strings.TrimSpace(result.ReviewStatus)
+	result.ReviewNotes = strings.TrimSpace(result.ReviewNotes)
+	return result, true
 }
 
 func (s *JobService) executeJob(id string, req SubmitJobRequest) {
@@ -253,6 +346,15 @@ func (s *JobService) executeJob(id string, req SubmitJobRequest) {
 		delete(s.running, id)
 		s.mu.Unlock()
 	}()
+
+	if s.isJobCancelled(id) {
+		slog.Info("job skipped because it was already cancelled",
+			"job_id", id,
+			"job_type", req.JobType,
+			"task_id", req.TaskID,
+		)
+		return
+	}
 
 	_ = s.store.StartBackgroundJob(id)
 	// 尝试获取项目名称用于日志标识
@@ -297,9 +399,14 @@ func (s *JobService) executeJob(id string, req SubmitJobRequest) {
 	}
 
 	if ctx.Err() == context.DeadlineExceeded {
+		if s.isJobCancelled(id) {
+			return
+		}
 		errMsg := "执行超时"
 		_ = s.store.FailBackgroundJob(id, errMsg)
-		s.emitProgress(id, req.JobType, req.TaskID, "error", 0, nil, &errMsg)
+		if !s.isJobCancelled(id) {
+			s.emitProgress(id, req.JobType, req.TaskID, "error", 0, nil, &errMsg)
+		}
 		slog.Error("job timeout",
 			"job_id", id,
 			"job_type", req.JobType,
@@ -319,9 +426,14 @@ func (s *JobService) executeJob(id string, req SubmitJobRequest) {
 	}
 
 	if execErr != nil {
+		if s.isJobCancelled(id) {
+			return
+		}
 		errMsg := execErr.Error()
 		_ = s.store.FailBackgroundJob(id, errMsg)
-		s.emitProgress(id, req.JobType, req.TaskID, "error", 0, nil, &errMsg)
+		if !s.isJobCancelled(id) {
+			s.emitProgress(id, req.JobType, req.TaskID, "error", 0, nil, &errMsg)
+		}
 		slog.Error("job failed",
 			"job_id", id,
 			"job_type", req.JobType,
@@ -332,7 +444,13 @@ func (s *JobService) executeJob(id string, req SubmitJobRequest) {
 		return
 	}
 
+	if s.isJobCancelled(id) {
+		return
+	}
 	_ = s.store.CompleteBackgroundJob(id, execResult.outputPayload)
+	if s.isJobCancelled(id) {
+		return
+	}
 	finalMessage := execResult.finalMessage
 	if finalMessage == nil {
 		finalMessage = strPtr("已完成")
@@ -452,6 +570,10 @@ func (s *JobService) executeSessionSync(
 }
 
 func (s *JobService) emitProgress(id, jobType, taskID, status string, progress int, message, errMsg *string) {
+	if status == "running" && s.isJobCancelled(id) {
+		return
+	}
+
 	if status == "running" {
 		msg := ""
 		if message != nil {
@@ -477,6 +599,14 @@ func (s *JobService) emitProgress(id, jobType, taskID, status string, progress i
 		ProgressMessage: message,
 		ErrorMessage:    errMsg,
 	})
+}
+
+func (s *JobService) isJobCancelled(id string) bool {
+	job, err := s.store.GetBackgroundJob(id)
+	if err != nil || job == nil {
+		return false
+	}
+	return job.Status == "cancelled"
 }
 
 // GitClonePayload 描述一次 git_clone 任务的参数。
@@ -722,25 +852,32 @@ func (s *JobService) executeAiReview(
 		payload.ModelName = label
 	}
 
-	var lastResult *appcli.CodexReviewResult
-	var finalRound int
+	reviewRound, err := s.resolveAiReviewRound(jobID, req.TaskID, payload)
+	if err != nil {
+		return jobExecutionResult{}, err
+	}
 
-	for round := 1; round <= aiReviewMaxRounds; round++ {
-		finalRound = round
-		roundLabel := fmt.Sprintf("第 %d/%d 轮", round, aiReviewMaxRounds)
+	var lastResult *appcli.CodexReviewResult
+
+	for attempt := 1; attempt <= aiReviewMaxRounds; attempt++ {
+		attemptLabel := fmt.Sprintf("第 %d 轮", reviewRound)
+		if aiReviewMaxRounds > 1 {
+			attemptLabel = fmt.Sprintf("第 %d 轮（尝试 %d/%d）", reviewRound, attempt, aiReviewMaxRounds)
+		}
 
 		slog.Info("ai review round started",
 			"job_id", jobID,
 			"model_run", label,
-			"round", round,
+			"review_round", reviewRound,
+			"attempt", attempt,
 		)
 		s.emitProgress(jobID, req.JobType, req.TaskID, "running",
-			(round-1)*45,
-			strPtr(fmt.Sprintf("[%s] 复审%s…", label, roundLabel)),
+			(attempt-1)*45,
+			strPtr(fmt.Sprintf("[%s] 复审%s…", label, attemptLabel)),
 			nil,
 		)
 		if modelRunID != "" {
-			_ = s.store.UpdateModelRunReview(modelRunID, "running", round, nil)
+			_ = s.store.UpdateModelRunReview(modelRunID, "running", reviewRound, nil)
 		}
 
 		var roundErr error
@@ -750,19 +887,19 @@ func (s *JobService) executeAiReview(
 		}
 		ch := make(chan reviewOut, 1)
 
-		go func(r int) {
+		go func(currentAttempt int) {
 			res, err := s.cliSvc.RunCodexReview(ctx, payload.LocalPath, func(line string) {
 				if isStructuredAiReviewLine(line) {
 					return
 				}
 				s.emitProgress(jobID, req.JobType, req.TaskID, "running",
-					(r-1)*45+10,
+					(currentAttempt-1)*45+10,
 					strPtr(fmt.Sprintf("[%s] %s", label, line)),
 					nil,
 				)
 			})
 			ch <- reviewOut{res, err}
-		}(round)
+		}(attempt)
 
 		select {
 		case <-ctx.Done():
@@ -776,13 +913,14 @@ func (s *JobService) executeAiReview(
 			slog.Error("ai review round failed",
 				"job_id", jobID,
 				"model_run", label,
-				"round", round,
+				"review_round", reviewRound,
+				"attempt", attempt,
 				"error", roundErr,
 			)
 			// On final round, surface error; otherwise try next round.
-			if round == aiReviewMaxRounds {
+			if attempt == aiReviewMaxRounds {
 				if modelRunID != "" {
-					_ = s.store.UpdateModelRunReview(modelRunID, "warning", round, nil)
+					_ = s.store.UpdateModelRunReview(modelRunID, "warning", reviewRound, nil)
 				}
 				return jobExecutionResult{}, roundErr
 			}
@@ -793,7 +931,8 @@ func (s *JobService) executeAiReview(
 		slog.Info("ai review round completed",
 			"job_id", jobID,
 			"model_run", label,
-			"round", round,
+			"review_round", reviewRound,
+			"attempt", attempt,
 			"is_completed", lastResult.IsCompleted,
 			"is_satisfied", lastResult.IsSatisfied,
 			"passed", passed,
@@ -802,13 +941,13 @@ func (s *JobService) executeAiReview(
 		if passed {
 			notes := strPtr(lastResult.ReviewNotes)
 			if modelRunID != "" {
-				_ = s.store.UpdateModelRunReview(modelRunID, "pass", round, notes)
+				_ = s.store.UpdateModelRunReview(modelRunID, "pass", reviewRound, notes)
 			}
 			result := AiReviewResult{
 				ModelRunID:   modelRunID,
 				ModelName:    payload.ModelName,
 				ReviewStatus: "pass",
-				ReviewRound:  round,
+				ReviewRound:  reviewRound,
 				ReviewNotes:  lastResult.ReviewNotes,
 				NextPrompt:   lastResult.NextPrompt,
 				IsCompleted:  lastResult.IsCompleted,
@@ -821,15 +960,15 @@ func (s *JobService) executeAiReview(
 			outputStr := string(outputJSON)
 			return jobExecutionResult{
 				outputPayload: &outputStr,
-				finalMessage:  strPtr(fmt.Sprintf("[%s] 复审通过（第 %d 轮）", label, round)),
+				finalMessage:  strPtr(fmt.Sprintf("[%s] 复审通过（第 %d 轮）", label, reviewRound)),
 			}, nil
 		}
 
 		// Not passed — if more rounds remain, continue.
-		if round < aiReviewMaxRounds {
+		if attempt < aiReviewMaxRounds {
 			s.emitProgress(jobID, req.JobType, req.TaskID, "running",
-				round*45,
-				strPtr(fmt.Sprintf("[%s] 第 %d 轮未通过，准备第 %d 轮…", label, round, round+1)),
+				attempt*45,
+				strPtr(fmt.Sprintf("[%s] 第 %d 轮复审未通过，准备重试…", label, reviewRound)),
 				nil,
 			)
 		}
@@ -841,14 +980,14 @@ func (s *JobService) executeAiReview(
 		notes = strPtr(lastResult.ReviewNotes)
 	}
 	if modelRunID != "" {
-		_ = s.store.UpdateModelRunReview(modelRunID, "warning", finalRound, notes)
+		_ = s.store.UpdateModelRunReview(modelRunID, "warning", reviewRound, notes)
 	}
 
 	result := AiReviewResult{
 		ModelRunID:   modelRunID,
 		ModelName:    payload.ModelName,
 		ReviewStatus: "warning",
-		ReviewRound:  finalRound,
+		ReviewRound:  reviewRound,
 	}
 	if lastResult != nil {
 		result.ReviewNotes = lastResult.ReviewNotes
@@ -863,8 +1002,53 @@ func (s *JobService) executeAiReview(
 	outputStr := string(outputJSON)
 	return jobExecutionResult{
 		outputPayload: &outputStr,
-		finalMessage:  strPtr(fmt.Sprintf("[%s] 复审未通过（%d 轮）", label, finalRound)),
+		finalMessage:  strPtr(fmt.Sprintf("[%s] 复审未通过（第 %d 轮）", label, reviewRound)),
 	}, nil
+}
+
+func (s *JobService) resolveAiReviewRound(jobID, taskID string, payload AiReviewPayload) (int, error) {
+	if payload.ModelRunID != nil {
+		if modelRunID := strings.TrimSpace(*payload.ModelRunID); modelRunID != "" {
+			run, err := s.store.GetModelRunByID(modelRunID)
+			if err != nil {
+				return 0, fmt.Errorf("查询复审轮次失败: %w", err)
+			}
+			if run != nil && run.ReviewRound > 0 {
+				return run.ReviewRound + 1, nil
+			}
+		}
+	}
+
+	normalizedTaskID := strings.TrimSpace(taskID)
+	if normalizedTaskID == "" {
+		return 1, nil
+	}
+
+	targetKey := buildAiReviewTargetKey(payload.ModelRunID, payload.LocalPath)
+	if targetKey == "" {
+		return 1, nil
+	}
+
+	jobs, err := s.store.ListBackgroundJobs(&store.JobFilter{TaskID: &normalizedTaskID})
+	if err != nil {
+		return 0, fmt.Errorf("查询历史复审记录失败: %w", err)
+	}
+
+	count := 0
+	for _, job := range jobs {
+		if job.ID == jobID || job.JobType != "ai_review" || job.Status == "cancelled" {
+			continue
+		}
+		historyPayload, ok := parseAiReviewPayloadForDedup(job.InputPayload)
+		if !ok {
+			continue
+		}
+		if buildAiReviewTargetKey(historyPayload.ModelRunID, historyPayload.LocalPath) == targetKey {
+			count++
+		}
+	}
+
+	return count + 1, nil
 }
 
 func parseAiReviewPayloadForDedup(raw string) (AiReviewPayload, bool) {

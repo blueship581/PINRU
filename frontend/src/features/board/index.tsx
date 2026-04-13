@@ -249,6 +249,9 @@ export default function Board() {
         ) {
           void detail.refreshModelRuns();
         }
+        if (data.status === 'done' || data.status === 'error' || data.status === 'cancelled') {
+          void loadTasks();
+        }
         return;
       }
 
@@ -501,6 +504,7 @@ export default function Board() {
       }
     })();
     window.setTimeout(() => {
+      void loadTasks();
       if (detail.selected?.id === taskId) {
         void detail.refreshModelRuns();
       }
@@ -542,6 +546,7 @@ export default function Board() {
       }
     })();
     window.setTimeout(() => {
+      void loadTasks();
       if (detail.selected?.id === taskId) {
         void detail.refreshModelRuns();
       }
