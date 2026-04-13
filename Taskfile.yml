@@ -17,6 +17,18 @@ tasks:
     cmds:
       - wails3 generate bindings -d frontend/bindings
 
+  package:
+    desc: Build and package macOS app bundle
+    cmds:
+      - cd frontend && npm run build
+      - go build -o build/bin/pinru .
+      - mkdir -p dist/PINRU.app/Contents/MacOS dist/PINRU.app/Contents/Resources
+      - cp build/bin/pinru dist/PINRU.app/Contents/MacOS/pinru
+      - cp build/darwin/Info.plist dist/PINRU.app/Contents/Info.plist
+      - cp build/icons.icns dist/PINRU.app/Contents/Resources/icons.icns
+      - codesign --force --deep --sign - dist/PINRU.app
+      - echo "Packaged to dist/PINRU.app"
+
   clean:
     desc: Clean build artifacts
     cmds:
