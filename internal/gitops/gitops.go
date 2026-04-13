@@ -67,7 +67,9 @@ func CloneWithProgress(ctx context.Context, cloneURL, path, username, token stri
 		return fmt.Errorf("无法启动 git 命令: %w", err)
 	}
 
-	// Read stderr in a goroutine so context cancellation is not blocked by the scanner.
+	// Read stderr in a goroutine. When context is cancelled, close the read end
+	// of the pipe to unblock the scanner immediately instead of waiting for the
+	// child process to exit and close the write end.
 	scanDone := make(chan struct{})
 	go func() {
 		defer close(scanDone)
@@ -77,12 +79,15 @@ func CloneWithProgress(ctx context.Context, cloneURL, path, username, token stri
 		}
 	}()
 
-	select {
-	case <-ctx.Done():
-		// Wait for the goroutine to drain after the process is killed.
-		<-scanDone
-	case <-scanDone:
-	}
+	go func() {
+		select {
+		case <-ctx.Done():
+			stderr.Close()
+		case <-scanDone:
+		}
+	}()
+
+	<-scanDone
 
 	if err := cmd.Wait(); err != nil {
 		if ctxErr := contextErr(ctx); ctxErr != nil {
