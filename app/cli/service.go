@@ -592,7 +592,10 @@ func (s *CliService) RunCodexReview(ctx context.Context, localPath string, onLin
 		return nil, fmt.Errorf("codex CLI 未找到，请先安装: npm install -g @openai/codex")
 	}
 
-	reviewContext, _ := s.collectPgCodeReviewContext(ctx, localPath)
+	reviewContext, ctxErr := s.collectPgCodeReviewContext(ctx, localPath)
+	if ctxErr != nil {
+		slog.Warn("collectPgCodeReviewContext failed", "localPath", localPath, "error", ctxErr)
+	}
 	reviewPrompt := buildCodexReviewPrompt(reviewContext)
 	if runtime.GOOS == "windows" {
 		reviewPrompt = compactPromptForWindowsCommandLine(reviewPrompt)
@@ -755,13 +758,13 @@ func buildCodexReviewPrompt(project *pgCodeProjectContext) string {
 	var parts []string
 	parts = append(parts, "/pg-code")
 	parts = append(parts, strings.TrimSpace(`
-补充硬规则：
+补充规则：
 1. 只能基于任务提示词、git 变更、最近更新文件以及你实际读取过的文件下结论。
 2. 严禁猜测运行效果、页面视觉、接口返回、测试结果或用户体验。
-3. keyLocations 必须填写 1 到 3 个你实际核验过的代码位置，且要能直接支撑结论。
-4. 只要证据不足以证明“已完成”或“满意”，isCompleted 和 isSatisfied 就必须填 false。
-5. 找不到任务提示词、找不到有效改动、或关键位置无法支撑判断时，reviewNotes 必须明确写“依据不足”。
-6. 如果你不确定 projectType 或 changeScope，按更保守的选项填写，不要往大了猜。
+3. keyLocations 填写 1 到 3 个你实际核验过的代码位置，尽量支撑结论，写不出时可留空。
+4. 当主要功能实现度达到 90% 以上时，isCompleted 和 isSatisfied 均可填 true，允许存在少量非关键细节缺失或边缘情况未覆盖。
+5. 找不到任务提示词或有效改动时，reviewNotes 注明”依据不足”，但不影响对已有代码的判断。
+6. projectType 和 changeScope 按最符合实际情况的选项填写。
 `))
 
 	if project != nil {
@@ -792,41 +795,51 @@ func applyCodexReviewEvidenceGuards(localPath string, project *pgCodeProjectCont
 		return
 	}
 
-	var guardReasons []string
+	// Hard guards: project must exist and have some verifiable changes.
+	var hardReasons []string
 	if project == nil {
-		guardReasons = append(guardReasons, "未采集到复审上下文")
+		hardReasons = append(hardReasons, "未采集到复审上下文")
 	} else {
 		if !project.Exists {
-			guardReasons = append(guardReasons, "项目目录不存在")
-		}
-		if len(project.PromptCandidates) == 0 {
-			guardReasons = append(guardReasons, "未找到任务提示词")
+			hardReasons = append(hardReasons, "项目目录不存在")
 		}
 		if len(project.Git.ChangedFiles) == 0 && len(project.RecentFiles) == 0 {
-			guardReasons = append(guardReasons, "缺少可核验的改动或最近文件")
+			hardReasons = append(hardReasons, "缺少可核验的改动或最近文件")
 		}
 	}
 
-	if countValidKeyLocations(localPath, result.KeyLocations) == 0 {
-		guardReasons = append(guardReasons, "关键代码位置无效")
-	}
-
-	if len(guardReasons) == 0 {
+	if len(hardReasons) > 0 {
+		result.IsCompleted = false
+		result.IsSatisfied = false
+		guardNote := "依据不足：" + strings.Join(hardReasons, "；")
+		if note := strings.TrimSpace(result.ReviewNotes); note == "" || note == "无" {
+			result.ReviewNotes = guardNote
+		} else if !strings.Contains(note, "依据不足") {
+			result.ReviewNotes = note + "；" + guardNote
+		}
+		if prompt := strings.TrimSpace(result.NextPrompt); prompt == "" || prompt == "无" {
+			result.NextPrompt = "先补齐可核验的提示词和关键代码位置，再重新复审。"
+		}
 		return
 	}
 
-	result.IsCompleted = false
-	result.IsSatisfied = false
-
-	guardNote := "依据不足：" + strings.Join(guardReasons, "；")
-	if note := strings.TrimSpace(result.ReviewNotes); note == "" || note == "无" {
-		result.ReviewNotes = guardNote
-	} else if !strings.Contains(note, "依据不足") {
-		result.ReviewNotes = note + "；" + guardNote
+	// Soft guard: missing prompt candidates or invalid key locations are noted
+	// but do not override the AI's pass/fail judgment.
+	var softReasons []string
+	if project != nil && len(project.PromptCandidates) == 0 {
+		softReasons = append(softReasons, "未找到任务提示词")
+	}
+	if countValidKeyLocations(localPath, result.KeyLocations) == 0 && strings.TrimSpace(result.KeyLocations) != "" {
+		softReasons = append(softReasons, "关键代码位置格式无效")
 	}
 
-	if prompt := strings.TrimSpace(result.NextPrompt); prompt == "" || prompt == "无" {
-		result.NextPrompt = "先补齐可核验的提示词和关键代码位置，再重新复审。"
+	if len(softReasons) > 0 {
+		note := "注：" + strings.Join(softReasons, "；")
+		if existing := strings.TrimSpace(result.ReviewNotes); existing == "" || existing == "无" {
+			result.ReviewNotes = note
+		} else {
+			result.ReviewNotes = existing + "；" + note
+		}
 	}
 }
 

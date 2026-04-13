@@ -315,17 +315,15 @@ func TestApplyCodexReviewEvidenceGuardsDowngradesWithoutPromptEvidence(t *testin
 		},
 	}, &result)
 
-	if result.IsCompleted {
-		t.Fatalf("IsCompleted = true, want false")
+	// Missing prompt candidates is now a soft guard: result booleans are preserved.
+	if !result.IsCompleted {
+		t.Fatalf("IsCompleted = false, want true (soft guard should not downgrade)")
 	}
-	if result.IsSatisfied {
-		t.Fatalf("IsSatisfied = true, want false")
+	if !result.IsSatisfied {
+		t.Fatalf("IsSatisfied = false, want true (soft guard should not downgrade)")
 	}
-	if !strings.Contains(result.ReviewNotes, "依据不足：未找到任务提示词") {
-		t.Fatalf("ReviewNotes = %q, want missing prompt evidence", result.ReviewNotes)
-	}
-	if result.NextPrompt == "无" {
-		t.Fatalf("NextPrompt = %q, want fallback prompt", result.NextPrompt)
+	if !strings.Contains(result.ReviewNotes, "未找到任务提示词") {
+		t.Fatalf("ReviewNotes = %q, want missing prompt note", result.ReviewNotes)
 	}
 }
 
@@ -352,10 +350,11 @@ func TestApplyCodexReviewEvidenceGuardsDowngradesInvalidKeyLocations(t *testing.
 		},
 	}, &result)
 
-	if result.IsCompleted || result.IsSatisfied {
-		t.Fatalf("result = %#v, want downgraded booleans", result)
+	// Invalid key locations is now a soft guard: result booleans are preserved.
+	if !result.IsCompleted || !result.IsSatisfied {
+		t.Fatalf("result = %#v, want booleans preserved (soft guard)", result)
 	}
-	if !strings.Contains(result.ReviewNotes, "关键代码位置无效") {
+	if !strings.Contains(result.ReviewNotes, "关键代码位置格式无效") {
 		t.Fatalf("ReviewNotes = %q, want invalid key location note", result.ReviewNotes)
 	}
 }
