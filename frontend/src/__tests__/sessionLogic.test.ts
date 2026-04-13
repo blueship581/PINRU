@@ -223,6 +223,7 @@ describe('sessionUtils', () => {
       matchKind: 'exact',
       sessionCount: 2,
       userId: 'u1',
+      username: 'alice',
       currentSessionId: 'sess-2',
       userMessageCount: 5,
       summary: 'summary',
@@ -275,6 +276,11 @@ describe('sessionUtils', () => {
         isSatisfied: true,
         evaluation: 'old-eval',
         userConversation: 'conv-1',
+        evidence: expect.objectContaining({
+          username: 'alice',
+          workspacePath: '/tmp/workspace',
+          matchedPath: '/tmp/workspace/task',
+        }),
       }),
       expect.objectContaining({
         localId: 'existing-2',
@@ -284,6 +290,10 @@ describe('sessionUtils', () => {
         isCompleted: false,
         isSatisfied: false,
         userConversation: 'conv-2',
+        evidence: expect.objectContaining({
+          isCurrent: true,
+          userId: 'u1',
+        }),
       }),
     ]);
   });

@@ -15,7 +15,12 @@ export type TaskTypeOverviewSummary = {
   totalTaskCount: number;
 };
 
-const PROCESSING_STATUSES: TaskStatus[] = ['Downloading', 'Downloaded', 'PromptReady'];
+const PROCESSING_STATUSES: TaskStatus[] = [
+  'Downloading',
+  'Downloaded',
+  'PromptReady',
+  'ExecutionCompleted',
+];
 
 export function getTaskTypeRemainingToCompleteCount(
   taskType: string,
@@ -28,7 +33,11 @@ export function getTaskTypeRemainingToCompleteCount(
     return Math.max(0, fixedTotal - submittedSessionCount);
   }
 
-  return getTaskTypeQuotaValue(projectQuotas, taskType);
+  const quotaValue = getTaskTypeQuotaValue(projectQuotas, taskType);
+  if (quotaValue !== null) {
+    return Math.max(0, quotaValue - submittedSessionCount);
+  }
+  return null;
 }
 
 export function buildTaskTypeOverviewSummaries(

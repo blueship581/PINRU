@@ -119,7 +119,7 @@ export default function Submit() {
   useEffect(() => {
     if (!taskId) { setModelRuns([]); return; }
     let off = false;
-    listModelRuns(taskId).then((r) => { if (!off) setModelRuns(r); });
+    listModelRuns(taskId).then((r) => { if (!off) setModelRuns(Array.isArray(r) ? r : []); });
     return () => { off = true; };
   }, [taskId]);
 

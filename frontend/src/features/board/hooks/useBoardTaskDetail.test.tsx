@@ -274,4 +274,63 @@ describe('useBoardTaskDetail prompt generation', () => {
     expect(result.current.promptDraft).toBe('persisted prompt');
     expect(result.current.promptSaveState).toBe('saved');
   });
+
+  it('treats null model run payloads as an empty array when opening task detail', async () => {
+    const task = createTask({ id: 'task-1', projectName: 'alpha' });
+    const activeProject: ProjectConfig = {
+      id: 'project-1',
+      name: 'PINRU',
+      gitlabUrl: '',
+      gitlabToken: '',
+      hasGitLabToken: false,
+      cloneBasePath: '',
+      models: 'ORIGIN',
+      sourceModelFolder: 'ORIGIN',
+      defaultSubmitRepo: '',
+      taskTypes: '',
+      taskTypeQuotas: '',
+      taskTypeTotals: '',
+      overviewMarkdown: '',
+      createdAt: 1,
+      updatedAt: 1,
+    };
+
+    mockGetTask.mockResolvedValue(
+      createTaskDetail({
+        id: 'task-1',
+        projectName: 'alpha',
+      }),
+    );
+    mockListModelRuns.mockResolvedValue(null);
+
+    const loadTasks = vi.fn().mockResolvedValue(undefined);
+    const loadActiveProject = vi.fn().mockResolvedValue(undefined);
+    const updateTaskStatusInStore = vi.fn();
+    const updateTaskTypeInStore = vi.fn();
+
+    const { result } = renderHook(() =>
+      useBoardTaskDetail({
+        activeProject,
+        availableTaskTypes: ['Bug修复'],
+        sourceModelName: 'ORIGIN',
+        tasks: [task],
+        loadTasks,
+        loadActiveProject,
+        updateTaskStatusInStore,
+        updateTaskTypeInStore,
+      }),
+    );
+
+    act(() => {
+      result.current.setSelected(task);
+    });
+
+    await waitFor(() => {
+      expect(result.current.selectedTaskDetail?.id).toBe('task-1');
+    });
+
+    expect(result.current.selectedModelRuns).toEqual([]);
+    expect(result.current.sessionModelOptions).toEqual([]);
+    expect(result.current.drawerError).toBe('');
+  });
 });

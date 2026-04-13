@@ -1,7 +1,7 @@
 import { useState, type RefObject } from 'react';
 import { createPortal } from 'react-dom';
 import { AnimatePresence, motion } from 'motion/react';
-import { Check, ChevronRight, FolderOpen, Wand2, X } from 'lucide-react';
+import { Check, ChevronRight, FolderOpen, PlayCircle, Wand2, X } from 'lucide-react';
 import type { Task, TaskStatus } from '../../../store';
 import {
   getTaskTypePresentation,
@@ -10,6 +10,7 @@ import {
 import type {
   ExtractTaskSessionCandidate,
   ModelRunFromDB,
+  TaskChildDirectory,
 } from '../../../api/task';
 import {
   matchKindLabel,
@@ -23,7 +24,7 @@ import {
 } from '../../../shared/lib/promptConstants';
 import { STATUS } from './BoardPresentation';
 
-type ContextMenuPanel = 'status' | 'taskType' | 'promptGen';
+type ContextMenuPanel = 'status' | 'taskType' | 'promptGen' | 'quickExecute';
 
 export function SessionExtractCandidateModal({
   candidates,
@@ -97,9 +98,9 @@ export function SessionExtractCandidateModal({
                         <span className="px-2 py-0.5 rounded-full bg-stone-100 dark:bg-stone-800 text-[10px] font-semibold text-stone-500 dark:text-stone-400">
                           匹配方式：{matchKindLabel(candidate.matchKind)}
                         </span>
-                        {candidate.userId && (
+                        {(candidate.username || candidate.userId) && (
                           <span className="px-2 py-0.5 rounded-full bg-sky-50 dark:bg-sky-500/10 text-[10px] font-semibold text-sky-700 dark:text-sky-300">
-                            用户 {candidate.userId}
+                            用户 {candidate.username || candidate.userId}
                           </span>
                         )}
                       </div>
@@ -169,11 +170,15 @@ export function TaskCardContextMenu({
   statusChanging,
   taskTypeChanging,
   localFolderOpening,
+  childDirectories,
+  childDirectoriesLoading,
+  quickActionLoadingPath,
   actionError,
   onOpenLocalFolder,
   onStatusChange,
   onTaskTypeChange,
   onGeneratePrompt,
+  onQuickAiReview,
 }: {
   menuRef: RefObject<HTMLDivElement | null>;
   task: Task;
@@ -186,11 +191,15 @@ export function TaskCardContextMenu({
   statusChanging: boolean;
   taskTypeChanging: boolean;
   localFolderOpening: boolean;
+  childDirectories: TaskChildDirectory[];
+  childDirectoriesLoading: boolean;
+  quickActionLoadingPath: string | null;
   actionError: string;
   onOpenLocalFolder: () => void;
   onStatusChange: (status: TaskStatus) => void;
   onTaskTypeChange: (taskType: string) => void;
   onGeneratePrompt: (constraints: string[], scope: string) => void;
+  onQuickAiReview?: (directory: TaskChildDirectory) => void;
 }) {
   const [panel, setPanel] = useState<ContextMenuPanel | null>(null);
   const [menuConstraints, setMenuConstraints] = useState<string[]>(() => {
@@ -428,6 +437,110 @@ export function TaskCardContextMenu({
               </motion.div>
             )}
           </AnimatePresence>
+
+          {onQuickAiReview && (
+            <>
+              <div className={`mx-3.5 my-1 border-t ${dividerClass}`} />
+
+              <button
+                type="button"
+                aria-haspopup="menu"
+                aria-expanded={panel === 'quickExecute'}
+                onClick={() => togglePanel('quickExecute')}
+                className={`flex w-full items-center gap-3 px-3.5 py-2.5 text-left transition-colors cursor-pointer ${
+                  panel === 'quickExecute' ? activeItemClass : hoverItemClass
+                }`}
+              >
+                <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border border-sky-200/80 bg-sky-50/85 text-sky-700 dark:border-sky-500/20 dark:bg-sky-500/10 dark:text-sky-300">
+                  <PlayCircle className="h-4 w-4" />
+                </div>
+                <div className="min-w-0 flex-1">
+                  <p className={mutedLabelClass}>
+                    快捷执行
+                  </p>
+                  <p className="text-[13px] font-semibold leading-tight text-stone-700 dark:text-stone-200 truncate">
+                    {childDirectoriesLoading
+                      ? '加载目录中…'
+                      : childDirectories.length > 0
+                        ? `AI 复审 · ${childDirectories.length} 个目录`
+                        : '没有可选目录'}
+                  </p>
+                </div>
+                <ChevronRight
+                  className={`h-3.5 w-3.5 shrink-0 text-stone-300 transition-transform dark:text-stone-600 ${
+                    panel === 'quickExecute' ? 'rotate-90' : ''
+                  }`}
+                />
+              </button>
+
+              <AnimatePresence initial={false}>
+                {panel === 'quickExecute' && (
+                  <motion.div
+                    key="quick-execute-panel"
+                    initial={{ height: 0, opacity: 0 }}
+                    animate={{ height: 'auto', opacity: 1 }}
+                    exit={{ height: 0, opacity: 0 }}
+                    transition={{ duration: 0.16, ease: [0.16, 1, 0.3, 1] }}
+                    className="overflow-hidden"
+                  >
+                    <div className="mx-3.5 mb-2 rounded-2xl border border-stone-200/80 bg-stone-100/60 p-1 dark:border-stone-700/80 dark:bg-stone-900/45">
+                      <p className="px-2.5 pb-1 pt-1 text-[11px] font-semibold text-stone-500 dark:text-stone-400">
+                        选择子文件夹后直接发起 AI 复审
+                      </p>
+                      {childDirectoriesLoading ? (
+                        <p className="px-2.5 py-3 text-[12px] text-stone-500 dark:text-stone-400">
+                          子文件夹加载中…
+                        </p>
+                      ) : childDirectories.length === 0 ? (
+                        <div className="px-2.5 py-3">
+                          <p className="text-[12px] leading-6 text-stone-500 dark:text-stone-400">
+                            当前题卡目录下没有可用子文件夹。先完成领题 Clone，或检查任务目录是否存在。
+                          </p>
+                        </div>
+                      ) : (
+                        <div className="max-h-56 overflow-y-auto">
+                          {childDirectories.map((directory) => {
+                            const submitting = quickActionLoadingPath === directory.path;
+                            const detailText = directory.isSource
+                              ? '源码目录'
+                              : directory.modelName?.trim()
+                                ? `映射模型 ${directory.modelName}`
+                                : '直接按目录复审';
+                            return (
+                              <button
+                                key={directory.path}
+                                type="button"
+                                disabled={submitting || !directory.path}
+                                onClick={() => onQuickAiReview(directory)}
+                                className={`flex w-full items-center gap-3 rounded-xl px-2.5 py-2 text-left transition-colors cursor-pointer ${
+                                  hoverItemClass
+                                } ${submitting || !directory.path ? 'opacity-50' : ''}`}
+                              >
+                                <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border border-sky-200/80 bg-sky-50/85 text-[11px] font-semibold text-sky-700 dark:border-sky-500/20 dark:bg-sky-500/10 dark:text-sky-300">
+                                  AI
+                                </span>
+                                <div className="min-w-0 flex-1">
+                                  <p className="truncate text-[13px] font-semibold text-stone-800 dark:text-stone-100">
+                                    {directory.name}
+                                  </p>
+                                  <p className="truncate text-[11px] text-stone-500 dark:text-stone-400">
+                                    {detailText}
+                                  </p>
+                                </div>
+                                <span className="shrink-0 text-[11px] font-medium text-stone-400 dark:text-stone-500">
+                                  {submitting ? '提交中…' : '执行'}
+                                </span>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+            </>
+          )}
 
           <div className={`mx-3.5 my-1 border-t ${dividerClass}`} />
 

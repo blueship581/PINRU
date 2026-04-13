@@ -18,7 +18,7 @@ export default function App() {
         <Route path="/" element={<Layout />}>
           <Route index element={<Board />} />
           <Route path="claim" element={<Claim />} />
-          <Route path="submit" element={<Submit />} />
+          <Route path="submit" element={<RouteErrorBoundary><Submit /></RouteErrorBoundary>} />
           <Route path="settings" element={<RouteErrorBoundary><Settings /></RouteErrorBoundary>} />
         </Route>
       </Routes>

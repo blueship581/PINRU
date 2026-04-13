@@ -1,0 +1,37 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["isCompleted", "isSatisfied", "projectType", "changeScope", "reviewNotes", "nextPrompt", "keyLocations"],
+  "properties": {
+    "isCompleted": {
+      "type": "boolean",
+      "description": "是否完成：提示词要求的核心交付物已经落到代码或文件里"
+    },
+    "isSatisfied": {
+      "type": "boolean",
+      "description": "是否满意：提示词的主要求已覆盖且质量达到 90 分及以上"
+    },
+    "projectType": {
+      "type": "string",
+      "description": "项目类型，如：全栈Web应用、Web前端、纯后端服务等"
+    },
+    "changeScope": {
+      "type": "string",
+      "enum": ["单文件", "模块内多文件", "跨模块多文件", "跨系统多模块"],
+      "description": "修改范围"
+    },
+    "reviewNotes": {
+      "type": "string",
+      "description": "不满意点评，满意时填「无」"
+    },
+    "nextPrompt": {
+      "type": "string",
+      "description": "下一轮提示词建议，满意时填「无」"
+    },
+    "keyLocations": {
+      "type": "string",
+      "description": "关键代码位置，格式：相对路径:行号；相对路径:行号，最多 3 处"
+    }
+  }
+}

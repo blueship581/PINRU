@@ -22,12 +22,16 @@ type ModelRun struct {
 	ConversationDate   *int64        `json:"conversationDate"`
 	SubmitError        *string       `json:"submitError"`
 	SessionList        []TaskSession `json:"sessionList"`
+	ReviewStatus       string        `json:"reviewStatus"`
+	ReviewRound        int           `json:"reviewRound"`
+	ReviewNotes        *string       `json:"reviewNotes"`
 }
 
 func (s *Store) ListModelRuns(taskID string) ([]ModelRun, error) {
 	query := fmt.Sprintf(
 		`SELECT id, task_id, model_name, branch_name, local_path, pr_url, origin_url, gsb_score,
-		        status, %s, %s, session_id, conversation_rounds, %s, submit_error, session_list
+		        status, %s, %s, session_id, conversation_rounds, %s, submit_error, session_list,
+		        review_status, review_round, review_notes
 		 FROM model_runs WHERE task_id = ?
 		 ORDER BY CASE WHEN UPPER(model_name) = 'ORIGIN' THEN 0 ELSE 1 END, model_name`,
 		nullableUnixTimestampExpr("started_at"),
@@ -48,6 +52,7 @@ func (s *Store) ListModelRuns(taskID string) ([]ModelRun, error) {
 			&r.ID, &r.TaskID, &r.ModelName, &r.BranchName, &r.LocalPath,
 			&r.PrURL, &r.OriginURL, &r.GsbScore, &r.Status, &r.StartedAt, &r.FinishedAt,
 			&r.SessionID, &r.ConversationRounds, &r.ConversationDate, &r.SubmitError, &rawSessionList,
+			&r.ReviewStatus, &r.ReviewRound, &r.ReviewNotes,
 		); err != nil {
 			return nil, err
 		}
@@ -78,7 +83,8 @@ func (s *Store) GetModelRun(taskID, modelName string) (*ModelRun, error) {
 	var r ModelRun
 	query := fmt.Sprintf(
 		`SELECT id, task_id, model_name, branch_name, local_path, pr_url, origin_url, gsb_score,
-		        status, %s, %s, session_id, conversation_rounds, %s, submit_error, session_list
+		        status, %s, %s, session_id, conversation_rounds, %s, submit_error, session_list,
+		        review_status, review_round, review_notes
 		 FROM model_runs WHERE task_id = ? AND model_name = ?`,
 		nullableUnixTimestampExpr("started_at"),
 		nullableUnixTimestampExpr("finished_at"),
@@ -88,7 +94,8 @@ func (s *Store) GetModelRun(taskID, modelName string) (*ModelRun, error) {
 	err := s.DB.QueryRow(query, taskID, modelName).
 		Scan(&r.ID, &r.TaskID, &r.ModelName, &r.BranchName, &r.LocalPath,
 			&r.PrURL, &r.OriginURL, &r.GsbScore, &r.Status, &r.StartedAt, &r.FinishedAt,
-			&r.SessionID, &r.ConversationRounds, &r.ConversationDate, &r.SubmitError, &rawSessionList)
+			&r.SessionID, &r.ConversationRounds, &r.ConversationDate, &r.SubmitError, &rawSessionList,
+			&r.ReviewStatus, &r.ReviewRound, &r.ReviewNotes)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -100,6 +107,23 @@ func (s *Store) GetModelRun(taskID, modelName string) (*ModelRun, error) {
 		return nil, err
 	}
 	return &r, nil
+}
+
+func (s *Store) UpdateModelRunReview(modelRunID, status string, round int, notes *string) error {
+	res, err := s.DB.Exec(
+		"UPDATE model_runs SET review_status=?, review_round=?, review_notes=? WHERE id=?",
+		status, round, notes, modelRunID)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return fmt.Errorf("model run %q not found", modelRunID)
+	}
+	return nil
 }
 
 func (s *Store) DeleteModelRun(taskID, modelName string) error {

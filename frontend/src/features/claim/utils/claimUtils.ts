@@ -34,6 +34,42 @@ export function formatClaimProjectId(projectId: string, sequence: number) {
   return sequence > 0 ? `${projectId}-${sequence}` : projectId;
 }
 
+export function partitionClaimsByProjectLimit<T>(
+  claims: T[],
+  getProjectId: (claim: T) => string,
+  existingCounts: ReadonlyMap<string, number>,
+  limit: number | null,
+) {
+  if (limit === null || limit <= 0) {
+    return {
+      executableClaims: claims,
+      exceededClaims: [] as T[],
+    };
+  }
+
+  const counts = new Map(existingCounts);
+  const executableClaims: T[] = [];
+  const exceededClaims: T[] = [];
+
+  for (const claim of claims) {
+    const projectId = getProjectId(claim).trim();
+    const currentCount = counts.get(projectId) ?? 0;
+
+    if (currentCount >= limit) {
+      exceededClaims.push(claim);
+      continue;
+    }
+
+    executableClaims.push(claim);
+    counts.set(projectId, currentCount + 1);
+  }
+
+  return {
+    executableClaims,
+    exceededClaims,
+  };
+}
+
 export function parseProjectIds(value: string): string[] {
   const tokens = value
     .split(/[\s,，、;；]+/)
@@ -141,6 +177,11 @@ export function getResultStatusMeta(status: ClaimResult['status']): {
       return {
         label: '失败',
         className: 'bg-red-50 dark:bg-red-900/20 text-red-600 dark:text-red-400',
+      };
+    case 'quota_exceeded':
+      return {
+        label: '配额不足',
+        className: 'bg-orange-50 dark:bg-orange-500/10 text-orange-600 dark:text-orange-400',
       };
     default:
       return {

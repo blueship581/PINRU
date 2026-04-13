@@ -1,12 +1,15 @@
 package task
 
 import (
+	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"sort"
 	"strings"
 
 	appgit "github.com/blueship581/pinru/app/git"
@@ -72,6 +75,17 @@ type AddModelRunRequest struct {
 	LocalPath *string `json:"localPath"`
 }
 
+type TaskChildDirectory struct {
+	Name         string  `json:"name"`
+	Path         string  `json:"path"`
+	ModelRunID   *string `json:"modelRunId"`
+	ModelName    *string `json:"modelName"`
+	ReviewStatus string  `json:"reviewStatus"`
+	ReviewRound  int     `json:"reviewRound"`
+	ReviewNotes  *string `json:"reviewNotes"`
+	IsSource     bool    `json:"isSource"`
+}
+
 var taskIdentityTokenPattern = regexp.MustCompile(`[^a-zA-Z0-9]+`)
 
 func (s *TaskService) ListTasks(projectConfigID *string) ([]store.Task, error) {
@@ -99,6 +113,10 @@ func (s *TaskService) CreateTask(req CreateTaskRequest) (*store.Task, error) {
 		return nil, err
 	} else if existing != nil {
 		return nil, fmt.Errorf("当前项目下题卡已存在：%s", existing.ID)
+	}
+
+	if err := s.enforceTaskTypeUpperLimit(req); err != nil {
+		return nil, err
 	}
 
 	task := store.Task{
@@ -165,7 +183,11 @@ func (s *TaskService) ListModelRuns(taskID string) ([]store.ModelRun, error) {
 	if err != nil {
 		return nil, err
 	}
-	return normalizeModelRunPaths(runs), nil
+	normalized := normalizeModelRunPaths(runs)
+	if normalized == nil {
+		return []store.ModelRun{}, nil
+	}
+	return normalized, nil
 }
 
 func (s *TaskService) UpdateModelRun(req UpdateModelRunRequest) error {
@@ -286,6 +308,104 @@ func (s *TaskService) OpenTaskLocalFolder(id string) error {
 	return openPathInFileManager(targetPath)
 }
 
+func (s *TaskService) ListTaskChildDirectories(taskID string) ([]TaskChildDirectory, error) {
+	taskID = strings.TrimSpace(taskID)
+	if taskID == "" {
+		return nil, fmt.Errorf("任务不能为空")
+	}
+
+	task, err := s.store.GetTask(taskID)
+	if err != nil {
+		return nil, err
+	}
+	if task == nil {
+		return nil, fmt.Errorf("未找到任务: %s", taskID)
+	}
+
+	modelRuns, err := s.store.ListModelRuns(taskID)
+	if err != nil {
+		return nil, err
+	}
+
+	rootPath, err := s.resolveTaskChildDirectoryRoot(task, modelRuns)
+	if err != nil {
+		return nil, err
+	}
+
+	entries, err := os.ReadDir(rootPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return []TaskChildDirectory{}, nil
+		}
+		return nil, err
+	}
+
+	sourceModelName, err := s.resolveTaskSourceModelName(task)
+	if err != nil {
+		return nil, err
+	}
+
+	runByPath := make(map[string]store.ModelRun, len(modelRuns))
+	for _, run := range modelRuns {
+		if pathValue, ok := normalizeExistingDirectory(run.LocalPath); ok {
+			runByPath[util.NormalizePath(pathValue)] = run
+		}
+	}
+
+	children := make([]TaskChildDirectory, 0, len(entries))
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+
+		name := strings.TrimSpace(entry.Name())
+		if name == "" || strings.HasPrefix(name, ".") {
+			continue
+		}
+
+		pathValue := util.NormalizePath(filepath.Join(rootPath, name))
+		child := TaskChildDirectory{
+			Name:         name,
+			Path:         pathValue,
+			ReviewStatus: "none",
+		}
+
+		if run, ok := runByPath[pathValue]; ok {
+			runID := run.ID
+			modelName := run.ModelName
+			child.ModelRunID = &runID
+			child.ModelName = &modelName
+			if strings.TrimSpace(run.ReviewStatus) != "" {
+				child.ReviewStatus = strings.TrimSpace(run.ReviewStatus)
+			}
+			child.ReviewRound = run.ReviewRound
+			if run.ReviewNotes != nil {
+				reviewNotes := strings.TrimSpace(*run.ReviewNotes)
+				if reviewNotes != "" {
+					child.ReviewNotes = &reviewNotes
+				}
+			}
+			child.IsSource = isOriginModelName(run.ModelName) || isSourceModelFolder(run.ModelName, sourceModelName)
+		}
+
+		children = append(children, child)
+	}
+
+	sort.SliceStable(children, func(i, j int) bool {
+		if children[i].IsSource != children[j].IsSource {
+			return children[i].IsSource
+		}
+		iHasModel := children[i].ModelRunID != nil
+		jHasModel := children[j].ModelRunID != nil
+		if iHasModel != jHasModel {
+			return iHasModel
+		}
+		return strings.ToLower(children[i].Name) < strings.ToLower(children[j].Name)
+	})
+
+	return children, nil
+}
+
 func (s *TaskService) removeManagedTaskDirectory(task *store.Task) error {
 	if task == nil || task.LocalPath == nil || strings.TrimSpace(*task.LocalPath) == "" {
 		return nil
@@ -351,6 +471,56 @@ func (s *TaskService) resolveTaskLocalFolder(task *store.Task) (string, error) {
 	}
 
 	return existingPaths[0], nil
+}
+
+func (s *TaskService) resolveTaskChildDirectoryRoot(task *store.Task, modelRuns []store.ModelRun) (string, error) {
+	if task == nil {
+		return "", fmt.Errorf("任务不能为空")
+	}
+
+	if localPath, ok := normalizeExistingDirectory(task.LocalPath); ok {
+		return localPath, nil
+	}
+
+	existingPaths := make([]string, 0, len(modelRuns))
+	for _, run := range modelRuns {
+		if pathValue, ok := normalizeExistingDirectory(run.LocalPath); ok {
+			existingPaths = append(existingPaths, pathValue)
+		}
+	}
+
+	if len(existingPaths) == 0 {
+		return "", fmt.Errorf("当前题目还没有可供复审的子文件夹")
+	}
+
+	if commonParent, ok := commonDirectoryParent(existingPaths); ok {
+		return commonParent, nil
+	}
+
+	if len(existingPaths) == 1 {
+		parent := filepath.Dir(existingPaths[0])
+		if info, err := os.Stat(parent); err == nil && info.IsDir() {
+			return parent, nil
+		}
+	}
+
+	return "", fmt.Errorf("当前题目还没有可供复审的子文件夹")
+}
+
+func (s *TaskService) resolveTaskSourceModelName(task *store.Task) (string, error) {
+	sourceModelName := "ORIGIN"
+	if task == nil || task.ProjectConfigID == nil || strings.TrimSpace(*task.ProjectConfigID) == "" {
+		return sourceModelName, nil
+	}
+
+	project, err := s.store.GetProject(strings.TrimSpace(*task.ProjectConfigID))
+	if err != nil {
+		return "", err
+	}
+	if project != nil && strings.TrimSpace(project.SourceModelFolder) != "" {
+		sourceModelName = strings.TrimSpace(project.SourceModelFolder)
+	}
+	return sourceModelName, nil
 }
 
 func normalizeExistingDirectory(pathValue *string) (string, bool) {
@@ -447,9 +617,71 @@ func buildModelRunLocalPath(req CreateTaskRequest, model string) *string {
 	return &path
 }
 
+// enforceTaskTypeUpperLimit 检查同一 GitLab 项目在当前任务类型下的已创建任务数是否已达上限。
+// 上限由项目配置 task_type_quotas 中对应类型的值决定，留空或为 0 表示不限。
+func (s *TaskService) enforceTaskTypeUpperLimit(req CreateTaskRequest) error {
+	if req.ProjectConfigID == nil || strings.TrimSpace(*req.ProjectConfigID) == "" {
+		return nil
+	}
+	taskType := strings.TrimSpace(req.TaskType)
+	if taskType == "" {
+		return nil
+	}
+
+	project, err := s.store.GetProject(strings.TrimSpace(*req.ProjectConfigID))
+	if err != nil {
+		return err
+	}
+	if project == nil {
+		return nil
+	}
+
+	// 解析 task_type_quotas，找到该类型的单题上限
+	quotasJSON := strings.TrimSpace(project.TaskTypeQuotas)
+	if quotasJSON == "" || quotasJSON == "{}" {
+		return nil
+	}
+
+	var quotas map[string]int
+	if err := json.Unmarshal([]byte(quotasJSON), &quotas); err != nil {
+		return err
+	}
+
+	limit, hasLimit := quotas[taskType]
+	if !hasLimit || limit <= 0 {
+		return nil
+	}
+
+	count, err := s.store.CountTasksByProjectConfigGitLabProjectAndTaskType(
+		strings.TrimSpace(*req.ProjectConfigID), req.GitLabProjectID, taskType,
+	)
+	if err != nil {
+		return err
+	}
+
+	if count >= limit {
+		return fmt.Errorf("GitLab 项目 %d 的 %s 领题数已达上限 %d，无法继续领取", req.GitLabProjectID, taskType, limit)
+	}
+	return nil
+}
+
 func (s *TaskService) findExistingTask(req CreateTaskRequest) (*store.Task, error) {
 	if req.ClaimSequence != nil || claimSequenceForRequest(req) > 0 {
-		return s.store.GetTask(buildTaskID(req))
+		task, err := s.store.GetTask(buildTaskID(req))
+		if err != nil || task != nil {
+			return task, err
+		}
+		// 向后兼容：用旧格式 ID 回退查找，并验证 task type 一致
+		if buildTaskTypeIDToken(req.TaskType) != "" {
+			legacyTask, legacyErr := s.store.GetTask(buildLegacyTaskID(req))
+			if legacyErr != nil {
+				return nil, legacyErr
+			}
+			if legacyTask != nil && strings.EqualFold(strings.TrimSpace(legacyTask.TaskType), strings.TrimSpace(req.TaskType)) {
+				return legacyTask, nil
+			}
+		}
+		return nil, nil
 	}
 
 	if req.ProjectConfigID != nil && strings.TrimSpace(*req.ProjectConfigID) != "" {
@@ -460,17 +692,64 @@ func (s *TaskService) findExistingTask(req CreateTaskRequest) (*store.Task, erro
 }
 
 func buildTaskID(req CreateTaskRequest) string {
-	legacyID := buildClaimTaskID(req.GitLabProjectID, claimSequenceForRequest(req))
+	claimID := buildClaimTaskID(req.GitLabProjectID, claimSequenceForRequest(req))
 	if req.ProjectConfigID == nil {
-		return legacyID
+		return claimID
 	}
 
 	projectConfigToken := normalizeTaskIdentityToken(*req.ProjectConfigID)
 	if projectConfigToken == "" {
-		return legacyID
+		return claimID
 	}
 
-	return fmt.Sprintf("p%s__%s", projectConfigToken, legacyID)
+	typeToken := buildTaskTypeIDToken(req.TaskType)
+	if typeToken == "" {
+		return fmt.Sprintf("p%s__%s", projectConfigToken, claimID)
+	}
+
+	return fmt.Sprintf("p%s__%s__%s", projectConfigToken, typeToken, claimID)
+}
+
+// buildLegacyTaskID 生成不含 task type token 的旧格式 ID，用于向后兼容查找。
+func buildLegacyTaskID(req CreateTaskRequest) string {
+	claimID := buildClaimTaskID(req.GitLabProjectID, claimSequenceForRequest(req))
+	if req.ProjectConfigID == nil {
+		return claimID
+	}
+	projectConfigToken := normalizeTaskIdentityToken(*req.ProjectConfigID)
+	if projectConfigToken == "" {
+		return claimID
+	}
+	return fmt.Sprintf("p%s__%s", projectConfigToken, claimID)
+}
+
+// buildTaskTypeIDToken 将任务类型名称映射为短 ASCII 标记，用于生成 task ID。
+// 默认类型（未归类）返回空字符串，以保持向后兼容。
+func buildTaskTypeIDToken(taskType string) string {
+	normalized := strings.TrimSpace(taskType)
+	if normalized == "" || strings.EqualFold(normalized, "未归类") {
+		return ""
+	}
+
+	knownTokens := map[string]string{
+		"bug修复":     "bug",
+		"feature迭代": "feat",
+		"代码生成":      "gen",
+		"代码理解":      "cmp",
+		"代码重构":      "ref",
+		"工程化":       "eng",
+		"代码测试":      "test",
+	}
+
+	key := strings.ToLower(strings.ReplaceAll(normalized, " ", ""))
+	if token, ok := knownTokens[key]; ok {
+		return token
+	}
+
+	// 未知/自定义类型：用 FNV32 哈希生成稳定的短标记
+	h := fnv.New32a()
+	h.Write([]byte(key))
+	return fmt.Sprintf("h%06x", h.Sum32()&0xFFFFFF)
 }
 
 func legacyTaskID(gitLabProjectID int64) string {
