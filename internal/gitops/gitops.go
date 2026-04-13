@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/blueship581/pinru/internal/util"
 )
@@ -56,6 +57,7 @@ func CloneWithProgress(ctx context.Context, cloneURL, path, username, token stri
 	onProgress("正在启动 git clone …")
 
 	cmd := exec.CommandContext(ctx, "git", "clone", "--depth", "1", "--progress", cloneURL, expanded)
+	cmd.WaitDelay = 5 * time.Second
 	cmd.Env = append(os.Environ(), buildGitAuthEnv(cloneURL, username, token)...)
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
@@ -65,12 +67,21 @@ func CloneWithProgress(ctx context.Context, cloneURL, path, username, token stri
 		return fmt.Errorf("无法启动 git 命令: %w", err)
 	}
 
-	scanner := bufio.NewScanner(stderr)
-	for scanner.Scan() {
-		onProgress(scanner.Text())
-	}
-	if err := scanner.Err(); err != nil && contextErr(ctx) == nil {
-		return fmt.Errorf("读取 git 输出失败: %w", err)
+	// Read stderr in a goroutine so context cancellation is not blocked by the scanner.
+	scanDone := make(chan struct{})
+	go func() {
+		defer close(scanDone)
+		scanner := bufio.NewScanner(stderr)
+		for scanner.Scan() {
+			onProgress(scanner.Text())
+		}
+	}()
+
+	select {
+	case <-ctx.Done():
+		// Wait for the goroutine to drain after the process is killed.
+		<-scanDone
+	case <-scanDone:
 	}
 
 	if err := cmd.Wait(); err != nil {
