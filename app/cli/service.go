@@ -18,6 +18,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/blueship581/pinru/internal/util"
 	"github.com/google/uuid"
@@ -39,6 +40,12 @@ type CliService struct {
 }
 
 const defaultPgCodeContextScript = "/Users/gaobo/.codex/skills/pg-code/scripts/collect_project_context.py"
+
+const (
+	maxPgCodePromptCandidates   = 6
+	maxPgCodePromptSources      = 3
+	maxPgCodePromptContentRunes = 6000
+)
 
 type cliSession struct {
 	mu       sync.Mutex
@@ -560,9 +567,16 @@ type pgCodeProjectContext struct {
 	Exists           bool                 `json:"exists"`
 	ProjectIDGuess   string               `json:"project_id_guess"`
 	PromptCandidates []string             `json:"prompt_candidates"`
+	PromptSources    []pgCodePromptSource `json:"prompt_sources,omitempty"`
 	Git              pgCodeGitContext     `json:"git"`
 	RecentFiles      []pgCodeRecentFile   `json:"recent_files"`
 	Summary          pgCodeProjectSummary `json:"summary"`
+}
+
+type pgCodePromptSource struct {
+	Path      string `json:"path"`
+	Content   string `json:"content"`
+	Truncated bool   `json:"truncated,omitempty"`
 }
 
 type pgCodeGitContext struct {
@@ -597,6 +611,7 @@ func (s *CliService) RunCodexReview(ctx context.Context, localPath string, onLin
 	if ctxErr != nil {
 		slog.Warn("collectPgCodeReviewContext failed", "localPath", localPath, "error", ctxErr)
 	}
+	enrichPgCodeReviewContext(localPath, reviewContext)
 	reviewPrompt := buildCodexReviewPrompt(reviewContext)
 	if runtime.GOOS == "windows" {
 		reviewPrompt = compactPromptForWindowsCommandLine(reviewPrompt)
@@ -760,12 +775,13 @@ func buildCodexReviewPrompt(project *pgCodeProjectContext) string {
 	parts = append(parts, "/pg-code")
 	parts = append(parts, strings.TrimSpace(`
 补充规则：
-1. 【严格限制】只能读取和评审 git 变更文件（git status / git diff 列出的文件）以及最近更新文件。禁止主动读取或评审这些范围之外的任何文件，即使读取了也不能据此下结论。
+1. 【严格限制】只能基于任务提示词、git 变更、最近更新文件以及你实际读取过的文件下结论。允许主动读取和评审的仓库文件仍限于 git 变更文件（git status / git diff 列出的文件）以及最近更新文件。
 2. 严禁猜测运行效果、页面视觉、接口返回、测试结果或用户体验。
 3. keyLocations 只能填写 git 变更文件或最近更新文件中 1 到 3 个你实际核验过的代码位置，写不出时可留空。
 4. 当主要功能实现度达到 90% 以上时，isCompleted 和 isSatisfied 均可填 true，允许存在少量非关键细节缺失或边缘情况未覆盖。
 5. 找不到任务提示词或有效改动时，reviewNotes 注明”依据不足”，isCompleted 和 isSatisfied 均填 false。
 6. projectType 和 changeScope 按最符合实际情况的选项填写。
+7. 预采集上下文里的 prompt_sources 已包含候选提示词正文，可能来自项目内、同层目录或上一级目录；若存在多份，请优先依据正文判断原始需求，prompt_candidates 仅作路径参考。
 `))
 
 	if project != nil {
@@ -789,6 +805,199 @@ func compactPromptForWindowsCommandLine(prompt string) string {
 		}
 	}
 	return strings.Join(compacted, " ")
+}
+
+func enrichPgCodeReviewContext(localPath string, project *pgCodeProjectContext) {
+	if project == nil {
+		return
+	}
+
+	basePath := strings.TrimSpace(project.ResolvedPath)
+	if basePath == "" {
+		basePath = localPath
+	}
+
+	project.PromptCandidates = discoverPromptCandidates(basePath, project.PromptCandidates)
+	project.PromptSources = loadPromptSources(project.PromptCandidates)
+}
+
+func discoverPromptCandidates(localPath string, existing []string) []string {
+	start := resolvePromptSearchStart(localPath)
+	if start == "" {
+		return dedupePromptCandidatePaths(existing)
+	}
+
+	seen := make(map[string]struct{}, maxPgCodePromptCandidates)
+	candidates := make([]string, 0, maxPgCodePromptCandidates)
+	add := func(path string) {
+		if len(candidates) >= maxPgCodePromptCandidates {
+			return
+		}
+		resolved := resolveExistingPromptCandidate(path, start)
+		if resolved == "" {
+			return
+		}
+		if _, ok := seen[resolved]; ok {
+			return
+		}
+		seen[resolved] = struct{}{}
+		candidates = append(candidates, resolved)
+	}
+
+	for _, path := range existing {
+		add(path)
+	}
+
+	for _, directory := range promptExactSearchDirs(start, 4) {
+		add(filepath.Join(directory, "任务提示词.md"))
+	}
+
+	for _, directory := range promptExactSearchDirs(start, 3) {
+		entries, err := os.ReadDir(directory)
+		if err != nil {
+			continue
+		}
+		for _, entry := range entries {
+			if len(candidates) >= maxPgCodePromptCandidates {
+				break
+			}
+			if entry.IsDir() {
+				continue
+			}
+			name := entry.Name()
+			lower := strings.ToLower(name)
+			if filepath.Ext(lower) != ".md" {
+				continue
+			}
+			if !strings.Contains(name, "提示词") && !strings.Contains(lower, "prompt") {
+				continue
+			}
+			add(filepath.Join(directory, name))
+		}
+	}
+
+	return candidates
+}
+
+func loadPromptSources(candidates []string) []pgCodePromptSource {
+	sources := make([]pgCodePromptSource, 0, min(len(candidates), maxPgCodePromptSources))
+	for _, candidate := range candidates {
+		if len(sources) >= maxPgCodePromptSources {
+			break
+		}
+
+		data, err := os.ReadFile(candidate)
+		if err != nil {
+			continue
+		}
+		content := strings.TrimSpace(string(data))
+		if content == "" {
+			continue
+		}
+
+		truncated := false
+		if utf8.RuneCountInString(content) > maxPgCodePromptContentRunes {
+			content = truncateRunes(content, maxPgCodePromptContentRunes)
+			truncated = true
+		}
+
+		sources = append(sources, pgCodePromptSource{
+			Path:      candidate,
+			Content:   content,
+			Truncated: truncated,
+		})
+	}
+	return sources
+}
+
+func resolvePromptSearchStart(localPath string) string {
+	if strings.TrimSpace(localPath) == "" {
+		return ""
+	}
+	resolved, err := filepath.Abs(localPath)
+	if err != nil {
+		resolved = localPath
+	}
+	info, err := os.Stat(resolved)
+	if err == nil && !info.IsDir() {
+		return filepath.Dir(resolved)
+	}
+	return resolved
+}
+
+func promptExactSearchDirs(start string, levels int) []string {
+	if levels <= 0 || strings.TrimSpace(start) == "" {
+		return nil
+	}
+
+	result := make([]string, 0, levels)
+	seen := map[string]struct{}{}
+	current := start
+	for len(result) < levels && strings.TrimSpace(current) != "" {
+		if _, ok := seen[current]; !ok {
+			seen[current] = struct{}{}
+			result = append(result, current)
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			break
+		}
+		current = parent
+	}
+	return result
+}
+
+func resolveExistingPromptCandidate(path string, baseDir string) string {
+	trimmed := strings.TrimSpace(path)
+	if trimmed == "" {
+		return ""
+	}
+
+	resolved := trimmed
+	if !filepath.IsAbs(resolved) {
+		resolved = filepath.Join(baseDir, resolved)
+	}
+	resolved = filepath.Clean(resolved)
+	info, err := os.Stat(resolved)
+	if err != nil || info.IsDir() {
+		return ""
+	}
+	return resolved
+}
+
+func dedupePromptCandidatePaths(paths []string) []string {
+	if len(paths) == 0 {
+		return nil
+	}
+
+	result := make([]string, 0, min(len(paths), maxPgCodePromptCandidates))
+	seen := make(map[string]struct{}, len(paths))
+	for _, path := range paths {
+		resolved := resolveExistingPromptCandidate(path, ".")
+		if resolved == "" {
+			continue
+		}
+		if _, ok := seen[resolved]; ok {
+			continue
+		}
+		seen[resolved] = struct{}{}
+		result = append(result, resolved)
+		if len(result) >= maxPgCodePromptCandidates {
+			break
+		}
+	}
+	return result
+}
+
+func truncateRunes(value string, limit int) string {
+	if limit <= 0 {
+		return ""
+	}
+	runes := []rune(value)
+	if len(runes) <= limit {
+		return value
+	}
+	return strings.TrimSpace(string(runes[:limit])) + "\n\n[已截断]"
 }
 
 func applyCodexReviewEvidenceGuards(localPath string, project *pgCodeProjectContext, result *CodexReviewResult) {

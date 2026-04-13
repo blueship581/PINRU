@@ -259,6 +259,9 @@ func TestBuildCodexReviewPromptIncludesEvidenceGuardrails(t *testing.T) {
 	prompt := buildCodexReviewPrompt(&pgCodeProjectContext{
 		ResolvedPath:     "/tmp/demo",
 		PromptCandidates: []string{"/tmp/demo/任务提示词.md"},
+		PromptSources: []pgCodePromptSource{
+			{Path: "/tmp/demo/任务提示词.md", Content: "实现每日任务与奖励记录"},
+		},
 		Git: pgCodeGitContext{
 			InGit:        true,
 			ChangedFiles: []string{"app/main.go"},
@@ -273,6 +276,54 @@ func TestBuildCodexReviewPromptIncludesEvidenceGuardrails(t *testing.T) {
 	}
 	if !strings.Contains(prompt, "\"prompt_candidates\"") {
 		t.Fatalf("prompt missing serialized context: %q", prompt)
+	}
+	if !strings.Contains(prompt, "\"prompt_sources\"") {
+		t.Fatalf("prompt missing prompt sources: %q", prompt)
+	}
+	if !strings.Contains(prompt, "实现每日任务与奖励记录") {
+		t.Fatalf("prompt missing prompt source content: %q", prompt)
+	}
+}
+
+func TestEnrichPgCodeReviewContextLoadsSiblingAndParentPromptContents(t *testing.T) {
+	workspaceDir := t.TempDir()
+	projectDir := filepath.Join(workspaceDir, "01862-代码生成-2")
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatalf("os.MkdirAll(projectDir) error = %v", err)
+	}
+
+	siblingPrompt := filepath.Join(workspaceDir, "任务提示词.md")
+	projectPrompt := filepath.Join(projectDir, "任务提示词.md")
+	if err := os.WriteFile(siblingPrompt, []byte("同层提示词：实现首页每日任务\n"), 0o644); err != nil {
+		t.Fatalf("os.WriteFile(siblingPrompt) error = %v", err)
+	}
+	if err := os.WriteFile(projectPrompt, []byte("项目内提示词：接入奖励记录\n"), 0o644); err != nil {
+		t.Fatalf("os.WriteFile(projectPrompt) error = %v", err)
+	}
+
+	project := &pgCodeProjectContext{
+		ResolvedPath: projectDir,
+	}
+
+	enrichPgCodeReviewContext(projectDir, project)
+
+	if len(project.PromptCandidates) < 2 {
+		t.Fatalf("PromptCandidates = %#v, want both sibling and project prompt files", project.PromptCandidates)
+	}
+	if !containsString(project.PromptCandidates, siblingPrompt) {
+		t.Fatalf("PromptCandidates = %#v, want sibling prompt %q", project.PromptCandidates, siblingPrompt)
+	}
+	if !containsString(project.PromptCandidates, projectPrompt) {
+		t.Fatalf("PromptCandidates = %#v, want project prompt %q", project.PromptCandidates, projectPrompt)
+	}
+	if len(project.PromptSources) < 2 {
+		t.Fatalf("PromptSources = %#v, want prompt contents loaded", project.PromptSources)
+	}
+	if !containsPromptSource(project.PromptSources, siblingPrompt, "同层提示词：实现首页每日任务") {
+		t.Fatalf("PromptSources = %#v, want sibling prompt content", project.PromptSources)
+	}
+	if !containsPromptSource(project.PromptSources, projectPrompt, "项目内提示词：接入奖励记录") {
+		t.Fatalf("PromptSources = %#v, want project prompt content", project.PromptSources)
 	}
 }
 
@@ -357,4 +408,22 @@ func TestApplyCodexReviewEvidenceGuardsDowngradesInvalidKeyLocations(t *testing.
 	if !strings.Contains(result.ReviewNotes, "关键代码位置格式无效") {
 		t.Fatalf("ReviewNotes = %q, want invalid key location note", result.ReviewNotes)
 	}
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
+func containsPromptSource(sources []pgCodePromptSource, wantPath, wantContent string) bool {
+	for _, source := range sources {
+		if source.Path == wantPath && strings.Contains(source.Content, wantContent) {
+			return true
+		}
+	}
+	return false
 }
