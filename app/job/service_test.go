@@ -46,11 +46,16 @@ func TestHelperProcess(t *testing.T) {
 			os.WriteFile(countFile, []byte(strconv.Itoa(count)), 0o644) //nolint:errcheck
 		}
 		// Find -o argument and write structured JSON output.
-		var outPath string
-		for i := 0; i < len(args)-1; i++ {
-			if args[i] == "-o" {
-				outPath = args[i+1]
-				break
+		// On Windows the .bat wrapper parses -o before calling us (to avoid
+		// newline-in-arg cmd.exe issues) and passes the path via GO_TEST_OUT_PATH.
+		// On Unix args are forwarded directly via "$@".
+		outPath := os.Getenv("GO_TEST_OUT_PATH")
+		if outPath == "" {
+			for i := 0; i < len(args)-1; i++ {
+				if args[i] == "-o" {
+					outPath = args[i+1]
+					break
+				}
 			}
 		}
 		if outPath != "" {
@@ -79,12 +84,30 @@ func createMockCodexExecutable(t *testing.T, mode string, extraEnv map[string]st
 		path := filepath.Join(dir, "codex.bat")
 		var sb strings.Builder
 		sb.WriteString("@echo off\r\n")
+		sb.WriteString("setlocal enabledelayedexpansion\r\n")
 		sb.WriteString("set GO_TEST_SUBPROCESS=1\r\n")
 		fmt.Fprintf(&sb, "set GO_TEST_SUBPROCESS_MODE=%s\r\n", mode)
 		for k, v := range extraEnv {
 			fmt.Fprintf(&sb, "set %s=%s\r\n", k, v)
 		}
-		fmt.Fprintf(&sb, "\"%s\" -test.run=TestHelperProcess -- %%*\r\n", exe)
+		// The codex args are: exec <reviewPrompt> -C <path> --dangerously-bypass-approvals-and-sandbox
+		//   --output-schema <schema> -o <outPath> --ephemeral
+		// reviewPrompt (arg 2) can contain literal newlines, which break cmd.exe command-line
+		// parsing when expanded. Skip it with a fixed SHIFT before entering the search loop.
+		sb.WriteString("shift /1\r\n") // skip 'exec'
+		sb.WriteString("shift /1\r\n") // skip reviewPrompt (may contain newlines — do NOT expand)
+		// Remaining args are all clean strings; find -o <outPath>.
+		sb.WriteString(":findout\r\n")
+		sb.WriteString("if \"%~1\"==\"\" goto endfind\r\n")
+		sb.WriteString("if \"%~1\"==\"-o\" (\r\n")
+		sb.WriteString("  set \"GO_TEST_OUT_PATH=%~2\"\r\n")
+		sb.WriteString("  goto endfind\r\n")
+		sb.WriteString(")\r\n")
+		sb.WriteString("shift /1\r\n")
+		sb.WriteString("goto findout\r\n")
+		sb.WriteString(":endfind\r\n")
+		// Call test binary without forwarding the problematic args.
+		fmt.Fprintf(&sb, "\"%s\" -test.run=TestHelperProcess\r\n", exe)
 		sb.WriteString("exit /b %errorlevel%\r\n")
 		if err := os.WriteFile(path, []byte(sb.String()), 0o755); err != nil {
 			t.Fatalf("os.WriteFile(%s) error = %v", path, err)

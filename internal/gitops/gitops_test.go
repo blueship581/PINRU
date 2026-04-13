@@ -4,13 +4,63 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 )
+
+// TestHelperProcess is not a real test. It is invoked as a subprocess to
+// provide cross-platform mocks for external binaries (e.g. git).
+func TestHelperProcess(t *testing.T) {
+	if os.Getenv("GO_TEST_SUBPROCESS") != "1" {
+		return
+	}
+	switch os.Getenv("GO_TEST_SUBPROCESS_MODE") {
+	case "git_sleep":
+		fmt.Fprintln(os.Stderr, "fake clone starting")
+		// Block until killed; context cancellation sends SIGKILL on Windows.
+		select {}
+	default:
+		fmt.Fprintf(os.Stderr, "unknown GO_TEST_SUBPROCESS_MODE: %s\n", os.Getenv("GO_TEST_SUBPROCESS_MODE"))
+		os.Exit(1)
+	}
+}
+
+// createMockGitExecutable returns a path to a platform-appropriate executable
+// that pretends to be git and blocks until killed.
+func createMockGitExecutable(t *testing.T) string {
+	t.Helper()
+	testExe, err := os.Executable()
+	if err != nil {
+		t.Fatalf("os.Executable() error = %v", err)
+	}
+	dir := t.TempDir()
+	if runtime.GOOS == "windows" {
+		path := filepath.Join(dir, "git.bat")
+		content := fmt.Sprintf(
+			"@echo off\r\nset GO_TEST_SUBPROCESS=1\r\nset GO_TEST_SUBPROCESS_MODE=git_sleep\r\n\"%s\" -test.run=TestHelperProcess\r\nexit /b %%errorlevel%%\r\n",
+			testExe,
+		)
+		if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
+			t.Fatalf("os.WriteFile(%s) error = %v", path, err)
+		}
+		return dir
+	}
+	path := filepath.Join(dir, "git")
+	content := fmt.Sprintf(
+		"#!/bin/sh\ntrap 'exit 143' TERM INT\nprintf 'fake clone starting\\n' >&2\nGO_TEST_SUBPROCESS=1 GO_TEST_SUBPROCESS_MODE=git_sleep exec %q -test.run=TestHelperProcess\n",
+		testExe,
+	)
+	if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
+		t.Fatalf("os.WriteFile(%s) error = %v", path, err)
+	}
+	return dir
+}
 
 func TestBuildGitAuthEnvUsesExtraHeader(t *testing.T) {
 	env := buildGitAuthEnv("https://github.com/example/repo.git", "alice", "secret-token")
@@ -54,21 +104,7 @@ func TestBuildGitAuthEnvDisablesPromptWithoutCredentials(t *testing.T) {
 
 func TestCloneWithProgressHonorsContextCancellation(t *testing.T) {
 	root := t.TempDir()
-	fakeBin := filepath.Join(root, "bin")
-	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
-		t.Fatalf("MkdirAll(fakeBin) error = %v", err)
-	}
-
-	gitPath := filepath.Join(fakeBin, "git")
-	script := strings.Join([]string{
-		"#!/bin/sh",
-		"trap 'exit 143' TERM INT",
-		"printf 'fake clone starting\\n' >&2",
-		"sleep 10",
-	}, "\n")
-	if err := os.WriteFile(gitPath, []byte(script), 0o755); err != nil {
-		t.Fatalf("WriteFile(gitPath) error = %v", err)
-	}
+	fakeBin := createMockGitExecutable(t)
 
 	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
 
