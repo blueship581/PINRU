@@ -46,10 +46,15 @@ func TestHelperProcess(t *testing.T) {
 			os.WriteFile(countFile, []byte(strconv.Itoa(count)), 0o644) //nolint:errcheck
 		}
 		// Find -o argument and write structured JSON output.
+		// Prefer the explicit env hint from RunCodexReview because Windows
+		// command wrappers can lose trailing args when prompts contain newlines.
+		outPath := os.Getenv("PINRU_CODEX_REVIEW_OUTPUT_PATH")
 		// On Windows the .bat wrapper parses -o before calling us (to avoid
 		// newline-in-arg cmd.exe issues) and passes the path via GO_TEST_OUT_PATH.
 		// On Unix args are forwarded directly via "$@".
-		outPath := os.Getenv("GO_TEST_OUT_PATH")
+		if outPath == "" {
+			outPath = os.Getenv("GO_TEST_OUT_PATH")
+		}
 		if outPath == "" {
 			for i := 0; i < len(args)-1; i++ {
 				if args[i] == "-o" {

@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -593,6 +594,9 @@ func (s *CliService) RunCodexReview(ctx context.Context, localPath string, onLin
 
 	reviewContext, _ := s.collectPgCodeReviewContext(ctx, localPath)
 	reviewPrompt := buildCodexReviewPrompt(reviewContext)
+	if runtime.GOOS == "windows" {
+		reviewPrompt = compactPromptForWindowsCommandLine(reviewPrompt)
+	}
 
 	// Write bundled schema to a temp file.
 	schemaFile, err := os.CreateTemp("", "pinru-review-schema-*.json")
@@ -627,6 +631,9 @@ func (s *CliService) RunCodexReview(ctx context.Context, localPath string, onLin
 
 	cmd := exec.CommandContext(ctx, codexPath, args...)
 	cmd.Dir = localPath
+	cmd.Env = applyEnvOverrides(os.Environ(), map[string]string{
+		"PINRU_CODEX_REVIEW_OUTPUT_PATH": outPath,
+	})
 
 	stdoutPipe, err := cmd.StdoutPipe()
 	if err != nil {
@@ -765,6 +772,19 @@ func buildCodexReviewPrompt(project *pgCodeProjectContext) string {
 	}
 
 	return strings.Join(parts, "\n\n")
+}
+
+func compactPromptForWindowsCommandLine(prompt string) string {
+	replacer := strings.NewReplacer("\r\n", "\n", "\r", "\n")
+	lines := strings.Split(replacer.Replace(prompt), "\n")
+	compacted := make([]string, 0, len(lines))
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed != "" {
+			compacted = append(compacted, trimmed)
+		}
+	}
+	return strings.Join(compacted, " ")
 }
 
 func applyCodexReviewEvidenceGuards(localPath string, project *pgCodeProjectContext, result *CodexReviewResult) {

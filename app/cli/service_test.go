@@ -276,6 +276,21 @@ func TestBuildCodexReviewPromptIncludesEvidenceGuardrails(t *testing.T) {
 	}
 }
 
+func TestCompactPromptForWindowsCommandLine(t *testing.T) {
+	raw := "/pg-code\n\n  第一行  \r\n\r\n{\n  \"prompt_candidates\": [\n    \"a.md\"\n  ]\n}\n"
+	got := compactPromptForWindowsCommandLine(raw)
+
+	if strings.Contains(got, "\n") || strings.Contains(got, "\r") {
+		t.Fatalf("compactPromptForWindowsCommandLine() = %q, want single line", got)
+	}
+	if !strings.Contains(got, "/pg-code 第一行 {") {
+		t.Fatalf("compactPromptForWindowsCommandLine() = %q, want joined content", got)
+	}
+	if !strings.Contains(got, "\"prompt_candidates\": [") {
+		t.Fatalf("compactPromptForWindowsCommandLine() = %q, want JSON content retained", got)
+	}
+}
+
 func TestApplyCodexReviewEvidenceGuardsDowngradesWithoutPromptEvidence(t *testing.T) {
 	repoDir := t.TempDir()
 	filePath := filepath.Join(repoDir, "main.go")
