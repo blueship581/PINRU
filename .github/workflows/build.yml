@@ -61,38 +61,6 @@ jobs:
         if: runner.os == 'macOS'
         run: go build -o build/bin/pinru .
 
-      - name: Install Apple signing certificate
-        if: runner.os == 'macOS' && secrets.APPLE_CERTIFICATE_P12_BASE64 != '' && secrets.APPLE_CERTIFICATE_PASSWORD != '' && secrets.APPLE_SIGNING_IDENTITY != ''
-        env:
-          APPLE_CERTIFICATE_P12_BASE64: ${{ secrets.APPLE_CERTIFICATE_P12_BASE64 }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          KEYCHAIN_PASSWORD: ${{ secrets.APPLE_KEYCHAIN_PASSWORD }}
-        run: |
-          KEYCHAIN_PASSWORD="${KEYCHAIN_PASSWORD:-$GITHUB_RUN_ID}"
-          CERT_PATH="$RUNNER_TEMP/pinru-signing-cert.p12"
-          KEYCHAIN_PATH="$RUNNER_TEMP/pinru-build.keychain-db"
-          echo "$APPLE_CERTIFICATE_P12_BASE64" | base64 -D > "$CERT_PATH"
-          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
-          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-          security import "$CERT_PATH" -k "$KEYCHAIN_PATH" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
-          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-          security list-keychains -d user -s "$KEYCHAIN_PATH"
-          security default-keychain -s "$KEYCHAIN_PATH"
-
-      - name: Configure notarytool profile
-        id: notary
-        if: runner.os == 'macOS' && secrets.APPLE_NOTARY_APPLE_ID != '' && secrets.APPLE_NOTARY_APP_PASSWORD != '' && secrets.APPLE_TEAM_ID != ''
-        env:
-          APPLE_NOTARY_APPLE_ID: ${{ secrets.APPLE_NOTARY_APPLE_ID }}
-          APPLE_NOTARY_APP_PASSWORD: ${{ secrets.APPLE_NOTARY_APP_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        run: |
-          xcrun notarytool store-credentials pinru-notary \
-            --apple-id "$APPLE_NOTARY_APPLE_ID" \
-            --team-id "$APPLE_TEAM_ID" \
-            --password "$APPLE_NOTARY_APP_PASSWORD"
-          echo "profile=pinru-notary" >> "$GITHUB_OUTPUT"
 
       - name: Build binary (Windows)
         if: runner.os == 'Windows'
@@ -101,8 +69,6 @@ jobs:
       - name: Package (macOS)
         if: runner.os == 'macOS'
         env:
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_NOTARY_PROFILE: ${{ steps.notary.outputs.profile }}
           ARCHIVE_SUFFIX: ${{ matrix.name }}
         run: |
           chmod +x scripts/package_macos_app.sh
