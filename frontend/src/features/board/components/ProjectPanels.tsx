@@ -268,14 +268,12 @@ export function ProjectPanel({
   const [addingModel, setAddingModel] = useState(false);
   const [newModelInput, setNewModelInput] = useState('');
   const [taskTypes, setTaskTypes] = useState<string[]>(() => initialTaskSettings.taskTypes);
-  const [quotas, setQuotas] = useState<TaskTypeQuotas>(() => initialTaskSettings.quotas);
-  const [totals, setTotals] = useState(() => initialTaskSettings.totals);
+  const [quotas, setQuotas] = useState<TaskTypeQuotas>(() => initialTaskSettings.totals);
 
   useEffect(() => {
     setForm({ ...project });
     setTaskTypes(initialTaskSettings.taskTypes);
-    setQuotas(initialTaskSettings.quotas);
-    setTotals(initialTaskSettings.totals);
+    setQuotas(initialTaskSettings.totals);
     setAddingModel(false);
     setNewModelInput('');
     setError('');
@@ -343,7 +341,7 @@ export function ProjectPanel({
         models: serializeProjectModels(modelList),
         sourceModelFolder,
         defaultSubmitRepo: form.defaultSubmitRepo.trim(),
-        ...serializeProjectTaskSettings(taskTypes, quotas, totals),
+        ...serializeProjectTaskSettings(taskTypes, quotas),
       };
       await updateProject(nextProject);
       const refreshedProjects = await getProjects();
@@ -424,9 +422,6 @@ export function ProjectPanel({
               <Plus className="w-3.5 h-3.5" /> 添加
             </button>
           </div>
-          <p className="mb-3 text-xs leading-5 text-stone-400 dark:text-stone-500">
-            这里决定领题后会创建哪些本地目录。源码模型表示原始代码目录；其余模型会作为执行、副本提交和 AI 复审用的工作目录。
-          </p>
           {addingModel && (
             <div className="flex gap-2 mb-2">
               <input
@@ -508,18 +503,16 @@ export function ProjectPanel({
         </div>
         <div>
           <span className="mb-1 block text-sm font-medium text-stone-700 dark:text-stone-300">
-            任务类型约束
+            任务类型与配额
           </span>
           <p className="mb-3 text-xs text-stone-400 dark:text-stone-500">
-            任务总量：整个项目该类型可创建的任务上限。单题上限：同一个 GitLab 项目在该类型下最多领取的次数。留空均为不限。
+            这里维护项目级任务类型总量。保存后会按当前已分配数量自动重算剩余额度。
           </p>
           <TaskTypeQuotaEditor
             taskTypes={taskTypes}
             quotas={quotas}
-            totals={totals}
             onTaskTypesChange={setTaskTypes}
             onQuotasChange={setQuotas}
-            onTotalsChange={setTotals}
             addButtonLabel="添加任务类型"
           />
         </div>
@@ -539,7 +532,7 @@ export function ProjectPanel({
             ))}
           </select>
           <p className="mt-1.5 text-xs text-stone-400 dark:text-stone-500">
-            这里指定哪个模型作为源码来源。它不会计入“执行副本”数量，实际源码目录会自动使用对应 GitLab 项目名。
+            这里指定哪个模型副本作为源码来源。实际源码目录会自动使用对应 GitLab 项目名。
           </p>
         </label>
         <label className="block">

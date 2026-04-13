@@ -30,7 +30,6 @@ export function createSessionDraft(
     isSatisfied: getSessionDecisionValue(session?.isSatisfied),
     evaluation: session?.evaluation ?? '',
     userConversation: session?.userConversation ?? '',
-    evidence: session?.evidence ? { ...session.evidence } : undefined,
   };
 }
 
@@ -165,7 +164,6 @@ export function mapSessionDraftsToSessionList(
     isSatisfied: session.isSatisfied,
     evaluation: session.evaluation?.trim() ?? '',
     userConversation: session.userConversation?.trim() ?? '',
-    evidence: session.evidence ? { ...session.evidence } : undefined,
   }));
 }
 
@@ -211,26 +209,8 @@ export function buildDraftsFromExtractedCandidate(
       evaluation: previous?.evaluation ?? fallbackDraft.evaluation,
       sessionId: detectedSession.sessionId,
       userConversation: detectedSession.userConversation ?? '',
-      evidence: buildSessionEvidenceFromCandidate(candidate, detectedSession),
     };
   });
-}
-
-function buildSessionEvidenceFromCandidate(
-  candidate: ExtractTaskSessionCandidate,
-  detectedSession: ExtractTaskSessionCandidate['sessions'][number],
-) {
-  return {
-    workspacePath: candidate.workspacePath,
-    matchedPath: candidate.matchedPath,
-    matchKind: candidate.matchKind,
-    userId: candidate.userId,
-    username: candidate.username || candidate.userId,
-    summary: candidate.summary,
-    isCurrent: detectedSession.isCurrent,
-    lastActivityAt: detectedSession.lastActivityAt,
-    extractedAt: Math.floor(Date.now() / 1000),
-  };
 }
 
 export function maskSessionId(sessionId: string): string {

@@ -26,9 +26,6 @@ function buildModelRun(overrides: Partial<ModelRunFromDB>): ModelRunFromDB {
     conversationDate: overrides.conversationDate ?? null,
     submitError: overrides.submitError ?? null,
     sessionList: overrides.sessionList ?? [],
-    reviewStatus: overrides.reviewStatus ?? 'none',
-    reviewRound: overrides.reviewRound ?? 0,
-    reviewNotes: overrides.reviewNotes ?? null,
   };
 }
 
@@ -42,7 +39,6 @@ function buildCandidate(
     matchKind: overrides.matchKind ?? 'exact',
     sessionCount: overrides.sessionCount ?? 1,
     userId: overrides.userId ?? 'user-1',
-    username: overrides.username ?? 'alice',
     currentSessionId: overrides.currentSessionId ?? 'session-current',
     userMessageCount: overrides.userMessageCount ?? 3,
     summary: overrides.summary ?? 'summary',

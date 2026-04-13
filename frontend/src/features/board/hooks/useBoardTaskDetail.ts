@@ -14,11 +14,7 @@ import {
   type GeneratePromptRequest,
   type LlmProviderConfig,
 } from '../../../api/llm';
-import {
-  submitJob,
-  submitSessionSyncJob,
-  type JobProgressEvent,
-} from '../../../api/job';
+import { submitJob } from '../../../api/job';
 import {
   extractTaskSessions,
   getTask,
@@ -53,29 +49,8 @@ import { useAppStore, type Task, type TaskStatus } from '../../../store';
 
 const PROMPT_GENERATION_TIMEOUT_MS = 1_200_000;
 
-function normalizeModelRunList(
-  modelRuns: ModelRunFromDB[] | null | undefined,
-): ModelRunFromDB[] {
-  return Array.isArray(modelRuns) ? modelRuns : [];
-}
-
-function normalizeLlmProviderList(
-  providers: LlmProviderConfig[] | null | undefined,
-): LlmProviderConfig[] {
-  return Array.isArray(providers) ? providers : [];
-}
-
 function getDefaultTaskDetailTab(status?: TaskStatus | null): TaskDetailDrawerTab {
-  return status === 'Submitted' || status === 'ExecutionCompleted' ? 'sessions' : 'prompt';
-}
-
-function resolvePromptWritebackStatus(
-  currentStatus?: string | null,
-): TaskStatus {
-  if (currentStatus === 'Submitted' || currentStatus === 'ExecutionCompleted') {
-    return currentStatus;
-  }
-  return 'PromptReady';
+  return status === 'Submitted' ? 'sessions' : 'prompt';
 }
 
 type UseBoardTaskDetailArgs = {
@@ -249,41 +224,6 @@ export function useBoardTaskDetail({
     }));
   };
 
-  const refreshTaskSessionSyncState = async (taskId: string) => {
-    const [taskDetail, modelRuns] = await Promise.all([
-      getTask(taskId),
-      listModelRuns(taskId),
-    ]);
-    const normalizedModelRuns = normalizeModelRunList(modelRuns);
-
-    if (selectedTaskIdRef.current !== taskId) {
-      return;
-    }
-
-    const latestTask =
-      useAppStore.getState().tasks.find((task) => task.id === taskId) ??
-      selected ??
-      null;
-
-    if (latestTask) {
-      setSelected((prev) => (prev?.id === taskId ? latestTask : prev));
-    }
-
-    setSelectedTaskDetail(taskDetail);
-    setSelectedModelRuns(normalizedModelRuns);
-    const nextSessionModelName =
-      normalizedModelRuns.some((run) => run.modelName === selectedSessionModelName)
-        ? selectedSessionModelName
-        : buildSessionModelOptions(normalizedModelRuns, sourceModelName)[0]?.modelName ?? '';
-    setSelectedSessionModelName(nextSessionModelName);
-    hydrateSessionDraftState(
-      nextSessionModelName,
-      taskDetail,
-      normalizedModelRuns,
-      latestTask,
-    );
-  };
-
   useEffect(() => {
     selectedTaskIdRef.current = selected?.id ?? null;
   }, [selected?.id]);
@@ -310,7 +250,6 @@ export function useBoardTaskDetail({
       setSelectedModelRuns([]);
       setSelectedSessionModelName('');
       setDrawerError('');
-      setSessionExtracting(false);
       setPromptDraft('');
       setSessionListDraft([]);
       setSessionExtractCandidates([]);
@@ -325,14 +264,12 @@ export function useBoardTaskDetail({
     setActiveDrawerTab(getDefaultTaskDetailTab(selected.status));
     setDrawerLoading(true);
     setDrawerError('');
-    setSessionExtracting(false);
 
     (async () => {
       const [taskDetail, modelRuns] = await Promise.all([
         getTask(selected.id),
         listModelRuns(selected.id),
       ]);
-      const normalizedModelRuns = normalizeModelRunList(modelRuns);
       if (cancelled) {
         return;
       }
@@ -340,14 +277,14 @@ export function useBoardTaskDetail({
       setSelectedTaskDetail(taskDetail);
       setPromptDraft(taskDetail?.promptText ?? '');
       setPromptCopied(false);
-      setSelectedModelRuns(normalizedModelRuns);
+      setSelectedModelRuns(modelRuns);
       const initialSessionModelName =
-        buildSessionModelOptions(normalizedModelRuns, sourceModelName)[0]?.modelName ?? '';
+        buildSessionModelOptions(modelRuns, sourceModelName)[0]?.modelName ?? '';
       setSelectedSessionModelName(initialSessionModelName);
       hydrateSessionDraftState(
         initialSessionModelName,
         taskDetail,
-        normalizedModelRuns,
+        modelRuns,
         selected,
       );
       setDrawerLoading(false);
@@ -367,12 +304,6 @@ export function useBoardTaskDetail({
   const handleStatusChange = async (taskId: string, newStatus: TaskStatus) => {
     setStatusChanging(true);
     try {
-      const previousStatus =
-        selectedTaskDetail?.id === taskId
-          ? selectedTaskDetail.status
-          : selected?.id === taskId
-            ? selected.status
-            : useAppStore.getState().tasks.find((task) => task.id === taskId)?.status;
       await updateTaskStatus(taskId, newStatus);
       updateTaskStatusInStore(taskId, newStatus);
       setSelected((prev) =>
@@ -381,64 +312,10 @@ export function useBoardTaskDetail({
       setSelectedTaskDetail((prev) =>
         prev?.id === taskId ? { ...prev, status: newStatus } : prev,
       );
-      if (newStatus === 'ExecutionCompleted' && previousStatus !== 'ExecutionCompleted') {
-        if (selectedTaskIdRef.current === taskId) {
-          setActiveDrawerTab('sessions');
-          setSessionExtracting(true);
-          setDrawerError('');
-        }
-        await submitSessionSyncJob(taskId);
-        useAppStore.getState().loadBackgroundJobs();
-      }
     } catch (error) {
-      if (selectedTaskIdRef.current === taskId) {
-        setSessionExtracting(false);
-        setDrawerError(error instanceof Error ? error.message : '状态更新失败');
-      }
       console.error('Failed to update task status:', error);
     } finally {
       setStatusChanging(false);
-    }
-  };
-
-  const handleSessionSyncEvent = async (event: JobProgressEvent) => {
-    if (event.jobType !== 'session_sync') {
-      return;
-    }
-
-    const taskId = event.taskId ?? '';
-    if (!taskId || selectedTaskIdRef.current !== taskId) {
-      return;
-    }
-
-    if (event.status === 'running') {
-      setActiveDrawerTab('sessions');
-      setSessionExtracting(true);
-      setDrawerError('');
-      return;
-    }
-
-    if (event.status === 'done') {
-      setSessionExtracting(false);
-      setDrawerError('');
-      try {
-        await refreshTaskSessionSyncState(taskId);
-      } catch (error) {
-        setDrawerError(
-          error instanceof Error ? error.message : 'Session 同步完成，但详情刷新失败',
-        );
-      }
-      return;
-    }
-
-    if (event.status === 'error') {
-      setSessionExtracting(false);
-      setDrawerError(event.errorMessage ?? 'Session 同步失败');
-      return;
-    }
-
-    if (event.status === 'cancelled') {
-      setSessionExtracting(false);
     }
   };
 
@@ -457,7 +334,6 @@ export function useBoardTaskDetail({
       getTask(taskId),
       listModelRuns(taskId),
     ]);
-    const normalizedModelRuns = normalizeModelRunList(modelRuns);
 
     const latestTask =
       useAppStore.getState().tasks.find((task) => task.id === taskId) ?? null;
@@ -466,16 +342,16 @@ export function useBoardTaskDetail({
     }
 
     setSelectedTaskDetail(taskDetail);
-    setSelectedModelRuns(normalizedModelRuns);
+    setSelectedModelRuns(modelRuns);
     const nextSessionModelName =
-      normalizedModelRuns.some((run) => run.modelName === selectedSessionModelName)
+      modelRuns.some((run) => run.modelName === selectedSessionModelName)
         ? selectedSessionModelName
-        : buildSessionModelOptions(normalizedModelRuns, sourceModelName)[0]?.modelName ?? '';
+        : buildSessionModelOptions(modelRuns, sourceModelName)[0]?.modelName ?? '';
     setSelectedSessionModelName(nextSessionModelName);
     hydrateSessionDraftState(
       nextSessionModelName,
       taskDetail,
-      normalizedModelRuns,
+      modelRuns,
       latestTask,
     );
   };
@@ -640,15 +516,12 @@ export function useBoardTaskDetail({
     try {
       await saveTaskPrompt(selected.id, promptDraft);
       const now = Math.floor(Date.now() / 1000);
-      const nextStatus = resolvePromptWritebackStatus(
-        selectedTaskDetail?.status ?? selected.status,
-      );
       setSelectedTaskDetail((prev) =>
         prev
           ? {
               ...prev,
               promptText: promptDraft,
-              status: nextStatus,
+              status: 'PromptReady',
               promptGenerationStatus: 'done',
               promptGenerationError: null,
               promptGenerationStartedAt:
@@ -661,13 +534,13 @@ export function useBoardTaskDetail({
         prev
           ? {
               ...prev,
-              status: nextStatus,
+              status: 'PromptReady',
               promptGenerationStatus: 'done' as PromptGenerationStatus,
               promptGenerationError: null,
             }
           : prev,
       );
-      updateTaskStatusInStore(selected.id, nextStatus);
+      updateTaskStatusInStore(selected.id, 'PromptReady');
       await loadTasks();
     } catch (error) {
       setDrawerError(error instanceof Error ? error.message : '提示词保存失败');
@@ -695,7 +568,7 @@ export function useBoardTaskDetail({
 
   useEffect(() => {
     getLlmProviders()
-      .then((providers) => setLlmProviders(normalizeLlmProviderList(providers)))
+      .then(setLlmProviders)
       .catch(() => setLlmProviders([]));
   }, []);
 
@@ -757,13 +630,12 @@ export function useBoardTaskDetail({
             setPromptDraft(taskDetail.promptText ?? '');
             setSelectedTaskDetail(taskDetail);
           }
-          const nextStatus = resolvePromptWritebackStatus(taskDetail.status);
           patchTaskSummaryState(taskId, {
-            status: nextStatus,
+            status: 'PromptReady' as TaskStatus,
             promptGenerationStatus: 'done' as PromptGenerationStatus,
             promptGenerationError: null,
           });
-          updateTaskStatusInStore(taskId, nextStatus);
+          updateTaskStatusInStore(taskId, 'PromptReady');
           setTaskPromptGenerating(taskId, false);
           await loadTasks();
           useAppStore.getState().loadBackgroundJobs();
@@ -1172,7 +1044,6 @@ export function useBoardTaskDetail({
     selectedPromptGenerationStatus,
     selectedPromptGenerationMeta,
     selectedPromptGenerationError,
-    handleSessionSyncEvent,
     handleStatusChange,
     handleTaskTypeChange,
     handleAddSession,
@@ -1193,11 +1064,6 @@ export function useBoardTaskDetail({
     handleGeneratePrompt,
     applyExtractedSessionCandidate,
     closeSessionExtractCandidates,
-    refreshModelRuns: async () => {
-      if (!selected) return;
-      const runs = await listModelRuns(selected.id);
-      setSelectedModelRuns(normalizeModelRunList(runs));
-    },
   };
 }
 

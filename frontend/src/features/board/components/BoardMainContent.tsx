@@ -223,7 +223,7 @@ export function BoardMainContent({
           <span className="text-[11px] font-bold uppercase tracking-widest text-stone-400 w-14 flex-shrink-0">
             阶段
           </span>
-          {(['Claimed', 'Downloading', 'Downloaded', 'PromptReady', 'ExecutionCompleted', 'Submitted', 'Error'] as TaskStatus[]).map((status) => {
+          {(['Claimed', 'Downloading', 'Downloaded', 'PromptReady', 'Submitted', 'Error'] as TaskStatus[]).map((status) => {
             const cfg = STATUS[status];
             const count = tasksForStageCount.filter((task) => task.status === status).length;
             const active = activeStages.has(status);

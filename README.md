@@ -75,49 +75,6 @@ GOARCH=amd64 go build -o build/bin/pinru-amd64 .
 
 macOS 特性: 关闭最后一个窗口时自动退出应用。
 
-#### macOS 签名与公证
-
-当前仓库的发布产物如果不做 Apple Developer 签名和 notarization，下载后很容易被 Gatekeeper 判定为“已损坏”或“不受信任”。仓库现在已经预留了以下发布链路:
-
-- 修正后的 `build/darwin/Info.plist`
-- 生产签名用 `build/darwin/entitlements.plist`
-- 自动组装 `.app`、签名、公证和 `ditto` 打包的 `scripts/package_macos_app.sh`
-- GitHub Actions 中的 `.github/workflows/build.yml`
-
-要让 CI 产出可正常打开的 macOS 安装包，需要配置这些 GitHub Secrets:
-
-- `APPLE_CERTIFICATE_P12_BASE64`: `Developer ID Application` 证书导出的 `.p12` 内容，先做 base64
-- `APPLE_CERTIFICATE_PASSWORD`: 导出 `.p12` 时设置的密码
-- `APPLE_SIGNING_IDENTITY`: 证书 identity，例如 `Developer ID Application: Your Name (TEAMID)`
-- `APPLE_NOTARY_APPLE_ID`: 用于 notarization 的 Apple ID
-- `APPLE_NOTARY_APP_PASSWORD`: 上面 Apple ID 的 app-specific password
-- `APPLE_TEAM_ID`: Apple Developer Team ID
-- `APPLE_KEYCHAIN_PASSWORD`: 可选，CI 临时 keychain 密码
-
-本地手工打包:
-
-```bash
-cd frontend && npm ci && npm run build && cd ..
-go build -o build/bin/pinru .
-
-xcrun notarytool store-credentials pinru-notary \
-  --apple-id 'your-apple-id@example.com' \
-  --team-id 'TEAMID' \
-  --password 'app-specific-password'
-
-export APPLE_SIGNING_IDENTITY='Developer ID Application: Your Name (TEAMID)'
-export APPLE_NOTARY_PROFILE='pinru-notary'
-./scripts/package_macos_app.sh
-```
-
-如果只是本机临时排查而不是正式分发，可以移除隔离属性:
-
-```bash
-xattr -dr com.apple.quarantine /path/to/PINRU.app
-```
-
-但这不是发布方案，正式给别人下载的包还是必须走签名 + 公证。
-
 #### Windows
 
 ```powershell

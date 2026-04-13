@@ -21,14 +21,7 @@ import { listJobs, type BackgroundJob } from './api/job';
 
 export type { TaskType } from './api/config';
 
-export type TaskStatus =
-  | 'Claimed'
-  | 'Downloading'
-  | 'Downloaded'
-  | 'PromptReady'
-  | 'ExecutionCompleted'
-  | 'Submitted'
-  | 'Error';
+export type TaskStatus = 'Claimed' | 'Downloading' | 'Downloaded' | 'PromptReady' | 'Submitted' | 'Error';
 
 export interface Task {
   id: string;
@@ -115,8 +108,6 @@ function isNonExecutionModel(name: string, sourceModelName: string) {
 interface AppState {
   theme: 'dark' | 'light';
   setTheme: (theme: 'dark' | 'light') => void;
-  aiReviewVisible: boolean;
-  unlockAiReview: () => void;
   tasks: Task[];
   loadTasks: () => Promise<void>;
   addTask: (task: Task) => void;
@@ -140,8 +131,6 @@ interface AppState {
 export const useAppStore = create<AppState>((set) => ({
   theme: 'dark',
   setTheme: (theme) => set({ theme }),
-  aiReviewVisible: false,
-  unlockAiReview: () => set({ aiReviewVisible: true }),
   tasks: [],
   loadTasks: async () => {
     try {
@@ -150,15 +139,8 @@ export const useAppStore = create<AppState>((set) => ({
         getProjects(),
       ]);
       const activeProject = projects.find((project) => project.id === activeProjectId) ?? projects[0] ?? null;
-      const resolvedProjectId = activeProject?.id?.trim();
-
-      if (!resolvedProjectId) {
-        set({ tasks: [] });
-        return;
-      }
-
       const sourceModelName = activeProject?.sourceModelFolder?.trim() || 'ORIGIN';
-      const dbTasks = await listTasks(resolvedProjectId);
+      const dbTasks = await listTasks(activeProjectId || undefined);
       const runsByTask = await Promise.all(
         dbTasks.map(async (task) => {
           try {

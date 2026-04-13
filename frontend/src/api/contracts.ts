@@ -44,7 +44,6 @@ import type {
   CreateTaskRequest,
   ExtractTaskSessionsResult,
   ModelRunFromDB,
-  TaskChildDirectory,
   TaskFromDB,
   UpdateModelRunRequest,
   UpdateModelRunSessionRequest,
@@ -160,7 +159,6 @@ export type WailsServiceContract = {
     ListTasks: ServiceMethod<[projectConfigId: string | null], TaskFromDB[]>;
     GetTask: ServiceMethod<[id: string], TaskFromDB | null>;
     ListModelRuns: ServiceMethod<[taskId: string], ModelRunFromDB[]>;
-    ListTaskChildDirectories: ServiceMethod<[taskId: string], TaskChildDirectory[]>;
     CreateTask: ServiceMethod<[task: CreateTaskRequest], TaskFromDB>;
     UpdateTaskStatus: ServiceMethod<[id: string, status: string], void>;
     UpdateTaskType: ServiceMethod<[id: string, taskType: string], void>;

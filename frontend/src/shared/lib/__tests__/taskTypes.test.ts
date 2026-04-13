@@ -2,10 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   buildTaskTypeChangeConfirmMessage,
   buildProjectTaskTypes,
-  createNewProjectTaskSettings,
   DEFAULT_TASK_TYPES,
-  deriveRemainingTaskTypeQuotas,
-  deriveTaskTypeUsedCounts,
   getProjectTaskSettings,
   getTaskTypeQuotaRawValue,
   getTaskTypeQuotaValue,
@@ -36,14 +33,6 @@ describe('taskTypes helpers', () => {
 
   it('falls back to the default task type list when project config is empty', () => {
     expect(buildProjectTaskTypes()).toEqual([...DEFAULT_TASK_TYPES]);
-  });
-
-  it('starts new project task settings without implicit totals or quotas', () => {
-    expect(createNewProjectTaskSettings()).toEqual({
-      taskTypes: [...DEFAULT_TASK_TYPES],
-      quotas: {},
-      totals: {},
-    });
   });
 
   it('mirrors totals and quotas through a single project task settings helper', () => {
@@ -86,15 +75,15 @@ describe('taskTypes helpers', () => {
 
   it('serializes project task settings through one helper', () => {
     expect(
-      serializeProjectTaskSettings(
-        ['Bug修复', 'Feature迭代'],
-        { bugfix: 2, Feature迭代: 3, 未知类型: 5 },
-        { Bug修复: 3, Feature迭代: 3 },
-      ),
+      serializeProjectTaskSettings(['Bug修复', 'Feature迭代'], {
+        bugfix: 2,
+        Feature迭代: 3,
+        未知类型: 5,
+      }),
     ).toEqual({
       taskTypes: '["未归类","Bug修复","Feature迭代"]',
       taskTypeQuotas: '{"Bug修复":2,"Feature迭代":3}',
-      taskTypeTotals: '{"Bug修复":3,"Feature迭代":3}',
+      taskTypeTotals: '{"Bug修复":2,"Feature迭代":3}',
     });
   });
 
@@ -109,30 +98,5 @@ describe('taskTypes helpers', () => {
     expect(getTaskTypeQuotaRawValue(quotas, 'Bug修复')).toBe(-1);
     expect(getTaskTypeQuotaValue(quotas, 'Bug修复')).toBe(0);
     expect(getTaskTypeQuotaRawValue(quotas, 'Feature迭代')).toBe(2);
-  });
-
-  it('derives used counts and recomputed remaining quotas for project config editing', () => {
-    const usedCounts = deriveTaskTypeUsedCounts(
-      { Bug修复: 5, Feature迭代: 4 },
-      { Bug修复: 3, Feature迭代: -1 },
-      ['Bug修复', 'Feature迭代', '代码生成'],
-    );
-
-    expect(usedCounts).toEqual({
-      Bug修复: 2,
-      Feature迭代: 5,
-    });
-
-    expect(
-      deriveRemainingTaskTypeQuotas(
-        ['Bug修复', 'Feature迭代', '代码生成'],
-        { Bug修复: 6, Feature迭代: 8, 代码生成: 2 },
-        usedCounts,
-      ),
-    ).toEqual({
-      Bug修复: 4,
-      Feature迭代: 3,
-      代码生成: 2,
-    });
   });
 });

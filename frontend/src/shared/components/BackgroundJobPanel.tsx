@@ -16,10 +16,8 @@ import { retryJob, cancelJob, type JobProgressEvent } from '../../api/job';
 
 const JOB_TYPE_LABELS: Record<string, string> = {
   prompt_generate: '提示词生成',
-  session_sync: 'Session 同步',
   git_clone: '拉取代码',
   pr_submit: 'PR 提交',
-  ai_review: 'AI 复审',
 };
 
 const STATUS_CONFIG: Record<string, {
@@ -41,8 +39,6 @@ export default function BackgroundJobPanel() {
   const backgroundJobs = useAppStore((s) => s.backgroundJobs);
   const loadBackgroundJobs = useAppStore((s) => s.loadBackgroundJobs);
   const updateBackgroundJob = useAppStore((s) => s.updateBackgroundJob);
-  const tasks = useAppStore((s) => s.tasks);
-  const taskMap = Object.fromEntries(tasks.map((t) => [t.id, t]));
 
   useEffect(() => {
     void loadBackgroundJobs();
@@ -149,26 +145,17 @@ export default function BackgroundJobPanel() {
                     const Icon = config.icon;
                     const isRunning = job.status === 'running' || job.status === 'pending';
 
-                    const taskName = job.taskId ? taskMap[job.taskId]?.projectName : null;
-
                     return (
                       <div key={job.id} className="px-4 py-3 space-y-2">
                         <div className="flex items-center justify-between gap-2">
                           <div className="flex items-center gap-2 min-w-0">
                             <Icon className={`h-3.5 w-3.5 flex-shrink-0 ${config.color} ${isRunning ? 'animate-spin' : ''}`} />
-                            <div className="flex flex-col min-w-0">
-                              <div className="flex items-center gap-2">
-                                <span className="text-xs font-medium text-zinc-200 truncate">
-                                  {JOB_TYPE_LABELS[job.jobType] ?? job.jobType}
-                                </span>
-                                <span className={`text-[10px] font-medium ${config.color} flex-shrink-0`}>
-                                  {config.label}
-                                </span>
-                              </div>
-                              {taskName && (
-                                <span className="text-[10px] text-zinc-500 truncate">{taskName}</span>
-                              )}
-                            </div>
+                            <span className="text-xs font-medium text-zinc-200 truncate">
+                              {JOB_TYPE_LABELS[job.jobType] ?? job.jobType}
+                            </span>
+                            <span className={`text-[10px] font-medium ${config.color}`}>
+                              {config.label}
+                            </span>
                           </div>
                           <span className="text-[10px] text-zinc-500 flex-shrink-0">
                             {formatTime(job.startedAt ?? job.createdAt)}

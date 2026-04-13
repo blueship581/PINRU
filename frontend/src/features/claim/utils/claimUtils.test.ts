@@ -7,7 +7,6 @@ import {
   formatProjectName,
   getResultStatusMeta,
   parseProjectIds,
-  partitionClaimsByProjectLimit,
   pickSourceModel,
 } from './claimUtils';
 import type { ModelEntry } from '../types';
@@ -50,34 +49,6 @@ describe('claimUtils', () => {
         'missing',
       ).id,
     ).toBe('model-a');
-  });
-
-  it('partitions planned claims by per-project upper limit before execution', () => {
-    const claims = [
-      { projectId: '1849', sequence: 1 },
-      { projectId: '1849', sequence: 2 },
-      { projectId: '1849', sequence: 3 },
-      { projectId: '1850', sequence: 1 },
-    ];
-
-    const result = partitionClaimsByProjectLimit(
-      claims,
-      (claim) => claim.projectId,
-      new Map([
-        ['1849', 1],
-        ['1850', 0],
-      ]),
-      2,
-    );
-
-    expect(result.executableClaims).toEqual([
-      { projectId: '1849', sequence: 1 },
-      { projectId: '1850', sequence: 1 },
-    ]);
-    expect(result.exceededClaims).toEqual([
-      { projectId: '1849', sequence: 2 },
-      { projectId: '1849', sequence: 3 },
-    ]);
   });
 
   it('maps result status to stable ui labels', () => {

@@ -10,19 +10,17 @@ import {
   Plus,
   Settings,
   Terminal,
-  Trash2,
   X,
 } from 'lucide-react';
 import { Dialogs } from '@wailsio/runtime';
-import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import BackgroundJobPanel from './BackgroundJobPanel';
 import TaskTypeQuotaEditor from './TaskTypeQuotaEditor';
 import { useAppStore } from '../../store';
 import { inspectDirectory } from '../../api/git';
 import {
-  createNewProjectTaskSettings,
+  DEFAULT_TASK_TYPES,
   createProject,
-  deleteProject,
   getProjects,
   serializeProjectModels,
   serializeProjectTaskSettings,
@@ -30,13 +28,6 @@ import {
   type ProjectConfig,
   type TaskTypeQuotas,
 } from '../../api/config';
-import {
-  clampSidebarWidth,
-  computeSidebarBaseWidthPx,
-  parseStoredSidebarWidth,
-  SIDEBAR_MAX_WIDTH_PX,
-  SIDEBAR_WIDTH_STORAGE_KEY,
-} from '../lib/layoutSizing';
 
 const NAV_ITEMS: Array<{ to: string; label: string; icon: typeof FolderDown; end?: boolean }> = [
   { to: '/', icon: Home, label: '主页', end: true },
@@ -62,11 +53,6 @@ const DEFAULT_MODELS: ModelEntry[] = [
   { id: 'cotv21-pro', name: 'cotv21-pro' },
   { id: 'cotv21.2-pro', name: 'cotv21.2-pro' },
 ];
-
-const PROJECT_MENU_MIN_WIDTH_EM = 5;
-const PROJECT_MENU_MAX_NAME_WIDTH_EM = 15;
-const PROJECT_MENU_CHROME_WIDTH_REM = 4.25;
-const PROJECT_MENU_ACTIONS_WIDTH_REM = 8;
 
 function isEditableTarget(target: EventTarget | null) {
   if (!(target instanceof HTMLElement)) return false;
@@ -95,10 +81,6 @@ function isOriginModel(name: string) {
   return normalizeModelName(name) === 'ORIGIN';
 }
 
-function measureProjectNameWidth(text: string) {
-  return Array.from(text.trim()).reduce((width, char) => width + (char.charCodeAt(0) > 255 ? 1 : 0.55), 0);
-}
-
 async function ensureEmptyProjectDirectory(path: string) {
   const inspection = await inspectDirectory(path);
   if (!inspection.exists) {
@@ -115,8 +97,6 @@ async function ensureEmptyProjectDirectory(path: string) {
 
 export default function Layout() {
   const theme = useAppStore((s) => s.theme);
-  const aiReviewVisible = useAppStore((s) => s.aiReviewVisible);
-  const unlockAiReview = useAppStore((s) => s.unlockAiReview);
   const activeProject = useAppStore((s) => s.activeProject);
   const loadActiveProject = useAppStore((s) => s.loadActiveProject);
   const resetForNewProject = useAppStore((s) => s.resetForNewProject);
@@ -129,9 +109,6 @@ export default function Layout() {
   const [showProjectMenu, setShowProjectMenu] = useState(false);
   const [switchingProject, setSwitchingProject] = useState(false);
   const [projectMenuError, setProjectMenuError] = useState('');
-  const [projectPendingDelete, setProjectPendingDelete] = useState<ProjectConfig | null>(null);
-  const [deletingProject, setDeletingProject] = useState(false);
-  const [deleteProjectError, setDeleteProjectError] = useState('');
 
   const [showProjectModal, setShowProjectModal] = useState(false);
   const [creatingProject, setCreatingProject] = useState(false);
@@ -141,45 +118,15 @@ export default function Layout() {
   const [modelList, setModelList] = useState<ModelEntry[]>(DEFAULT_MODELS);
   const [addingModel, setAddingModel] = useState(false);
   const [newModelName, setNewModelName] = useState('');
-  const [taskTypes, setTaskTypes] = useState<string[]>(() => createNewProjectTaskSettings().taskTypes);
-  const [quotas, setQuotas] = useState<TaskTypeQuotas>(() => createNewProjectTaskSettings().quotas);
-  const [totals, setTotals] = useState<TaskTypeQuotas>(() => createNewProjectTaskSettings().totals);
-  const [sidebarWidthPx, setSidebarWidthPx] = useState<number | null>(null);
-  const [sidebarDragging, setSidebarDragging] = useState(false);
+  const [taskTypes, setTaskTypes] = useState<string[]>([...DEFAULT_TASK_TYPES]);
+  const [quotas, setQuotas] = useState<TaskTypeQuotas>({});
 
   const projectMenuRef = useRef<HTMLDivElement>(null);
-  const sidebarRef = useRef<HTMLElement>(null);
-  const sidebarResizeStateRef = useRef<{ startX: number; startWidth: number } | null>(null);
-  const prLogoClickCountRef = useRef(0);
-  const prLogoLastClickAtRef = useRef(0);
 
   const inputCls =
     'w-full bg-stone-50 dark:bg-[#171B22] border border-stone-200 dark:border-[#232834] rounded-2xl px-4 py-2.5 text-sm font-medium focus:outline-none focus:ring-2 focus:ring-slate-400/30 transition-shadow placeholder:text-stone-400';
 
   const sourceModelOptions = useMemo(() => modelList.map((model) => model.name), [modelList]);
-  const projectMenuLabel = activeProject?.name ?? (loadingProjects ? '加载中...' : '未创建项目');
-  const projectNameWidth = useMemo(() => {
-    const widestName = [projectMenuLabel, ...projects.map((project) => project.name)]
-      .map((name) => measureProjectNameWidth(name))
-      .reduce((max, width) => Math.max(max, width), 0);
-    return Math.min(Math.max(widestName, PROJECT_MENU_MIN_WIDTH_EM), PROJECT_MENU_MAX_NAME_WIDTH_EM);
-  }, [projectMenuLabel, projects]);
-  const sidebarBaseWidthPx = useMemo(
-    () =>
-      computeSidebarBaseWidthPx(
-        projectNameWidth,
-        PROJECT_MENU_CHROME_WIDTH_REM + PROJECT_MENU_ACTIONS_WIDTH_REM + 2.5,
-      ),
-    [projectNameWidth],
-  );
-  const resolvedSidebarWidthPx = clampSidebarWidth(
-    sidebarWidthPx ?? sidebarBaseWidthPx,
-    sidebarBaseWidthPx,
-    SIDEBAR_MAX_WIDTH_PX,
-  );
-  const projectTriggerWidth = `calc(${projectNameWidth}em + ${PROJECT_MENU_CHROME_WIDTH_REM}rem)`;
-  const projectMenuWidth = `calc(${projectNameWidth}em + ${PROJECT_MENU_CHROME_WIDTH_REM + PROJECT_MENU_ACTIONS_WIDTH_REM}rem)`;
-  const sidebarWidth = `${resolvedSidebarWidthPx}px`;
 
   const refreshProjects = async () => {
     const nextProjects = await getProjects();
@@ -191,38 +138,14 @@ export default function Layout() {
     setModelList(DEFAULT_MODELS);
     setAddingModel(false);
     setNewModelName('');
-    const taskSettings = createNewProjectTaskSettings();
-    setTaskTypes(taskSettings.taskTypes);
-    setQuotas(taskSettings.quotas);
-    setTotals(taskSettings.totals);
+    setTaskTypes([...DEFAULT_TASK_TYPES]);
+    setQuotas({});
     setProjectError('');
   };
 
   useEffect(() => {
     document.documentElement.classList.toggle('dark', theme === 'dark');
   }, [theme]);
-
-  useEffect(() => {
-    if (typeof window === 'undefined') return;
-
-    setSidebarWidthPx((currentWidth) => {
-      const persistedWidth = parseStoredSidebarWidth(
-        window.localStorage.getItem(SIDEBAR_WIDTH_STORAGE_KEY),
-        sidebarBaseWidthPx,
-      );
-
-      if (currentWidth === null) {
-        return persistedWidth ?? sidebarBaseWidthPx;
-      }
-
-      return clampSidebarWidth(currentWidth, sidebarBaseWidthPx, SIDEBAR_MAX_WIDTH_PX);
-    });
-  }, [sidebarBaseWidthPx]);
-
-  useEffect(() => {
-    if (typeof window === 'undefined' || sidebarWidthPx === null) return;
-    window.localStorage.setItem(SIDEBAR_WIDTH_STORAGE_KEY, String(sidebarWidthPx));
-  }, [sidebarWidthPx]);
 
   useEffect(() => {
     if (!activeProject) return;
@@ -298,44 +221,6 @@ export default function Layout() {
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [location.pathname, navigate]);
 
-  useEffect(() => {
-    if (!sidebarDragging) return;
-
-    const previousCursor = document.body.style.cursor;
-    const previousUserSelect = document.body.style.userSelect;
-
-    document.body.style.cursor = 'col-resize';
-    document.body.style.userSelect = 'none';
-
-    const handlePointerMove = (event: PointerEvent) => {
-      const resizeState = sidebarResizeStateRef.current;
-      if (!resizeState) return;
-
-      setSidebarWidthPx(
-        clampSidebarWidth(
-          resizeState.startWidth + event.clientX - resizeState.startX,
-          sidebarBaseWidthPx,
-          SIDEBAR_MAX_WIDTH_PX,
-        ),
-      );
-    };
-
-    const handlePointerUp = () => {
-      sidebarResizeStateRef.current = null;
-      setSidebarDragging(false);
-    };
-
-    window.addEventListener('pointermove', handlePointerMove);
-    window.addEventListener('pointerup', handlePointerUp);
-
-    return () => {
-      document.body.style.cursor = previousCursor;
-      document.body.style.userSelect = previousUserSelect;
-      window.removeEventListener('pointermove', handlePointerMove);
-      window.removeEventListener('pointerup', handlePointerUp);
-    };
-  }, [sidebarDragging, sidebarBaseWidthPx]);
-
   const handlePickProjectDirectory = async () => {
     setPickingProjectDir(true);
     setProjectError('');
@@ -368,43 +253,6 @@ export default function Layout() {
     } finally {
       setPickingProjectDir(false);
     }
-  };
-
-  const handlePrLogoClick = () => {
-    navigate('/');
-    if (aiReviewVisible) {
-      return;
-    }
-
-    const now = Date.now();
-    prLogoClickCountRef.current =
-      now - prLogoLastClickAtRef.current <= 900
-        ? prLogoClickCountRef.current + 1
-        : 1;
-    prLogoLastClickAtRef.current = now;
-
-    if (prLogoClickCountRef.current >= 5) {
-      unlockAiReview();
-      prLogoClickCountRef.current = 0;
-      prLogoLastClickAtRef.current = 0;
-    }
-  };
-
-  const handleSidebarResizeStart = (event: ReactPointerEvent<HTMLDivElement>) => {
-    if (event.button !== 0) return;
-
-    sidebarResizeStateRef.current = {
-      startX: event.clientX,
-      startWidth: sidebarRef.current?.getBoundingClientRect().width ?? resolvedSidebarWidthPx,
-    };
-    setSidebarDragging(true);
-    event.preventDefault();
-  };
-
-  const handleSidebarResizeReset = () => {
-    sidebarResizeStateRef.current = null;
-    setSidebarDragging(false);
-    setSidebarWidthPx(sidebarBaseWidthPx);
   };
 
   const handleAddModel = () => {
@@ -451,46 +299,6 @@ export default function Layout() {
       setProjectMenuError(error instanceof Error ? error.message : '切换项目失败');
     } finally {
       setSwitchingProject(false);
-    }
-  };
-
-  const handleOpenDeleteProject = (project: ProjectConfig) => {
-    setDeleteProjectError('');
-    setProjectPendingDelete(project);
-    setShowProjectMenu(false);
-  };
-
-  const handleCloseDeleteProject = () => {
-    if (deletingProject) return;
-    setDeleteProjectError('');
-    setProjectPendingDelete(null);
-  };
-
-  const handleConfirmDeleteProject = async () => {
-    if (!projectPendingDelete || deletingProject) return;
-
-    const deletingActiveProject = projectPendingDelete.id === activeProject?.id;
-    const fallbackProject = projects.find((project) => project.id !== projectPendingDelete.id) ?? null;
-
-    setDeletingProject(true);
-    setDeleteProjectError('');
-
-    try {
-      await deleteProject(projectPendingDelete.id);
-
-      if (deletingActiveProject) {
-        await setActiveProjectId(fallbackProject?.id ?? '');
-        await Promise.all([resetForNewProject(), refreshProjects()]);
-        navigate('/');
-      } else {
-        await refreshProjects();
-      }
-
-      setProjectPendingDelete(null);
-    } catch (error) {
-      setDeleteProjectError(error instanceof Error ? error.message : '删除项目失败');
-    } finally {
-      setDeletingProject(false);
     }
   };
 
@@ -544,7 +352,7 @@ export default function Layout() {
     setCreatingProject(true);
     setProjectError('');
     try {
-      const serializedTaskSettings = serializeProjectTaskSettings(taskTypes, quotas, totals);
+      const serializedTaskSettings = serializeProjectTaskSettings(taskTypes, quotas);
       const nextProject: ProjectConfig = {
         id: `project-${Date.now()}`,
         name,
@@ -580,13 +388,11 @@ export default function Layout() {
       className="flex h-screen w-full overflow-hidden font-sans select-none bg-stone-50 text-stone-900 dark:bg-[#161615] dark:text-stone-100"
     >
       <aside
-        ref={sidebarRef}
-        className="flex-shrink-0 flex flex-col bg-[#ECEAE6] border-r border-black/[.06] dark:bg-[#1A1A19] dark:border-white/[.06]"
-        style={{ width: sidebarWidth, minWidth: sidebarWidth }}
+        className="w-[200px] flex-shrink-0 flex flex-col bg-[#ECEAE6] border-r border-black/[.06] dark:bg-[#1A1A19] dark:border-white/[.06]"
       >
         <div className="px-5 pt-7 pb-4">
           <button
-            onClick={handlePrLogoClick}
+            onClick={() => navigate('/')}
             className="block text-left px-1 py-1 transition-colors cursor-default"
           >
             <p className="text-[17px] font-bold leading-tight tracking-tight text-stone-900 dark:text-stone-50">
@@ -597,7 +403,7 @@ export default function Layout() {
             </p>
           </button>
 
-          <div className="relative mt-4" ref={projectMenuRef} style={{ width: projectTriggerWidth }}>
+          <div className="relative mt-4" ref={projectMenuRef}>
             <button
               onClick={() => setShowProjectMenu((prev) => !prev)}
               disabled={loadingProjects || switchingProject}
@@ -608,7 +414,7 @@ export default function Layout() {
                   当前项目
                 </p>
                 <p className="truncate text-xs font-semibold text-stone-700 dark:text-stone-200">
-                  {projectMenuLabel}
+                  {activeProject?.name ?? (loadingProjects ? '加载中...' : '未创建项目')}
                 </p>
               </div>
               {switchingProject ? (
@@ -619,10 +425,7 @@ export default function Layout() {
             </button>
 
             {showProjectMenu && (
-              <div
-                className="absolute left-0 z-20 mt-2 min-w-full overflow-hidden rounded-2xl border border-stone-200 bg-white shadow-xl dark:border-stone-800 dark:bg-stone-900"
-                style={{ width: projectMenuWidth }}
-              >
+              <div className="absolute left-0 right-0 z-20 mt-2 overflow-hidden rounded-2xl border border-stone-200 bg-white shadow-xl dark:border-stone-800 dark:bg-stone-900">
                 <div className="max-h-64 overflow-y-auto p-1.5">
                   {projects.length === 0 ? (
                     <p className="px-3 py-2 text-xs text-stone-400 dark:text-stone-500">暂无项目配置</p>
@@ -630,33 +433,23 @@ export default function Layout() {
                     projects.map((project) => {
                       const isActive = project.id === activeProject?.id;
                       return (
-                        <div key={project.id} className="flex items-stretch gap-1">
-                          <button
-                            onClick={() => handleSwitchProject(project)}
-                            className={`flex min-w-0 flex-1 items-center gap-2 rounded-xl px-3 py-2 text-left text-xs transition-colors cursor-default ${
-                              isActive
-                                ? 'bg-stone-100 text-stone-800 dark:bg-stone-800 dark:text-stone-100'
-                                : 'text-stone-600 hover:bg-stone-50 dark:text-stone-300 dark:hover:bg-stone-800/70'
-                            }`}
-                          >
-                            <span className="min-w-0 flex-1">
-                              <span className="block truncate font-semibold">{project.name}</span>
-                              <span className="block truncate text-[10px] text-stone-400 dark:text-stone-500">
-                                {project.cloneBasePath || '未设置目录'}
-                              </span>
+                        <button
+                          key={project.id}
+                          onClick={() => handleSwitchProject(project)}
+                          className={`flex w-full items-center gap-2 rounded-xl px-3 py-2 text-left text-xs transition-colors cursor-default ${
+                            isActive
+                              ? 'bg-stone-100 text-stone-800 dark:bg-stone-800 dark:text-stone-100'
+                              : 'text-stone-600 hover:bg-stone-50 dark:text-stone-300 dark:hover:bg-stone-800/70'
+                          }`}
+                        >
+                          <span className="min-w-0 flex-1">
+                            <span className="block truncate font-semibold">{project.name}</span>
+                            <span className="block truncate text-[10px] text-stone-400 dark:text-stone-500">
+                              {project.cloneBasePath || '未设置目录'}
                             </span>
-                            {isActive && <Check className="h-3.5 w-3.5 flex-shrink-0 text-emerald-500" />}
-                          </button>
-                          <button
-                            onClick={() => handleOpenDeleteProject(project)}
-                            disabled={switchingProject || deletingProject}
-                            className="flex flex-shrink-0 items-center gap-1 rounded-xl px-2.5 py-2 text-[11px] font-semibold text-stone-400 transition-colors hover:bg-red-50 hover:text-red-600 disabled:opacity-50 dark:hover:bg-red-500/10 dark:hover:text-red-300"
-                            title={`删除项目 ${project.name}`}
-                          >
-                            <Trash2 className="h-3.5 w-3.5" />
-                            删除
-                          </button>
-                        </div>
+                          </span>
+                          {isActive && <Check className="h-3.5 w-3.5 flex-shrink-0 text-emerald-500" />}
+                        </button>
                       );
                     })
                   )}
@@ -732,25 +525,6 @@ export default function Layout() {
           </div>
         </div>
       </aside>
-
-      <div
-        role="separator"
-        aria-orientation="vertical"
-        aria-label="调整侧边栏宽度"
-        onPointerDown={handleSidebarResizeStart}
-        onDoubleClick={handleSidebarResizeReset}
-        className="group relative flex w-3 flex-shrink-0 cursor-col-resize touch-none items-stretch bg-stone-50/90 dark:bg-[#161615]"
-        title="拖动调整侧边栏宽度，双击恢复默认"
-      >
-        <div className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-black/[.06] dark:bg-white/[.08]" />
-        <div
-          className={`absolute inset-y-6 left-1/2 w-1.5 -translate-x-1/2 rounded-full transition-all ${
-            sidebarDragging
-              ? 'bg-slate-500/80 shadow-[0_0_0_4px_rgba(100,116,139,0.12)] dark:bg-slate-300/80'
-              : 'bg-stone-300/90 opacity-0 group-hover:opacity-100 dark:bg-stone-600/90'
-          }`}
-        />
-      </div>
 
       <main className="flex-1 min-w-0 overflow-hidden flex flex-col bg-stone-50 dark:bg-[#161615]">
         <div className="flex-1 overflow-auto">
@@ -917,18 +691,16 @@ export default function Layout() {
                 <div className="space-y-5">
                   <div>
                     <span className="mb-1 block text-sm font-medium text-stone-700 dark:text-stone-300">
-                      任务类型约束
+                      任务类型与配额
                     </span>
                     <p className="mb-3 text-xs text-stone-400 dark:text-stone-500">
-                      任务总量：整个项目该类型可创建的任务上限。单题上限：同一个 GitLab 项目在该类型下最多领取的次数。留空均为不限。
+                      可以手动新增任务类型。每次领题或手动建题卡时，会按分配到的类型扣减对应数量。
                     </p>
                     <TaskTypeQuotaEditor
                       taskTypes={taskTypes}
                       quotas={quotas}
-                      totals={totals}
                       onTaskTypesChange={setTaskTypes}
                       onQuotasChange={setQuotas}
-                      onTotalsChange={setTotals}
                     />
                   </div>
 
@@ -951,6 +723,23 @@ export default function Layout() {
                     </select>
                     <p className="mt-1.5 text-xs text-stone-400 dark:text-stone-500">
                       这里指定哪个模型副本作为源码来源。实际目录会自动使用 `label-xxxxx-任务类型 / 项目ID-任务类型` 规则。
+                    </p>
+                  </label>
+
+                  <label className="block">
+                    <span className="mb-2 block text-sm font-medium text-stone-700 dark:text-stone-300">
+                      源码仓库
+                    </span>
+                    <input
+                      value={projectForm.defaultSubmitRepo}
+                      onChange={(event) =>
+                        setProjectForm((prev) => ({ ...prev, defaultSubmitRepo: event.target.value }))
+                      }
+                      placeholder="例如：prompt2repo/label-01849"
+                      className={inputCls}
+                    />
+                    <p className="mt-1.5 text-xs text-stone-400 dark:text-stone-500">
+                      可选。留空时会按当前 GitHub 账号和任务信息自动生成仓库名。
                     </p>
                   </label>
 
@@ -999,86 +788,6 @@ export default function Layout() {
           </div>
         </div>
       )}
-
-      {projectPendingDelete && (
-        <DeleteProjectDialog
-          project={projectPendingDelete}
-          deleting={deletingProject}
-          error={deleteProjectError}
-          onCancel={handleCloseDeleteProject}
-          onConfirm={handleConfirmDeleteProject}
-        />
-      )}
-    </div>
-  );
-}
-
-function DeleteProjectDialog({
-  project,
-  deleting,
-  error,
-  onCancel,
-  onConfirm,
-}: {
-  project: ProjectConfig;
-  deleting: boolean;
-  error: string;
-  onCancel: () => void;
-  onConfirm: () => void;
-}) {
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 md:p-6">
-      <div
-        className="absolute inset-0 bg-black/20 backdrop-blur-sm dark:bg-black/45"
-        onClick={() => {
-          if (deleting) return;
-          onCancel();
-        }}
-      />
-      <div className="relative w-full max-w-md rounded-3xl border border-stone-200 bg-white p-6 shadow-2xl dark:border-stone-800 dark:bg-stone-900">
-        <div className="flex items-start justify-between gap-4">
-          <div>
-            <h2 className="text-lg font-bold text-stone-900 dark:text-stone-50">确认删除项目</h2>
-            <p className="mt-2 text-sm text-stone-500 dark:text-stone-400">
-              将从 PINRU 中删除项目「{project.name}」的配置。
-            </p>
-            <p className="mt-2 text-sm text-stone-500 dark:text-stone-400">
-              不会删除项目文件夹，也不会自动清理本地已经存在的源码或模型副本目录。
-            </p>
-          </div>
-          <button
-            onClick={() => {
-              if (deleting) return;
-              onCancel();
-            }}
-            className="rounded-xl p-2 text-stone-400 transition-colors hover:bg-stone-100 dark:hover:bg-stone-800"
-          >
-            <X className="h-4 w-4" />
-          </button>
-        </div>
-
-        {error && <p className="mt-4 text-sm text-red-500">{error}</p>}
-
-        <div className="mt-6 flex justify-end gap-3">
-          <button
-            onClick={() => {
-              if (deleting) return;
-              onCancel();
-            }}
-            className="rounded-2xl bg-stone-100 px-4 py-2.5 text-sm font-semibold text-stone-700 dark:bg-stone-800 dark:text-stone-300"
-          >
-            取消
-          </button>
-          <button
-            onClick={onConfirm}
-            disabled={deleting}
-            className="inline-flex items-center gap-2 rounded-2xl bg-red-600 px-4 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-red-700 disabled:opacity-50"
-          >
-            {deleting && <Loader2 className="h-4 w-4 animate-spin" />}
-            {deleting ? '删除中...' : '确认删除'}
-          </button>
-        </div>
-      </div>
     </div>
   );
 }

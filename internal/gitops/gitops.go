@@ -2,9 +2,7 @@ package gitops
 
 import (
 	"bufio"
-	"context"
 	"encoding/base64"
-	"errors"
 	"fmt"
 	"io/fs"
 	"net/url"
@@ -41,10 +39,7 @@ func CheckPathsExist(paths []string) []string {
 	return existing
 }
 
-func CloneWithProgress(ctx context.Context, cloneURL, path, username, token string, onProgress func(string)) error {
-	if ctx == nil {
-		ctx = context.Background()
-	}
+func CloneWithProgress(cloneURL, path, username, token string, onProgress func(string)) error {
 	expanded := util.ExpandTilde(path)
 	if _, err := os.Stat(expanded); err == nil {
 		return fmt.Errorf("目标目录「%s」已存在", filepath.Base(expanded))
@@ -55,7 +50,7 @@ func CloneWithProgress(ctx context.Context, cloneURL, path, username, token stri
 
 	onProgress("正在启动 git clone …")
 
-	cmd := exec.CommandContext(ctx, "git", "clone", "--depth", "1", "--progress", cloneURL, expanded)
+	cmd := exec.Command("git", "clone", "--depth", "1", "--progress", cloneURL, expanded)
 	cmd.Env = append(os.Environ(), buildGitAuthEnv(cloneURL, username, token)...)
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
@@ -69,14 +64,8 @@ func CloneWithProgress(ctx context.Context, cloneURL, path, username, token stri
 	for scanner.Scan() {
 		onProgress(scanner.Text())
 	}
-	if err := scanner.Err(); err != nil && contextErr(ctx) == nil {
-		return fmt.Errorf("读取 git 输出失败: %w", err)
-	}
 
 	if err := cmd.Wait(); err != nil {
-		if ctxErr := contextErr(ctx); ctxErr != nil {
-			return ctxErr
-		}
 		return fmt.Errorf("git clone 失败: %w", err)
 	}
 	onProgress("克隆完成")
@@ -233,7 +222,7 @@ func buildGitAuthEnv(rawURL, username, token string) []string {
 	trimmedUsername := strings.TrimSpace(username)
 	trimmedToken := strings.TrimSpace(token)
 	if trimmedUsername == "" || trimmedToken == "" {
-		return []string{"GIT_TERMINAL_PROMPT=0"}
+		return nil
 	}
 
 	parsedURL, err := url.Parse(strings.TrimSpace(rawURL))
@@ -250,17 +239,6 @@ func buildGitAuthEnv(rawURL, username, token string) []string {
 		"GIT_CONFIG_KEY_0=http." + baseURL + ".extraHeader",
 		"GIT_CONFIG_VALUE_0=" + authHeader,
 	}
-}
-
-func contextErr(ctx context.Context) error {
-	if ctx == nil || ctx.Err() == nil {
-		return nil
-	}
-	cause := context.Cause(ctx)
-	if cause != nil && !errors.Is(cause, context.Canceled) {
-		return cause
-	}
-	return ctx.Err()
 }
 
 func runGit(dir string, args ...string) error {

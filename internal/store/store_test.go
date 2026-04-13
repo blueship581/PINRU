@@ -854,7 +854,7 @@ func TestUpdateTaskSessionListAllowsQuotaOverdraft(t *testing.T) {
 	}
 }
 
-func TestUpdateProjectPersistsManualTaskTypeQuotaEdits(t *testing.T) {
+func TestUpdateProjectRecomputesRemainingQuotaFromFixedTotals(t *testing.T) {
 	store := openTestStore(t)
 	defer store.Close()
 
@@ -923,11 +923,11 @@ func TestUpdateProjectPersistsManualTaskTypeQuotaEdits(t *testing.T) {
 	if err := json.Unmarshal([]byte(updatedProject.TaskTypeQuotas), &gotQuotas); err != nil {
 		t.Fatalf("json.Unmarshal(TaskTypeQuotas) error = %v", err)
 	}
-	if gotQuotas["Feature迭代"] != 999 {
-		t.Fatalf("TaskTypeQuotas[Feature迭代] = %d, want 999", gotQuotas["Feature迭代"])
+	if gotQuotas["Feature迭代"] != 4 {
+		t.Fatalf("TaskTypeQuotas[Feature迭代] = %d, want 4", gotQuotas["Feature迭代"])
 	}
-	if gotQuotas["Bug修复"] != 999 {
-		t.Fatalf("TaskTypeQuotas[Bug修复] = %d, want 999", gotQuotas["Bug修复"])
+	if gotQuotas["Bug修复"] != 3 {
+		t.Fatalf("TaskTypeQuotas[Bug修复] = %d, want 3", gotQuotas["Bug修复"])
 	}
 }
 

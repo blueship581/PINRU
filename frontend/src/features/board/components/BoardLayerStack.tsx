@@ -2,7 +2,7 @@ import type { MouseEvent, RefObject } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
 import TaskDetailDrawer from '../../../shared/components/TaskDetailDrawer';
 import type { Task, TaskStatus } from '../../../store';
-import type { ProjectConfig } from '../../../api/config';
+import type { ProjectConfig, TaskTypeQuotas } from '../../../api/config';
 import type { TaskTypeOverviewSummary } from '../../../shared/lib/taskTypeOverview';
 import {
   SessionExtractCandidateModal,
@@ -31,15 +31,11 @@ export function BoardLayerStack({
   availableTaskTypes,
   statusOptions,
   localFolderOpening,
-  contextMenuChildDirectories,
-  contextMenuChildDirectoriesLoading,
-  quickActionLoadingPath,
   actionError,
   onOpenLocalFolder,
   onTaskCardStatusChange,
   onTaskCardTaskTypeChange,
   onTaskCardGeneratePrompt,
-  onTaskCardQuickAiReview,
   showProjectOverview,
   activeProject,
   visibleProjectTaskSummaries,
@@ -56,28 +52,23 @@ export function BoardLayerStack({
   detail,
   detailEscCloseHintVisible,
   onCloseDetailDrawer,
-  taskTypeRemainingToCompleteByType,
+  projectQuotas,
   sourceModelName,
   onOpenSubmit,
   showProjectPanel,
   onCloseProjectPanel,
   onProjectSaved,
-  onAiReview,
 }: {
   taskCardContextMenu: TaskCardContextMenuState | null;
   taskCardContextMenuRef: RefObject<HTMLDivElement | null>;
   availableTaskTypes: string[];
   statusOptions: TaskStatus[];
   localFolderOpening: boolean;
-  contextMenuChildDirectories: import('../../../api/task').TaskChildDirectory[];
-  contextMenuChildDirectoriesLoading: boolean;
-  quickActionLoadingPath: string | null;
   actionError: string;
   onOpenLocalFolder: () => void;
   onTaskCardStatusChange: (status: TaskStatus) => void;
   onTaskCardTaskTypeChange: (taskType: string) => void;
   onTaskCardGeneratePrompt: (constraints: string[], scope: string) => void;
-  onTaskCardQuickAiReview?: (directory: import('../../../api/task').TaskChildDirectory) => void;
   showProjectOverview: boolean;
   activeProject: ProjectConfig | null;
   visibleProjectTaskSummaries: TaskTypeOverviewSummary[];
@@ -94,13 +85,12 @@ export function BoardLayerStack({
   detail: BoardTaskDetailController;
   detailEscCloseHintVisible: boolean;
   onCloseDetailDrawer: () => void;
-  taskTypeRemainingToCompleteByType: Record<string, number | null>;
+  projectQuotas: TaskTypeQuotas;
   sourceModelName: string;
   onOpenSubmit: () => void;
   showProjectPanel: boolean;
   onCloseProjectPanel: () => void;
   onProjectSaved: (updated: ProjectConfig) => void;
-  onAiReview?: (run: import('../../../api/task').ModelRunFromDB) => void;
 }) {
   return (
     <AnimatePresence>
@@ -114,15 +104,11 @@ export function BoardLayerStack({
           statusChanging={detail.statusChanging}
           taskTypeChanging={detail.taskTypeChanging}
           localFolderOpening={localFolderOpening}
-          childDirectories={contextMenuChildDirectories}
-          childDirectoriesLoading={contextMenuChildDirectoriesLoading}
-          quickActionLoadingPath={quickActionLoadingPath}
           actionError={actionError}
           onOpenLocalFolder={onOpenLocalFolder}
           onStatusChange={onTaskCardStatusChange}
           onTaskTypeChange={onTaskCardTaskTypeChange}
           onGeneratePrompt={onTaskCardGeneratePrompt}
-          onQuickAiReview={onTaskCardQuickAiReview}
         />
       )}
 
@@ -198,7 +184,7 @@ export function BoardLayerStack({
           sessionModelOptions={detail.sessionModelOptions}
           selectedSessionModelName={detail.selectedSessionModelName}
           sessionTaskTypeOptions={detail.sessionTaskTypeOptions}
-          taskTypeRemainingToCompleteByType={taskTypeRemainingToCompleteByType}
+          projectQuotas={projectQuotas}
           sourceModelName={sourceModelName}
           selectedPromptGenerationStatus={detail.selectedPromptGenerationStatus}
           selectedPromptGenerationMeta={detail.selectedPromptGenerationMeta}
@@ -229,7 +215,6 @@ export function BoardLayerStack({
           llmProviders={detail.llmProviders}
           promptGenerating={detail.promptGenerating}
           onGeneratePrompt={(config) => void detail.handleGeneratePrompt(config)}
-          onAiReview={onAiReview}
         />
       )}
 

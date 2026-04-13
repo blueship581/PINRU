@@ -300,49 +300,6 @@ func TestPlanManagedClaimPathsContinuesFromExistingFoldersAndTasks(t *testing.T)
 	}
 }
 
-func TestPlanManagedClaimPathsReusesDeletedTaskSlot(t *testing.T) {
-	testStore := testutil.OpenTestStore(t)
-	defer testStore.Close()
-
-	basePath := t.TempDir()
-	projectConfigID := "project-2"
-
-	// 磁盘上只剩 -1 和 -3 的目录（-2 已被删除）
-	if err := os.MkdirAll(filepath.Join(basePath, "label-01849-bug修复"), 0o755); err != nil {
-		t.Fatalf("MkdirAll(seq-1 dir) error = %v", err)
-	}
-	if err := os.MkdirAll(filepath.Join(basePath, "label-01849-bug修复-3"), 0o755); err != nil {
-		t.Fatalf("MkdirAll(seq-3 dir) error = %v", err)
-	}
-
-	// 数据库中同样只有序号 1 和 3 的 task（2 已删除）
-	for _, seq := range []int{1, 3} {
-		taskID := fmt.Sprintf("pproject-2__label-01849-%d", seq)
-		if err := testStore.CreateTask(store.Task{
-			ID:              taskID,
-			GitLabProjectID: 1849,
-			ProjectName:     "label-01849",
-			TaskType:        "Bug修复",
-			ProjectConfigID: &projectConfigID,
-		}); err != nil {
-			t.Fatalf("CreateTask(seq=%d) error = %v", seq, err)
-		}
-	}
-
-	s := &GitService{store: testStore}
-	plans, err := s.PlanManagedClaimPaths(basePath, "label-01849", 1849, "Bug修复", 2, projectConfigID)
-	if err != nil {
-		t.Fatalf("PlanManagedClaimPaths() error = %v", err)
-	}
-	if len(plans) != 2 {
-		t.Fatalf("plans len = %d, want 2", len(plans))
-	}
-	// 应复用空位 2，再分配 4
-	if plans[0].Sequence != 2 || plans[1].Sequence != 4 {
-		t.Fatalf("plan sequences = [%d %d], want [2 4]", plans[0].Sequence, plans[1].Sequence)
-	}
-}
-
 func initGitRepoInDir(t *testing.T, dir, branch string) {
 	t.Helper()
 	if err := runGitCommand(dir, "init", "-b", branch); err != nil {

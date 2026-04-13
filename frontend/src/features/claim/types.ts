@@ -20,7 +20,7 @@ export type ClaimResult = {
   projectName: string;
   claimSequence: number;
   localPath: string;
-  status: 'pending' | 'running' | 'done' | 'partial' | 'error' | 'quota_exceeded';
+  status: 'pending' | 'running' | 'done' | 'partial' | 'error';
   message: string;
   modelStatuses: Map<string, ModelEntry['status']>;
 };

@@ -46,9 +46,6 @@ function buildRun(overrides: Partial<ModelRunFromDB>): ModelRunFromDB {
     conversationDate: overrides.conversationDate ?? null,
     submitError: overrides.submitError ?? null,
     sessionList: overrides.sessionList ?? [],
-    reviewStatus: overrides.reviewStatus ?? 'none',
-    reviewRound: overrides.reviewRound ?? 0,
-    reviewNotes: overrides.reviewNotes ?? null,
   };
 }
 
