@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -150,46 +149,14 @@ func createMockCodexExecutable(t *testing.T, mode string, extraEnv map[string]st
 	return path
 }
 
-func copyTestExecutable(t *testing.T, dir, name string) string {
-	t.Helper()
-	src, err := os.Executable()
-	if err != nil {
-		t.Fatalf("os.Executable() error = %v", err)
-	}
-
-	dst := filepath.Join(dir, name)
-	in, err := os.Open(src)
-	if err != nil {
-		t.Fatalf("os.Open(%s) error = %v", src, err)
-	}
-	defer in.Close()
-
-	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
-	if err != nil {
-		t.Fatalf("os.OpenFile(%s) error = %v", dst, err)
-	}
-	defer out.Close()
-
-	if _, err := io.Copy(out, in); err != nil {
-		t.Fatalf("io.Copy(%s) error = %v", dst, err)
-	}
-	if err := out.Close(); err != nil {
-		t.Fatalf("out.Close(%s) error = %v", dst, err)
-	}
-	return dst
-}
-
 func createMockGitCloneFailureExecutable(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	if runtime.GOOS == "windows" {
-		helperExe := copyTestExecutable(t, dir, "git-helper.exe")
 		path := filepath.Join(dir, "git.bat")
 		var sb strings.Builder
 		sb.WriteString("@echo off\r\n")
-		sb.WriteString("setlocal enabledelayedexpansion\r\n")
-		sb.WriteString("set GO_TEST_SUBPROCESS=1\r\n")
-		sb.WriteString("set GO_TEST_SUBPROCESS_MODE=git_clone_fail_after_mkdir\r\n")
+		sb.WriteString("setlocal\r\n")
 		sb.WriteString("set GO_TEST_CLONE_DEST=\r\n")
 		sb.WriteString(":capture_last\r\n")
 		sb.WriteString("if \"%~1\"==\"\" goto run\r\n")
@@ -197,8 +164,9 @@ func createMockGitCloneFailureExecutable(t *testing.T) string {
 		sb.WriteString("shift /1\r\n")
 		sb.WriteString("goto capture_last\r\n")
 		sb.WriteString(":run\r\n")
-		fmt.Fprintf(&sb, "\"%s\" -test.run=TestHelperProcess\r\n", helperExe)
-		sb.WriteString("exit /b %errorlevel%\r\n")
+		sb.WriteString("if not \"%GO_TEST_CLONE_DEST%\"==\"\" mkdir \"%GO_TEST_CLONE_DEST%\" >nul 2>nul\r\n")
+		sb.WriteString("echo fake clone failed after mkdir 1>&2\r\n")
+		sb.WriteString("exit /b 1\r\n")
 		if err := os.WriteFile(path, []byte(sb.String()), 0o755); err != nil {
 			t.Fatalf("os.WriteFile(%s) error = %v", path, err)
 		}
@@ -228,13 +196,10 @@ func createMockGitCloneHangingExecutable(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	if runtime.GOOS == "windows" {
-		helperExe := copyTestExecutable(t, dir, "git-helper.exe")
 		path := filepath.Join(dir, "git.bat")
 		var sb strings.Builder
 		sb.WriteString("@echo off\r\n")
-		sb.WriteString("setlocal enabledelayedexpansion\r\n")
-		sb.WriteString("set GO_TEST_SUBPROCESS=1\r\n")
-		sb.WriteString("set GO_TEST_SUBPROCESS_MODE=git_clone_create_dir_then_sleep\r\n")
+		sb.WriteString("setlocal\r\n")
 		sb.WriteString("set GO_TEST_CLONE_DEST=\r\n")
 		sb.WriteString(":capture_last\r\n")
 		sb.WriteString("if \"%~1\"==\"\" goto run\r\n")
@@ -242,8 +207,10 @@ func createMockGitCloneHangingExecutable(t *testing.T) string {
 		sb.WriteString("shift /1\r\n")
 		sb.WriteString("goto capture_last\r\n")
 		sb.WriteString(":run\r\n")
-		fmt.Fprintf(&sb, "\"%s\" -test.run=TestHelperProcess\r\n", helperExe)
-		sb.WriteString("exit /b %errorlevel%\r\n")
+		sb.WriteString("if not \"%GO_TEST_CLONE_DEST%\"==\"\" mkdir \"%GO_TEST_CLONE_DEST%\" >nul 2>nul\r\n")
+		sb.WriteString("echo fake clone created directory and is waiting 1>&2\r\n")
+		sb.WriteString(":wait\r\n")
+		sb.WriteString("goto wait\r\n")
 		if err := os.WriteFile(path, []byte(sb.String()), 0o755); err != nil {
 			t.Fatalf("os.WriteFile(%s) error = %v", path, err)
 		}
