@@ -178,5 +178,6 @@ export type WailsServiceContract = {
     AddModelRun: ServiceMethod<[request: AddModelRunRequest], void>;
     DeleteModelRun: ServiceMethod<[taskId: string, modelName: string], void>;
     BatchUpdateTasks: ServiceMethod<[request: BatchUpdateTasksRequest], BatchUpdateResult>;
+    BatchDeleteTasks: ServiceMethod<[taskIds: string[]], BatchUpdateResult>;
   };
 };
