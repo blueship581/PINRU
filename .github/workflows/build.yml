@@ -42,29 +42,8 @@ jobs:
         working-directory: frontend
         run: npm ci
 
-      - name: Build frontend
-        working-directory: frontend
-        run: npm run build
-
-      - name: Run backend tests
-        run: go test ./...
-
-      - name: Run frontend typecheck
-        working-directory: frontend
-        run: npm run typecheck
-
-      - name: Run frontend tests
-        working-directory: frontend
-        run: npm test
-
-      - name: Build binary (macOS)
-        if: runner.os == 'macOS'
-        run: go build -o build/bin/pinru .
-
-
-      - name: Build binary (Windows)
-        if: runner.os == 'Windows'
-        run: go build -o build/bin/pinru.exe .
+      - name: Run CI build script
+        run: node scripts/ci-build.mjs ci
 
       - name: Package (macOS)
         if: runner.os == 'macOS'
