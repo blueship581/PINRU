@@ -20,7 +20,7 @@ import {
   deleteAiReviewJob,
   type JobProgressEvent,
 } from '../../api/job';
-import type { ModelRunFromDB, TaskChildDirectory } from '../../api/task';
+import type { AiReviewNodeFromDB, ModelRunFromDB, TaskChildDirectory } from '../../api/task';
 import {
   BatchActionBar,
 } from './components/BatchActionBar';
@@ -512,6 +512,33 @@ export default function Board() {
     }, 600);
   };
 
+  const handleAiReviewNode = (node: AiReviewNodeFromDB) => {
+    const taskId = detail.selected?.id?.trim();
+    const localPath = node.localPath?.trim();
+    if (!taskId || !localPath) return;
+
+    void (async () => {
+      try {
+        await submitAiReviewJob(taskId, {
+          reviewNodeId: node.id,
+          modelRunId: node.modelRunId ?? null,
+          modelName: node.modelName,
+          localPath,
+        });
+        useAppStore.getState().loadBackgroundJobs();
+        detail.setActiveDrawerTab('ai-review');
+        void detail.refreshModelRuns();
+      } catch (error) {
+        console.error('提交节点 AI 复核失败', error);
+      }
+    })();
+
+    window.setTimeout(() => {
+      void loadTasks();
+      void detail.refreshModelRuns();
+    }, 600);
+  };
+
   const handleTaskCardAiReview = (directory: TaskChildDirectory) => {
     const taskId = taskCardContextMenu?.task.id?.trim();
     const localPath = directory.path?.trim();
@@ -561,6 +588,16 @@ export default function Board() {
       detail.refreshModelRuns(),
       useAppStore.getState().loadBackgroundJobs(),
     ]);
+  };
+
+  const handleSaveAiReviewNode = async (request: {
+    id: string;
+    title: string;
+    issueType: string;
+    promptText: string;
+    reviewNotes: string;
+  }) => {
+    await detail.saveAiReviewNode(request);
   };
 
   const handleAfterBatchApply = async (
@@ -801,6 +838,8 @@ export default function Board() {
           setShowProjectPanel(false);
         }}
         onAiReview={aiReviewVisible ? handleAiReview : undefined}
+        onAiReviewNode={aiReviewVisible ? handleAiReviewNode : undefined}
+        onSaveAiReviewNode={aiReviewVisible ? handleSaveAiReviewNode : undefined}
         onDeleteAiReviewRecord={aiReviewVisible ? handleDeleteAiReviewRecord : undefined}
       />
 
@@ -810,6 +849,13 @@ export default function Board() {
           selectedTaskIds={selectedTaskIds}
           availableTaskTypes={availableTaskTypes}
           onAfterApply={handleAfterBatchApply}
+          onAfterDelete={async (taskIds) => {
+            taskIds.forEach((id) => removeTaskFromStore(id));
+            if (detail.selected && taskIds.includes(detail.selected.id)) {
+              detail.setSelected(null);
+            }
+            await loadTasks();
+          }}
           onDone={() => {
             void loadTasks();
             exitSelectionMode();

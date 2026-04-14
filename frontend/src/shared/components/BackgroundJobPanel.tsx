@@ -87,7 +87,20 @@ export default function BackgroundJobPanel() {
   const activeCount = backgroundJobs.filter(
     (j) => j.status === 'running' || j.status === 'pending',
   ).length;
-  const visibleJobs = backgroundJobs.slice(0, 7);
+
+  // 按状态优先级排序：未完成的在前，已完成的在后
+  const sortedJobs = [...backgroundJobs].sort((a, b) => {
+    const aIncomplete = a.status === 'running' || a.status === 'pending';
+    const bIncomplete = b.status === 'running' || b.status === 'pending';
+
+    if (aIncomplete && !bIncomplete) return -1;
+    if (!aIncomplete && bIncomplete) return 1;
+
+    // 同组内按创建时间倒序
+    return (b.createdAt ?? 0) - (a.createdAt ?? 0);
+  });
+
+  const visibleJobs = sortedJobs.slice(0, 7);
 
   const handleRetry = async (id: string) => {
     try {

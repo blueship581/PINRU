@@ -108,13 +108,6 @@ type traeCandidateBuild struct {
 	IsCurrent  bool
 }
 
-type traeTraceLookupScanResult struct {
-	Index           int
-	TraceToRaw      map[string]string
-	RelevantTraceID map[string]struct{}
-	Err             error
-}
-
 type traeTraceRecordPartial struct {
 	HasChatStart       bool
 	Timestamp          time.Time
@@ -122,10 +115,10 @@ type traeTraceRecordPartial struct {
 	UserMessageID      string
 }
 
-type traeTraceRecordScanResult struct {
-	Index   int
-	Records map[string]traeTraceRecordPartial
-	Err     error
+type traeTraceScanResult struct {
+	TraceToRaw map[string]string
+	Records    map[string]traeTraceRecordPartial
+	Err        error
 }
 
 type traeWorkspaceJSON struct {
@@ -260,44 +253,69 @@ func discoverMatchedTraeWorkspaces(targetPaths []string, wsPathOverride string) 
 		return nil, err
 	}
 
+	results := make([]*traeMatchedWorkspace, len(entries))
+	workerCount := parallelTraeWorkspaceWorkerCount(len(entries))
+	jobs := make(chan int)
+	var wg sync.WaitGroup
+
+	for worker := 0; worker < workerCount; worker += 1 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for index := range jobs {
+				entry := entries[index]
+				if !entry.IsDir() {
+					continue
+				}
+
+				workspaceDir := filepath.Join(workspaceBase, entry.Name())
+				workspaceJSONPath := filepath.Join(workspaceDir, "workspace.json")
+				stateDBPath := filepath.Join(workspaceDir, "state.vscdb")
+
+				if !fileExists(workspaceJSONPath) || !fileExists(stateDBPath) {
+					continue
+				}
+
+				workspacePath, readErr := readTraeWorkspaceFolder(workspaceJSONPath)
+				if readErr != nil || workspacePath == "" {
+					continue
+				}
+
+				matchedPath, matchKind, matchScore, ok := bestTraeWorkspacePathMatch(workspacePath, targetPaths)
+				if !ok {
+					continue
+				}
+
+				state, stateErr := loadTraeWorkspaceState(stateDBPath)
+				if stateErr != nil || len(state.RawSessions) == 0 {
+					continue
+				}
+
+				results[index] = &traeMatchedWorkspace{
+					WorkspaceHash: entry.Name(),
+					WorkspacePath: workspacePath,
+					MatchedPath:   matchedPath,
+					MatchKind:     matchKind,
+					MatchScore:    matchScore,
+					StateDBPath:   stateDBPath,
+					State:         state,
+				}
+			}
+		}()
+	}
+
+	for index := range entries {
+		jobs <- index
+	}
+	close(jobs)
+	wg.Wait()
+
 	matches := make([]traeMatchedWorkspace, 0)
-	for _, entry := range entries {
-		if !entry.IsDir() {
+	for _, result := range results {
+		if result == nil {
 			continue
 		}
-
-		workspaceDir := filepath.Join(workspaceBase, entry.Name())
-		workspaceJSONPath := filepath.Join(workspaceDir, "workspace.json")
-		stateDBPath := filepath.Join(workspaceDir, "state.vscdb")
-
-		if !fileExists(workspaceJSONPath) || !fileExists(stateDBPath) {
-			continue
-		}
-
-		workspacePath, err := readTraeWorkspaceFolder(workspaceJSONPath)
-		if err != nil || workspacePath == "" {
-			continue
-		}
-
-		matchedPath, matchKind, matchScore, ok := bestTraeWorkspacePathMatch(workspacePath, targetPaths)
-		if !ok {
-			continue
-		}
-
-		state, err := loadTraeWorkspaceState(stateDBPath)
-		if err != nil || len(state.RawSessions) == 0 {
-			continue
-		}
-
-		matches = append(matches, traeMatchedWorkspace{
-			WorkspaceHash: entry.Name(),
-			WorkspacePath: workspacePath,
-			MatchedPath:   matchedPath,
-			MatchKind:     matchKind,
-			MatchScore:    matchScore,
-			StateDBPath:   stateDBPath,
-			State:         state,
-		})
+		matches = append(matches, *result)
 	}
 
 	sort.SliceStable(matches, func(i, j int) bool {
@@ -875,7 +893,22 @@ func collectTraeTraceRecordsFromSystem(rawSessionIDs map[string]struct{}, logsPa
 	if len(logFiles) == 0 {
 		return map[string][]traeTraceRecord{}, nil
 	}
-	return collectTraeTraceRecords(logFiles, rawSessionIDs)
+
+	todayLogFiles, historyLogFiles := partitionTraeLogFilesByDay(logFiles, time.Now())
+	if len(todayLogFiles) > 0 {
+		recordsByRaw, collectErr := collectTraeTraceRecords(todayLogFiles, rawSessionIDs)
+		if collectErr != nil {
+			return nil, collectErr
+		}
+		if len(recordsByRaw) > 0 || len(historyLogFiles) == 0 {
+			return recordsByRaw, nil
+		}
+	}
+
+	if len(historyLogFiles) == 0 {
+		return map[string][]traeTraceRecord{}, nil
+	}
+	return collectTraeTraceRecords(historyLogFiles, rawSessionIDs)
 }
 
 func traeLogFiles(override string) ([]string, error) {
@@ -892,24 +925,76 @@ func traeLogFiles(override string) ([]string, error) {
 	return files, nil
 }
 
+func partitionTraeLogFilesByDay(logFiles []string, now time.Time) ([]string, []string) {
+	if len(logFiles) == 0 {
+		return nil, nil
+	}
+
+	current := now.In(time.Local)
+	today := make([]string, 0, len(logFiles))
+	history := make([]string, 0, len(logFiles))
+
+	for _, logFile := range logFiles {
+		info, err := os.Stat(logFile)
+		if err != nil {
+			history = append(history, logFile)
+			continue
+		}
+
+		modifiedAt := info.ModTime().In(current.Location())
+		if modifiedAt.Year() == current.Year() &&
+			modifiedAt.Month() == current.Month() &&
+			modifiedAt.Day() == current.Day() {
+			today = append(today, logFile)
+			continue
+		}
+		history = append(history, logFile)
+	}
+
+	return today, history
+}
+
 func collectTraeTraceRecords(logFiles []string, rawSessionIDs map[string]struct{}) (map[string][]traeTraceRecord, error) {
 	if len(rawSessionIDs) == 0 {
 		return map[string][]traeTraceRecord{}, nil
 	}
 
-	traceToRawSession, relevantTraceIDs, err := collectTraeTraceLookup(logFiles, rawSessionIDs)
+	results, err := runTraeLogWorkers(logFiles, func(index int, logFile string) traeTraceScanResult {
+		return scanTraeLogFileForRecords(index, logFile, rawSessionIDs)
+	})
 	if err != nil {
 		return nil, err
 	}
 
-	recordsByTrace, err := collectTraeTracePartials(logFiles, traceToRawSession, relevantTraceIDs)
-	if err != nil {
-		return nil, err
+	traceToRawSession := make(map[string]string)
+	recordsByTrace := make(map[string]*traeTraceRecord)
+	for _, result := range results {
+		if result.Err != nil {
+			return nil, result.Err
+		}
+		for traceID, rawSessionID := range result.TraceToRaw {
+			if _, exists := traceToRawSession[traceID]; !exists {
+				traceToRawSession[traceID] = rawSessionID
+			}
+		}
+		for traceID, partial := range result.Records {
+			record, exists := recordsByTrace[traceID]
+			if !exists {
+				record = &traeTraceRecord{TraceID: traceID}
+				recordsByTrace[traceID] = record
+			}
+			mergeTraeTraceRecordPartial(record, partial)
+		}
 	}
 
 	recordsByRaw := make(map[string][]traeTraceRecord)
-	for _, record := range recordsByTrace {
-		if record.RawSessionID == "" || !record.HasChatStart {
+	for traceID, record := range recordsByTrace {
+		rawSessionID, exists := traceToRawSession[traceID]
+		if !exists {
+			continue
+		}
+		record.RawSessionID = rawSessionID
+		if !record.HasChatStart {
 			continue
 		}
 		if record.AssistantMessageID == "" || record.UserMessageID == "" || record.Timestamp.IsZero() {
@@ -932,154 +1017,43 @@ func collectTraeTraceRecords(logFiles []string, rawSessionIDs map[string]struct{
 	return recordsByRaw, nil
 }
 
-func collectTraeTraceLookup(logFiles []string, rawSessionIDs map[string]struct{}) (map[string]string, map[string]struct{}, error) {
-	if len(logFiles) == 0 {
-		return map[string]string{}, map[string]struct{}{}, nil
-	}
+func scanTraeLogFileForRecords(index int, logFile string, rawSessionIDs map[string]struct{}) traeTraceScanResult {
+	localTraceToRaw := make(map[string]string)
+	localRecords := make(map[string]traeTraceRecordPartial)
+	scanErr := scanTraeLogFile(logFile, func(line string) {
+		if !strings.Contains(line, "trace_id") {
+			return
+		}
 
-	results, err := runTraeLogWorkers(logFiles, func(index int, logFile string) traeTraceLookupScanResult {
-		localTraceToRaw := make(map[string]string)
-		localRelevantTraceIDs := make(map[string]struct{})
-		scanErr := scanTraeLogFile(logFile, func(line string) {
-			traceID := extractTraeTraceID(line)
-			if traceID == "" {
-				return
-			}
+		traceID := extractTraeTraceID(line)
+		if traceID == "" {
+			return
+		}
+
+		if lineMayContainTraeSessionID(line) {
 			rawSessionID := extractAllowedRawSessionID(line, rawSessionIDs)
-			if rawSessionID == "" {
-				return
+			if rawSessionID != "" {
+				if _, exists := localTraceToRaw[traceID]; !exists {
+					localTraceToRaw[traceID] = rawSessionID
+				}
 			}
-			if _, exists := localTraceToRaw[traceID]; !exists {
-				localTraceToRaw[traceID] = rawSessionID
-			}
-			localRelevantTraceIDs[traceID] = struct{}{}
-		})
-
-		return traeTraceLookupScanResult{
-			Index:           index,
-			TraceToRaw:      localTraceToRaw,
-			RelevantTraceID: localRelevantTraceIDs,
-			Err:             scanErr,
 		}
+
+		partial, ok := parseTraeTraceRecordPartial(line)
+		if !ok {
+			return
+		}
+
+		record := localRecords[traceID]
+		mergeTraeTraceRecordPartialState(&record, partial)
+		localRecords[traceID] = record
 	})
-	if err != nil {
-		return nil, nil, err
+
+	return traeTraceScanResult{
+		TraceToRaw: localTraceToRaw,
+		Records:    localRecords,
+		Err:        scanErr,
 	}
-
-	traceToRawSession := make(map[string]string)
-	relevantTraceIDs := make(map[string]struct{})
-	for _, result := range results {
-		if result.Err != nil {
-			return nil, nil, result.Err
-		}
-		for traceID, rawSessionID := range result.TraceToRaw {
-			if _, exists := traceToRawSession[traceID]; !exists {
-				traceToRawSession[traceID] = rawSessionID
-			}
-		}
-		for traceID := range result.RelevantTraceID {
-			relevantTraceIDs[traceID] = struct{}{}
-		}
-	}
-
-	return traceToRawSession, relevantTraceIDs, nil
-}
-
-func collectTraeTracePartials(
-	logFiles []string,
-	traceToRawSession map[string]string,
-	relevantTraceIDs map[string]struct{},
-) (map[string]*traeTraceRecord, error) {
-	if len(logFiles) == 0 || len(relevantTraceIDs) == 0 {
-		return map[string]*traeTraceRecord{}, nil
-	}
-
-	results, err := runTraeLogWorkers(logFiles, func(index int, logFile string) traeTraceRecordScanResult {
-		localRecords := make(map[string]traeTraceRecordPartial)
-		scanErr := scanTraeLogFile(logFile, func(line string) {
-			traceID := extractTraeTraceID(line)
-			if traceID == "" {
-				return
-			}
-			if _, exists := relevantTraceIDs[traceID]; !exists {
-				return
-			}
-
-			record := localRecords[traceID]
-			if !record.HasChatStart && strings.Contains(line, `service: "chat", method: "chat"`) {
-				record.HasChatStart = true
-				if timestamp, ok := extractTraeTimestamp(line); ok {
-					record.Timestamp = timestamp
-				}
-			}
-
-			if record.UserMessageID == "" && strings.Contains(line, "[ChatService] create message") {
-				if matches := traeCreateMessageIDPattern.FindStringSubmatch(line); len(matches) == 2 {
-					record.UserMessageID = matches[1]
-				}
-			}
-
-			if record.AssistantMessageID == "" && strings.Contains(line, "task_id=") {
-				if matches := traeAssistantTaskMessageIDPattern.FindStringSubmatch(line); len(matches) == 2 {
-					record.AssistantMessageID = matches[1]
-				}
-			}
-
-			if record.UserMessageID == "" {
-				if matches := traeUserMessageIDFallbackPattern.FindStringSubmatch(line); len(matches) == 2 {
-					record.UserMessageID = matches[1]
-				}
-			}
-
-			localRecords[traceID] = record
-		})
-
-		return traeTraceRecordScanResult{
-			Index:   index,
-			Records: localRecords,
-			Err:     scanErr,
-		}
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	recordsByTrace := make(map[string]*traeTraceRecord)
-	for _, result := range results {
-		if result.Err != nil {
-			return nil, result.Err
-		}
-		for traceID, partial := range result.Records {
-			rawSessionID, exists := traceToRawSession[traceID]
-			if !exists {
-				continue
-			}
-
-			record, exists := recordsByTrace[traceID]
-			if !exists {
-				record = &traeTraceRecord{
-					TraceID:      traceID,
-					RawSessionID: rawSessionID,
-				}
-				recordsByTrace[traceID] = record
-			}
-
-			if partial.HasChatStart {
-				record.HasChatStart = true
-				if record.Timestamp.IsZero() || (!partial.Timestamp.IsZero() && partial.Timestamp.Before(record.Timestamp)) {
-					record.Timestamp = partial.Timestamp
-				}
-			}
-			if record.UserMessageID == "" && partial.UserMessageID != "" {
-				record.UserMessageID = partial.UserMessageID
-			}
-			if record.AssistantMessageID == "" && partial.AssistantMessageID != "" {
-				record.AssistantMessageID = partial.AssistantMessageID
-			}
-		}
-	}
-
-	return recordsByTrace, nil
 }
 
 func runTraeLogWorkers[T any](logFiles []string, scan func(index int, logFile string) T) ([]T, error) {
@@ -1128,6 +1102,24 @@ func parallelTraeLogWorkerCount(fileCount int) int {
 	return workerCount
 }
 
+func parallelTraeWorkspaceWorkerCount(entryCount int) int {
+	if entryCount <= 1 {
+		return 1
+	}
+
+	workerCount := runtime.GOMAXPROCS(0)
+	if workerCount < 2 {
+		workerCount = 2
+	}
+	if workerCount > 12 {
+		workerCount = 12
+	}
+	if workerCount > entryCount {
+		return entryCount
+	}
+	return workerCount
+}
+
 func scanTraeLogFile(logFile string, handleLine func(line string)) error {
 	file, err := os.Open(logFile)
 	if err != nil {
@@ -1164,6 +1156,12 @@ func extractAllowedRawSessionID(line string, allowed map[string]struct{}) string
 	return ""
 }
 
+func lineMayContainTraeSessionID(line string) bool {
+	return strings.Contains(line, "chat_session_id: ") ||
+		strings.Contains(line, "session_id=") ||
+		strings.Contains(line, "chain_id=")
+}
+
 func extractTraeTimestamp(line string) (time.Time, bool) {
 	matches := traeTimestampPattern.FindStringSubmatch(line)
 	if len(matches) != 2 {
@@ -1176,6 +1174,72 @@ func extractTraeTimestamp(line string) (time.Time, bool) {
 		return timestamp, true
 	}
 	return time.Time{}, false
+}
+
+func parseTraeTraceRecordPartial(line string) (traeTraceRecordPartial, bool) {
+	record := traeTraceRecordPartial{}
+	updated := false
+
+	if strings.Contains(line, `service: "chat", method: "chat"`) {
+		record.HasChatStart = true
+		updated = true
+		if timestamp, ok := extractTraeTimestamp(line); ok {
+			record.Timestamp = timestamp
+		}
+	}
+
+	if strings.Contains(line, "[ChatService] create message") {
+		if matches := traeCreateMessageIDPattern.FindStringSubmatch(line); len(matches) == 2 {
+			record.UserMessageID = matches[1]
+			updated = true
+		}
+	}
+
+	if strings.Contains(line, "task_id=") {
+		if matches := traeAssistantTaskMessageIDPattern.FindStringSubmatch(line); len(matches) == 2 {
+			record.AssistantMessageID = matches[1]
+			updated = true
+		}
+	}
+
+	if strings.Contains(line, "user_message_id: ") {
+		if matches := traeUserMessageIDFallbackPattern.FindStringSubmatch(line); len(matches) == 2 {
+			record.UserMessageID = matches[1]
+			updated = true
+		}
+	}
+
+	return record, updated
+}
+
+func mergeTraeTraceRecordPartial(record *traeTraceRecord, partial traeTraceRecordPartial) {
+	if partial.HasChatStart {
+		record.HasChatStart = true
+		if record.Timestamp.IsZero() || (!partial.Timestamp.IsZero() && partial.Timestamp.Before(record.Timestamp)) {
+			record.Timestamp = partial.Timestamp
+		}
+	}
+	if record.UserMessageID == "" && partial.UserMessageID != "" {
+		record.UserMessageID = partial.UserMessageID
+	}
+	if record.AssistantMessageID == "" && partial.AssistantMessageID != "" {
+		record.AssistantMessageID = partial.AssistantMessageID
+	}
+}
+
+func mergeTraeTraceRecordPartialState(record *traeTraceRecordPartial, partial traeTraceRecordPartial) {
+	if partial.HasChatStart {
+		record.HasChatStart = true
+		if record.Timestamp.IsZero() || (!partial.Timestamp.IsZero() && partial.Timestamp.Before(record.Timestamp)) {
+			record.Timestamp = partial.Timestamp
+		}
+	}
+	if record.UserMessageID == "" && partial.UserMessageID != "" {
+		record.UserMessageID = partial.UserMessageID
+	}
+	if record.AssistantMessageID == "" && partial.AssistantMessageID != "" {
+		record.AssistantMessageID = partial.AssistantMessageID
+	}
 }
 
 func buildTraeCandidates(workspaces []traeMatchedWorkspace, traceRecordsByRaw map[string][]traeTraceRecord) []ExtractTaskSessionCandidate {

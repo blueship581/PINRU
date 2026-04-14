@@ -39,7 +39,13 @@ type CliService struct {
 	reviewContextPath string
 }
 
-const defaultPgCodeContextScript = "/Users/gaobo/.codex/skills/pg-code/scripts/collect_project_context.py"
+func defaultPgCodeContextScriptPath() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".codex", "skills", "pg-code", "scripts", "collect_project_context.py")
+}
 
 const (
 	maxPgCodePromptCandidates   = 6
@@ -545,15 +551,34 @@ func applyEnvOverrides(base []string, overrides map[string]string) []string {
 
 // ─── Codex Review ────────────────────────────────────────────────────────────
 
-// CodexReviewResult is the structured output from the pg-code review skill.
-type CodexReviewResult struct {
-	IsCompleted  bool   `json:"isCompleted"`
-	IsSatisfied  bool   `json:"isSatisfied"`
-	ProjectType  string `json:"projectType"`
-	ChangeScope  string `json:"changeScope"`
+type CodexReviewIssue struct {
+	Title        string `json:"title"`
+	IssueType    string `json:"issueType"`
 	ReviewNotes  string `json:"reviewNotes"`
 	NextPrompt   string `json:"nextPrompt"`
 	KeyLocations string `json:"keyLocations"`
+}
+
+// CodexReviewResult is the structured output from the pg-code review skill.
+type CodexReviewResult struct {
+	IsCompleted  bool               `json:"isCompleted"`
+	IsSatisfied  bool               `json:"isSatisfied"`
+	ProjectType  string             `json:"projectType"`
+	ChangeScope  string             `json:"changeScope"`
+	ReviewNotes  string             `json:"reviewNotes"`
+	NextPrompt   string             `json:"nextPrompt"`
+	KeyLocations string             `json:"keyLocations"`
+	Issues       []CodexReviewIssue `json:"issues"`
+}
+
+type CodexReviewRequest struct {
+	LocalPath         string `json:"localPath"`
+	OriginalPrompt    string `json:"originalPrompt"`
+	CurrentPrompt     string `json:"currentPrompt"`
+	ParentReviewNotes string `json:"parentReviewNotes"`
+	IssueType         string `json:"issueType"`
+	IssueTitle        string `json:"issueTitle"`
+	ModelName         string `json:"modelName"`
 }
 
 type pgCodeContextEnvelope struct {
@@ -601,10 +626,14 @@ type pgCodeProjectSummary struct {
 // RunCodexReview executes the codex pg-code skill non-interactively on the given
 // localPath, streaming each output line to onLine (may be nil), and returns the
 // structured review result parsed from the --output-schema JSON file.
-func (s *CliService) RunCodexReview(ctx context.Context, localPath string, onLine func(string)) (*CodexReviewResult, error) {
+func (s *CliService) RunCodexReview(ctx context.Context, req CodexReviewRequest, onLine func(string)) (*CodexReviewResult, error) {
 	codexPath, err := s.lookupCLI("codex")
 	if err != nil {
 		return nil, fmt.Errorf("codex CLI 未找到，请先安装: npm install -g @openai/codex")
+	}
+	localPath := strings.TrimSpace(req.LocalPath)
+	if localPath == "" {
+		return nil, fmt.Errorf("localPath 不能为空")
 	}
 
 	reviewContext, ctxErr := s.collectPgCodeReviewContext(ctx, localPath)
@@ -612,7 +641,7 @@ func (s *CliService) RunCodexReview(ctx context.Context, localPath string, onLin
 		slog.Warn("collectPgCodeReviewContext failed", "localPath", localPath, "error", ctxErr)
 	}
 	enrichPgCodeReviewContext(localPath, reviewContext)
-	reviewPrompt := buildCodexReviewPrompt(reviewContext)
+	reviewPrompt := buildCodexReviewPrompt(req, reviewContext)
 	if runtime.GOOS == "windows" {
 		reviewPrompt = compactPromptForWindowsCommandLine(reviewPrompt)
 	}
@@ -741,7 +770,7 @@ func (s *CliService) reviewContextScriptPath() string {
 	if strings.TrimSpace(s.reviewContextPath) != "" {
 		return s.reviewContextPath
 	}
-	return defaultPgCodeContextScript
+	return defaultPgCodeContextScriptPath()
 }
 
 func (s *CliService) collectPgCodeReviewContext(ctx context.Context, localPath string) (*pgCodeProjectContext, error) {
@@ -770,7 +799,7 @@ func (s *CliService) collectPgCodeReviewContext(ctx context.Context, localPath s
 	return &envelope.Projects[0], nil
 }
 
-func buildCodexReviewPrompt(project *pgCodeProjectContext) string {
+func buildCodexReviewPrompt(req CodexReviewRequest, project *pgCodeProjectContext) string {
 	var parts []string
 	parts = append(parts, "/pg-code")
 	parts = append(parts, strings.TrimSpace(`
@@ -782,7 +811,22 @@ func buildCodexReviewPrompt(project *pgCodeProjectContext) string {
 5. 找不到任务提示词或有效改动时，reviewNotes 注明”依据不足”，isCompleted 和 isSatisfied 均填 false。
 6. projectType 和 changeScope 按最符合实际情况的选项填写。
 7. 预采集上下文里的 prompt_sources 已包含候选提示词正文，可能来自项目内、同层目录或上一级目录；若存在多份，请优先依据正文判断原始需求，prompt_candidates 仅作路径参考。
+8. 当本轮发现多个独立问题时，必须通过 issues 数组分别列出；不要把多个问题揉成一条。
+9. issues[*].issueType 默认填“Bug修复”，除非证据明确表明是其他类型。
+10. 若本轮已通过，issues 返回空数组。
 `))
+
+	reviewInput := map[string]string{
+		"issue_title":         strings.TrimSpace(req.IssueTitle),
+		"issue_type":          strings.TrimSpace(req.IssueType),
+		"model_name":          strings.TrimSpace(req.ModelName),
+		"original_prompt":     strings.TrimSpace(req.OriginalPrompt),
+		"current_prompt":      strings.TrimSpace(req.CurrentPrompt),
+		"parent_review_notes": strings.TrimSpace(req.ParentReviewNotes),
+	}
+	if contextJSON, err := json.MarshalIndent(reviewInput, "", "  "); err == nil {
+		parts = append(parts, "当前复核节点上下文如下，请明确区分“原始任务提示词”“当前节点提示词”“父节点不满意结论”：\n"+string(contextJSON))
+	}
 
 	if project != nil {
 		contextJSON, err := json.MarshalIndent(project, "", "  ")

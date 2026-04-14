@@ -170,8 +170,8 @@ func (s *GitService) DownloadGitLabProject(projectID int64, url, token, destinat
 	return gl.DownloadArchive(projectID, url, token, destination, sha)
 }
 
-func (s *GitService) CopyProjectDirectory(sourcePath, destinationPath string) error {
-	return gitops.CopyProjectDirectory(sourcePath, destinationPath)
+func (s *GitService) CopyProjectDirectory(ctx context.Context, sourcePath, destinationPath string) error {
+	return gitops.CopyProjectDirectory(ctx, sourcePath, destinationPath)
 }
 
 func (s *GitService) CheckPathsExist(paths []string) []string {
@@ -501,7 +501,7 @@ func (s *GitService) ensureTaskModelRunGitRepositories(taskID, preferredSourceMo
 	if sourceRun != nil {
 		sourcePath := trimmedModelRunPath(*sourceRun)
 		if managedDirectoryExists(sourcePath) {
-			initialized, err := gitops.EnsureSnapshotRepository(sourcePath, sourcePath)
+			initialized, err := gitops.EnsureSnapshotRepository(context.Background(), sourcePath, sourcePath)
 			if err != nil {
 				return "", "", 0, fmt.Errorf("源码目录补 Git 基线失败: %w", err)
 			}
@@ -523,7 +523,7 @@ func (s *GitService) ensureTaskModelRunGitRepositories(taskID, preferredSourceMo
 			refPath = runPath
 		}
 
-		initialized, err := gitops.EnsureSnapshotRepository(refPath, runPath)
+		initialized, err := gitops.EnsureSnapshotRepository(context.Background(), refPath, runPath)
 		if err != nil {
 			return "", "", len(initializedModels), fmt.Errorf("模型 %s 补 Git 基线失败: %w", run.ModelName, err)
 		}

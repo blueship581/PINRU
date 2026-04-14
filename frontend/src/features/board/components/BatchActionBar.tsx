@@ -1,6 +1,6 @@
 import { useState } from 'react';
-import { CheckSquare, ChevronDown, X } from 'lucide-react';
-import { batchUpdateTasks } from '../../../api/task';
+import { CheckSquare, ChevronDown, Trash2, X } from 'lucide-react';
+import { batchDeleteTasks, batchUpdateTasks } from '../../../api/task';
 import type { TaskStatus } from '../../../store';
 
 const STATUS_OPTIONS: TaskStatus[] = [
@@ -27,6 +27,7 @@ export function BatchActionBar({
   selectedTaskIds,
   availableTaskTypes,
   onAfterApply,
+  onAfterDelete,
   onDone,
   onCancel,
 }: {
@@ -38,6 +39,7 @@ export function BatchActionBar({
     value: string,
     taskIds: string[],
   ) => void | Promise<void>;
+  onAfterDelete?: (taskIds: string[]) => void | Promise<void>;
   onDone: () => void;
   onCancel: () => void;
 }) {
@@ -45,6 +47,30 @@ export function BatchActionBar({
   const [typeOpen, setTypeOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [resultMsg, setResultMsg] = useState('');
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+
+  const handleDelete = async () => {
+    if (loading) return;
+    setLoading(true);
+    setResultMsg('');
+    const taskIds = Array.from(selectedTaskIds);
+    try {
+      const result = await batchDeleteTasks(taskIds);
+      if (result.failed.length > 0) {
+        setResultMsg(`${result.succeeded} 成功，${result.failed.length} 失败`);
+        setConfirmingDelete(false);
+      } else {
+        await onAfterDelete?.(taskIds);
+        setResultMsg(`${result.succeeded} 个已删除`);
+        setTimeout(() => { onDone(); }, 800);
+      }
+    } catch (err) {
+      setResultMsg(err instanceof Error ? err.message : '删除失败');
+      setConfirmingDelete(false);
+    } finally {
+      setLoading(false);
+    }
+  };
 
   const apply = async (field: 'status' | 'taskType', value: string) => {
     setStatusOpen(false);
@@ -72,6 +98,34 @@ export function BatchActionBar({
       setLoading(false);
     }
   };
+
+  if (confirmingDelete) {
+    return (
+      <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-30 flex items-center gap-3 bg-white dark:bg-stone-900 border border-red-200 dark:border-red-800 rounded-2xl shadow-lg px-4 py-2.5">
+        <Trash2 className="w-4 h-4 text-red-500 flex-shrink-0" />
+        <span className="text-sm text-stone-700 dark:text-stone-300">
+          确认删除 <span className="font-semibold text-red-500">{selectedCount}</span> 个题卡？
+        </span>
+        <button
+          onClick={() => void handleDelete()}
+          disabled={loading}
+          className="px-3 py-1.5 rounded-xl text-xs font-semibold bg-red-500 hover:bg-red-600 text-white transition-colors cursor-default disabled:opacity-50"
+        >
+          {loading ? '删除中…' : '确认删除'}
+        </button>
+        <button
+          onClick={() => setConfirmingDelete(false)}
+          disabled={loading}
+          className="px-3 py-1.5 rounded-xl text-xs font-semibold bg-stone-100 dark:bg-stone-800 text-stone-700 dark:text-stone-300 hover:bg-stone-200 dark:hover:bg-stone-700 transition-colors cursor-default disabled:opacity-50"
+        >
+          取消
+        </button>
+        {resultMsg && (
+          <span className="text-xs text-stone-500 dark:text-stone-400">{resultMsg}</span>
+        )}
+      </div>
+    );
+  }
 
   return (
     <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-30 flex items-center gap-2 bg-white dark:bg-stone-900 border border-stone-200 dark:border-stone-700 rounded-2xl shadow-lg px-4 py-2.5">
@@ -129,6 +183,16 @@ export function BatchActionBar({
           )}
         </div>
       )}
+
+      {/* Delete button */}
+      <button
+        onClick={() => setConfirmingDelete(true)}
+        disabled={loading}
+        className="flex items-center gap-1 px-3 py-1.5 rounded-xl text-xs font-semibold bg-stone-100 dark:bg-stone-800 text-red-500 hover:bg-red-50 dark:hover:bg-red-950 transition-colors cursor-default disabled:opacity-50"
+      >
+        <Trash2 className="w-3 h-3" />
+        删除
+      </button>
 
       {resultMsg && (
         <span className="text-xs text-stone-500 dark:text-stone-400">{resultMsg}</span>

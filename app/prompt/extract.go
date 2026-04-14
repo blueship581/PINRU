@@ -33,13 +33,27 @@ func (p GeneratedPromptPayload) PromptValue() string {
 }
 
 // ExtractPromptFromCLIOutput 从 CLI 输出中提取提示词文本。
-// 支持 JSON payload、标记之间、启发式提取三种方式。
+//
+// 提取按优先级依次尝试以下四层 fallback：
+//
+//  1. JSON payload：模型输出整段或代码块中可解析为 GeneratedPromptPayload 的 JSON；
+//     这是最可靠的格式，要求 skill 输出结构化 JSON。
+//
+//  2. 标记区间：输出中包含 <<<PINRU_PROMPT_START>>> / <<<PINRU_PROMPT_END>>> 标记，
+//     直接取两标记之间的内容；当模型未输出 JSON 但遵守了标记协议时命中。
+//
+//  3. 整体候选评分：对去除噪音行后的完整输出打分（≥4 分视为有效提示词）；
+//     适用于模型无标记、直接输出纯文本提示词的情况。
+//
+//  4. 分块最优选择：将输出按空行切块，取得分最高的块；
+//     兜底处理模型在提示词前后掺杂大量说明文字的情况。
 func ExtractPromptFromCLIOutput(output string) (string, error) {
 	normalized := strings.TrimSpace(strings.ReplaceAll(output, "\r\n", "\n"))
 	if normalized == "" {
 		return "", fmt.Errorf("模型输出为空")
 	}
 
+	// 第一层：JSON payload 提取（最可靠，skill 正常输出时命中）
 	if payload, ok, err := ExtractPromptJSONPayload(normalized); ok {
 		if err != nil {
 			return "", err
@@ -47,17 +61,20 @@ func ExtractPromptFromCLIOutput(output string) (string, error) {
 		return payload.PromptValue(), nil
 	}
 
+	// 第二层：标记区间提取（模型遵守了标记协议但未输出 JSON 时命中）
 	if candidate, ok := ExtractPromptBetweenMarkers(normalized); ok {
 		if cleaned := CleanPromptCandidate(candidate); PromptCandidateScore(cleaned) >= 4 {
 			return cleaned, nil
 		}
 	}
 
+	// 第三层：整体候选评分（模型纯文本输出、无标记时命中）
 	candidate := CleanPromptCandidate(normalized)
 	if PromptCandidateScore(candidate) >= 4 {
 		return candidate, nil
 	}
 
+	// 第四层：分块最优选择（模型输出夹杂大量说明文字时兜底）
 	best := ""
 	bestScore := 0
 	for _, block := range strings.Split(normalized, "\n\n") {

@@ -22,10 +22,13 @@ import {
 import {
   extractTaskSessions,
   getTask,
+  listAiReviewNodes,
   listModelRuns,
+  updateAiReviewNode,
   updateTaskSessionList,
   updateTaskStatus,
   updateTaskType,
+  type AiReviewNodeFromDB,
   type ExtractTaskSessionCandidate,
   type ModelRunFromDB,
   type PromptGenerationStatus,
@@ -57,6 +60,12 @@ function normalizeModelRunList(
   modelRuns: ModelRunFromDB[] | null | undefined,
 ): ModelRunFromDB[] {
   return Array.isArray(modelRuns) ? modelRuns : [];
+}
+
+function normalizeAiReviewNodeList(
+  nodes: AiReviewNodeFromDB[] | null | undefined,
+): AiReviewNodeFromDB[] {
+  return Array.isArray(nodes) ? nodes : [];
 }
 
 function normalizeLlmProviderList(
@@ -102,6 +111,7 @@ export function useBoardTaskDetail({
   const [selected, setSelected] = useState<Task | null>(null);
   const [selectedTaskDetail, setSelectedTaskDetail] = useState<TaskFromDB | null>(null);
   const [selectedModelRuns, setSelectedModelRuns] = useState<ModelRunFromDB[]>([]);
+  const [selectedAiReviewNodes, setSelectedAiReviewNodes] = useState<AiReviewNodeFromDB[]>([]);
   const [selectedSessionModelName, setSelectedSessionModelName] = useState('');
   const [drawerLoading, setDrawerLoading] = useState(false);
   const [drawerError, setDrawerError] = useState('');
@@ -250,11 +260,13 @@ export function useBoardTaskDetail({
   };
 
   const refreshTaskSessionSyncState = async (taskId: string) => {
-    const [taskDetail, modelRuns] = await Promise.all([
+    const [taskDetail, modelRuns, aiReviewNodes] = await Promise.all([
       getTask(taskId),
       listModelRuns(taskId),
+      listAiReviewNodes(taskId),
     ]);
     const normalizedModelRuns = normalizeModelRunList(modelRuns);
+    const normalizedAiReviewNodes = normalizeAiReviewNodeList(aiReviewNodes);
 
     if (selectedTaskIdRef.current !== taskId) {
       return;
@@ -271,6 +283,7 @@ export function useBoardTaskDetail({
 
     setSelectedTaskDetail(taskDetail);
     setSelectedModelRuns(normalizedModelRuns);
+    setSelectedAiReviewNodes(normalizedAiReviewNodes);
     const nextSessionModelName =
       normalizedModelRuns.some((run) => run.modelName === selectedSessionModelName)
         ? selectedSessionModelName
@@ -308,6 +321,7 @@ export function useBoardTaskDetail({
       sessionDraftVersionRef.current = 0;
       setSelectedTaskDetail(null);
       setSelectedModelRuns([]);
+      setSelectedAiReviewNodes([]);
       setSelectedSessionModelName('');
       setDrawerError('');
       setSessionExtracting(false);
@@ -328,11 +342,13 @@ export function useBoardTaskDetail({
     setSessionExtracting(false);
 
     (async () => {
-      const [taskDetail, modelRuns] = await Promise.all([
+      const [taskDetail, modelRuns, aiReviewNodes] = await Promise.all([
         getTask(selected.id),
         listModelRuns(selected.id),
+        listAiReviewNodes(selected.id),
       ]);
       const normalizedModelRuns = normalizeModelRunList(modelRuns);
+      const normalizedAiReviewNodes = normalizeAiReviewNodeList(aiReviewNodes);
       if (cancelled) {
         return;
       }
@@ -341,6 +357,7 @@ export function useBoardTaskDetail({
       setPromptDraft(taskDetail?.promptText ?? '');
       setPromptCopied(false);
       setSelectedModelRuns(normalizedModelRuns);
+      setSelectedAiReviewNodes(normalizedAiReviewNodes);
       const initialSessionModelName =
         buildSessionModelOptions(normalizedModelRuns, sourceModelName)[0]?.modelName ?? '';
       setSelectedSessionModelName(initialSessionModelName);
@@ -451,13 +468,15 @@ export function useBoardTaskDetail({
       return;
     }
 
-    const [_, __, taskDetail, modelRuns] = await Promise.all([
+    const [_, __, taskDetail, modelRuns, aiReviewNodes] = await Promise.all([
       loadActiveProject(),
       loadTasks(),
       getTask(taskId),
       listModelRuns(taskId),
+      listAiReviewNodes(taskId),
     ]);
     const normalizedModelRuns = normalizeModelRunList(modelRuns);
+    const normalizedAiReviewNodes = normalizeAiReviewNodeList(aiReviewNodes);
 
     const latestTask =
       useAppStore.getState().tasks.find((task) => task.id === taskId) ?? null;
@@ -467,6 +486,7 @@ export function useBoardTaskDetail({
 
     setSelectedTaskDetail(taskDetail);
     setSelectedModelRuns(normalizedModelRuns);
+    setSelectedAiReviewNodes(normalizedAiReviewNodes);
     const nextSessionModelName =
       normalizedModelRuns.some((run) => run.modelName === selectedSessionModelName)
         ? selectedSessionModelName
@@ -1147,6 +1167,7 @@ export function useBoardTaskDetail({
     setSelected,
     selectedTaskDetail,
     selectedModelRuns,
+    selectedAiReviewNodes,
     drawerLoading,
     drawerError,
     statusChanging,
@@ -1193,10 +1214,29 @@ export function useBoardTaskDetail({
     handleGeneratePrompt,
     applyExtractedSessionCandidate,
     closeSessionExtractCandidates,
+    saveAiReviewNode: async (request: {
+      id: string;
+      title: string;
+      issueType: string;
+      promptText: string;
+      reviewNotes: string;
+    }) => {
+      await updateAiReviewNode(request);
+      if (!selectedTaskIdRef.current) {
+        return;
+      }
+      const nodes = await listAiReviewNodes(selectedTaskIdRef.current);
+      setSelectedAiReviewNodes(normalizeAiReviewNodeList(nodes));
+      await loadTasks();
+    },
     refreshModelRuns: async () => {
       if (!selected) return;
-      const runs = await listModelRuns(selected.id);
+      const [runs, nodes] = await Promise.all([
+        listModelRuns(selected.id),
+        listAiReviewNodes(selected.id),
+      ]);
       setSelectedModelRuns(normalizeModelRunList(runs));
+      setSelectedAiReviewNodes(normalizeAiReviewNodeList(nodes));
     },
   };
 }

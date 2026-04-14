@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState, useRef } from 'react';
 import clsx from 'clsx';
 import { AnimatePresence, motion } from 'motion/react';
 import {
@@ -12,6 +12,7 @@ import {
   ExternalLink,
   FileText,
   Hash,
+  HelpCircle,
   LayoutDashboard,
   PlayCircle,
   Plus,
@@ -26,7 +27,7 @@ import {
 } from 'lucide-react';
 import { useAppStore, type Task, type TaskStatus } from '../../store';
 import type { AiReviewPayload, AiReviewResult, BackgroundJob } from '../../api/job';
-import type { ModelRunFromDB, PromptGenerationStatus, TaskFromDB } from '../../api/task';
+import type { AiReviewNodeFromDB, ModelRunFromDB, PromptGenerationStatus, TaskFromDB } from '../../api/task';
 import type { GeneratePromptRequest, LlmProviderConfig } from '../../api/llm';
 import {
   getTaskTypePresentation,
@@ -42,6 +43,7 @@ import {
 import { matchKindLabel } from '../lib/sessionCandidateUtils';
 import { formatModelRunDisplayLabel } from '../lib/sourceFolders';
 import { CopyIconButton } from './CopyIconButton';
+import { startClaude, onCLILine, onCLIDone } from '../../api/cli';
 
 export type TaskDetailDrawerTab = 'sessions' | 'prompt' | 'model-runs' | 'ai-review';
 export type TaskDetailDrawerModelOption = {
@@ -81,6 +83,15 @@ type AiReviewStatusEntry = {
   details: AiReviewStructuredDetails | null;
 };
 
+type AiReviewNodeDraft = {
+  title: string;
+  issueType: string;
+  promptText: string;
+  reviewNotes: string;
+  polishedPromptText: string;
+  polishedReviewNotes: string;
+};
+
 type StatusMetaMap = Record<TaskStatus, {
   label: string;
   dotCls: string;
@@ -99,6 +110,7 @@ interface TaskDetailDrawerProps {
   selected: Task;
   selectedTaskDetail: TaskFromDB | null;
   selectedModelRuns: ModelRunFromDB[];
+  selectedAiReviewNodes?: AiReviewNodeFromDB[];
   drawerLoading: boolean;
   drawerError: string;
   statusChanging: boolean;
@@ -148,6 +160,14 @@ interface TaskDetailDrawerProps {
   promptGenerating: boolean;
   onGeneratePrompt: (config: Omit<GeneratePromptRequest, 'taskId'>) => void | Promise<void>;
   onAiReview?: (run: ModelRunFromDB) => void;
+  onAiReviewNode?: (node: AiReviewNodeFromDB) => void | Promise<void>;
+  onSaveAiReviewNode?: (request: {
+    id: string;
+    title: string;
+    issueType: string;
+    promptText: string;
+    reviewNotes: string;
+  }) => void | Promise<void>;
   onDeleteAiReviewRecord?: (jobId: string) => void | Promise<void>;
 }
 
@@ -162,6 +182,7 @@ export default function TaskDetailDrawer({
   selected,
   selectedTaskDetail,
   selectedModelRuns,
+  selectedAiReviewNodes,
   drawerLoading,
   drawerError,
   statusChanging,
@@ -211,6 +232,8 @@ export default function TaskDetailDrawer({
   promptGenerating,
   onGeneratePrompt,
   onAiReview,
+  onAiReviewNode,
+  onSaveAiReviewNode,
   onDeleteAiReviewRecord,
 }: TaskDetailDrawerProps) {
   const aiReviewVisible = useAppStore((state) => state.aiReviewVisible);
@@ -243,10 +266,24 @@ export default function TaskDetailDrawer({
   const [submitToast, setSubmitToast] = useState(false);
   const [deletingAiReviewJobId, setDeletingAiReviewJobId] = useState<string | null>(null);
   const [deleteAiReviewError, setDeleteAiReviewError] = useState('');
+  const [aiReviewNodeDrafts, setAiReviewNodeDrafts] = useState<Record<string, AiReviewNodeDraft>>({});
+  const [savingAiReviewNodeId, setSavingAiReviewNodeId] = useState<string | null>(null);
+  const [runningAiReviewNodeId, setRunningAiReviewNodeId] = useState<string | null>(null);
+  const [aiReviewNodeError, setAiReviewNodeError] = useState('');
+  const [collapsedNodeIds, setCollapsedNodeIds] = useState<Set<string>>(new Set());
+  const [editingNodePrompt, setEditingNodePrompt] = useState<string | null>(null);
+  const [editingNodeNotes, setEditingNodeNotes] = useState<string | null>(null);
+  const [copiedNodeField, setCopiedNodeField] = useState<{ id: string; field: string } | null>(null);
+  const [polishingField, setPolishingField] = useState<{ nodeId: string; field: 'promptText' | 'reviewNotes' } | null>(null);
+  const polishLineUnsubRef = useRef<(() => void) | null>(null);
+  const polishDoneUnsubRef = useRef<(() => void) | null>(null);
   const [conversationEditMode, setConversationEditMode] = useState<string | null>(null);
   const [copiedConversation, setCopiedConversation] = useState<string | null>(null);
+  const [sessionIdEditMode, setSessionIdEditMode] = useState<string | null>(null);
+  const [copiedDetailSessionId, setCopiedDetailSessionId] = useState<string | null>(null);
   const safeLlmProviders = Array.isArray(llmProviders) ? llmProviders : [];
   const safeSelectedModelRuns = Array.isArray(selectedModelRuns) ? selectedModelRuns : [];
+  const safeSelectedAiReviewNodes = Array.isArray(selectedAiReviewNodes) ? selectedAiReviewNodes : [];
   const promptLlmProviders = useMemo(
     () => safeLlmProviders.filter((provider) => provider.providerType === 'claude_code_acp'),
     [safeLlmProviders],
@@ -285,6 +322,36 @@ export default function TaskDetailDrawer({
     setDeletingAiReviewJobId(null);
     setDeleteAiReviewError('');
   }, [selected.id]);
+
+  useEffect(() => {
+    setAiReviewNodeError('');
+    setSavingAiReviewNodeId(null);
+    setRunningAiReviewNodeId(null);
+    setCollapsedNodeIds(new Set());
+    setEditingNodePrompt(null);
+    setEditingNodeNotes(null);
+    setCopiedNodeField(null);
+    polishLineUnsubRef.current?.();
+    polishDoneUnsubRef.current?.();
+    polishLineUnsubRef.current = null;
+    polishDoneUnsubRef.current = null;
+    setPolishingField(null);
+    setAiReviewNodeDrafts(
+      Object.fromEntries(
+        safeSelectedAiReviewNodes.map((node) => [
+          node.id,
+          {
+            title: node.title ?? '',
+            issueType: node.issueType ?? 'Bug修复',
+            promptText: node.promptText ?? '',
+            reviewNotes: node.reviewNotes ?? '',
+            polishedPromptText: '',
+            polishedReviewNotes: '',
+          },
+        ]),
+      ),
+    );
+  }, [selected.id, safeSelectedAiReviewNodes]);
 
   const toggleGenConstraint = (c: string) => {
     setGenConstraints(prev => {
@@ -419,6 +486,16 @@ export default function TaskDetailDrawer({
     });
     return map;
   }, [taskAiReviewJobs]);
+  const latestAiReviewJobByNodeId = useMemo(() => {
+    const map = new Map<string, ParsedAiReviewJob>();
+    taskAiReviewJobs.forEach((entry) => {
+      const nodeId = trimToNull(entry.output?.reviewNodeId) ?? trimToNull(entry.input?.reviewNodeId);
+      if (nodeId && !map.has(nodeId)) {
+        map.set(nodeId, entry);
+      }
+    });
+    return map;
+  }, [taskAiReviewJobs]);
   const aiReviewStatusEntries = useMemo<AiReviewStatusEntry[]>(() => {
     const entries: AiReviewStatusEntry[] = [];
     const seenRunIds = new Set<string>();
@@ -489,9 +566,13 @@ export default function TaskDetailDrawer({
 
     return entries;
   }, [latestAiReviewJobByKey, safeSelectedModelRuns, sourceModelName]);
-  const aiReviewPassCount = aiReviewStatusEntries.filter((entry) => entry.reviewStatus === 'pass').length;
-  const aiReviewWarningCount = aiReviewStatusEntries.filter((entry) => entry.reviewStatus === 'warning').length;
-  const aiReviewRunningCount = aiReviewStatusEntries.filter((entry) => entry.reviewStatus === 'running').length;
+  const aiReviewPassCount = safeSelectedAiReviewNodes.filter((node) => node.status === 'pass').length;
+  const aiReviewWarningCount = safeSelectedAiReviewNodes.filter((node) => node.status === 'warning').length;
+  const aiReviewRunningCount = safeSelectedAiReviewNodes.filter((node) => node.status === 'running').length;
+  const aiReviewTreeNodes = useMemo(
+    () => buildAiReviewTreeNodes(safeSelectedAiReviewNodes),
+    [safeSelectedAiReviewNodes],
+  );
   const availableTabItems = useMemo(
     () => TAB_ITEMS.filter((tab) => aiReviewVisible || tab.id !== 'ai-review'),
     [aiReviewVisible],
@@ -544,6 +625,147 @@ export default function TaskDetailDrawer({
       setDeleteAiReviewError(error instanceof Error ? error.message : '删除复审记录失败');
     } finally {
       setDeletingAiReviewJobId((current) => (current === entry.job.id ? null : current));
+    }
+  };
+
+  const getAiReviewNodeDraft = (node: AiReviewNodeFromDB): AiReviewNodeDraft => (
+    aiReviewNodeDrafts[node.id] ?? {
+      title: node.title ?? '',
+      issueType: node.issueType ?? 'Bug修复',
+      promptText: node.promptText ?? '',
+      reviewNotes: node.reviewNotes ?? '',
+      polishedPromptText: '',
+      polishedReviewNotes: '',
+    }
+  );
+
+  const handleAiReviewNodeDraftChange = (
+    nodeId: string,
+    patch: Partial<AiReviewNodeDraft>,
+  ) => {
+    setAiReviewNodeDrafts((prev) => {
+      const current = prev[nodeId] ?? {
+        title: '',
+        issueType: 'Bug修复',
+        promptText: '',
+        reviewNotes: '',
+      };
+      return {
+        ...prev,
+        [nodeId]: {
+          ...current,
+          ...patch,
+        },
+      };
+    });
+  };
+
+  const handlePolishText = async (
+    nodeId: string,
+    field: 'promptText' | 'reviewNotes',
+    text: string,
+    workDir: string,
+  ) => {
+    if (polishingField) return;
+    if (!workDir.trim()) {
+      setAiReviewNodeError('润色失败：工作目录为空');
+      return;
+    }
+    const acpProvider = promptLlmProviders[0];
+    if (!acpProvider) {
+      setAiReviewNodeError('润色失败：未配置 Claude Code(ACP) 提供商');
+      return;
+    }
+    const polishModel = acpProvider.polishModel?.trim() || acpProvider.model;
+    setAiReviewNodeError('');
+    setPolishingField({ nodeId, field });
+    polishLineUnsubRef.current?.();
+    polishDoneUnsubRef.current?.();
+    const collectedLines: string[] = [];
+    try {
+      const resp = await startClaude({
+        workDir,
+        prompt: `去除以下文字中的 AI 写作痕迹，使其更自然流畅。只输出改写后的文字，不要任何说明或前缀：\n\n${text}`,
+        model: polishModel,
+        thinkingDepth: '',
+        mode: 'agent',
+      });
+      polishLineUnsubRef.current = onCLILine(resp.sessionId, (line) => {
+        // 跳过 ANSI 控制符行和明显的工具/状态行
+        // eslint-disable-next-line no-control-regex
+        const stripped = line.replace(/\x1b\[[0-9;]*m/g, '').trim();
+        if (!stripped) return;
+        if (/^[ℹ✓✗⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏►]/.test(stripped)) return;
+        if (/^(Tool:|Result:|Bash\(|Read\(|Write\(|Edit\()/.test(stripped)) return;
+        collectedLines.push(stripped);
+      });
+      polishDoneUnsubRef.current = onCLIDone(resp.sessionId, (errMsg) => {
+        polishLineUnsubRef.current?.();
+        polishDoneUnsubRef.current?.();
+        polishLineUnsubRef.current = null;
+        polishDoneUnsubRef.current = null;
+        if (errMsg) {
+          setAiReviewNodeError(`润色失败：${errMsg}`);
+        } else {
+          const result = collectedLines.join('\n').trim();
+          if (result) {
+            const polishedKey = field === 'promptText' ? 'polishedPromptText' : 'polishedReviewNotes';
+            handleAiReviewNodeDraftChange(nodeId, { [polishedKey]: result });
+          } else {
+            setAiReviewNodeError('润色失败：未能提取有效文字');
+          }
+        }
+        setPolishingField(null);
+      });
+    } catch (e) {
+      setAiReviewNodeError(`润色失败：${e instanceof Error ? e.message : '未知错误'}`);
+      setPolishingField(null);
+    }
+  };
+
+  const handleSaveAiReviewNodeDraft = async (node: AiReviewNodeFromDB) => {
+    if (!onSaveAiReviewNode) {
+      return true;
+    }
+    const draft = getAiReviewNodeDraft(node);
+    setAiReviewNodeError('');
+    setSavingAiReviewNodeId(node.id);
+    try {
+      await onSaveAiReviewNode({
+        id: node.id,
+        title: draft.title.trim(),
+        issueType: draft.issueType.trim() || 'Bug修复',
+        promptText: draft.promptText.trim(),
+        reviewNotes: draft.reviewNotes.trim(),
+      });
+      return true;
+    } catch (error) {
+      setAiReviewNodeError(error instanceof Error ? error.message : '保存复审节点失败');
+      return false;
+    } finally {
+      setSavingAiReviewNodeId((current) => (current === node.id ? null : current));
+    }
+  };
+
+  const handleRunAiReviewNode = async (node: AiReviewNodeFromDB) => {
+    if (!onAiReviewNode) {
+      return;
+    }
+    if (hasAiReviewNodeDraftChanges(node, getAiReviewNodeDraft(node))) {
+      const saved = await handleSaveAiReviewNodeDraft(node);
+      if (!saved) {
+        return;
+      }
+    }
+
+    setAiReviewNodeError('');
+    setRunningAiReviewNodeId(node.id);
+    try {
+      await onAiReviewNode(node);
+    } catch (error) {
+      setAiReviewNodeError(error instanceof Error ? error.message : '提交节点复核失败');
+    } finally {
+      setRunningAiReviewNodeId((current) => (current === node.id ? null : current));
     }
   };
 
@@ -600,12 +822,12 @@ export default function TaskDetailDrawer({
 
     return (
       <div className="flex h-full min-h-0 flex-col lg:flex-row">
-        <aside className="flex w-full shrink-0 flex-col border-b border-zinc-800/70 bg-[#0c0c0f] lg:w-[320px] lg:border-b-0 lg:border-r">
-          <div className="border-b border-zinc-800/70 px-4 py-3">
+        <aside className="flex w-full shrink-0 flex-col border-b border-stone-200 bg-white lg:w-[320px] lg:border-b-0 lg:border-r dark:border-zinc-800/70 dark:bg-[#0c0c0f]">
+          <div className="border-b border-stone-200 px-4 py-3 dark:border-zinc-800/70">
             <div className="flex items-center justify-between gap-3">
               <div>
-                <p className="text-[11px] font-semibold uppercase tracking-[0.24em] text-zinc-500">Session 列表</p>
-                <p className="mt-1 text-xs text-zinc-400">{summarizeCountedRounds(sessionListDraft)}</p>
+                <p className="text-[11px] font-semibold uppercase tracking-[0.24em] text-stone-500 dark:text-zinc-500">Session 列表</p>
+                <p className="mt-1 text-xs text-stone-600 dark:text-zinc-400">{summarizeCountedRounds(sessionListDraft)}</p>
               </div>
               <div className="flex items-center gap-2">
                 <button
@@ -624,7 +846,7 @@ export default function TaskDetailDrawer({
                   type="button"
                   onClick={onAddSession}
                   disabled={sessionExtracting}
-                  className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-700/70 bg-zinc-900 px-2.5 py-1.5 text-[11px] font-medium text-zinc-200 transition hover:border-zinc-600 hover:bg-zinc-800 disabled:opacity-60"
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-stone-200 bg-white px-2.5 py-1.5 text-[11px] font-medium text-stone-700 transition hover:border-stone-300 hover:bg-stone-50 disabled:opacity-60 dark:border-zinc-700/70 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:border-zinc-600 dark:hover:bg-zinc-800"
                 >
                   <Plus className="h-3.5 w-3.5" />
                   新增
@@ -633,7 +855,7 @@ export default function TaskDetailDrawer({
             </div>
             {sessionModelOptions.length > 0 && (
               <div className="mt-3 space-y-2">
-                <p className="text-[11px] font-semibold uppercase tracking-[0.24em] text-zinc-500">当前模型</p>
+                <p className="text-[11px] font-semibold uppercase tracking-[0.24em] text-stone-500 dark:text-zinc-500">当前模型</p>
                 {sessionModelOptions.length > 1 ? (
                   <div className="relative">
                     <select
@@ -671,7 +893,6 @@ export default function TaskDetailDrawer({
 
           <div className="min-h-0 flex-1 space-y-2 overflow-y-auto px-3 py-3">
             {sessionListDraft.map((session, index) => {
-              const presentation = getTaskTypePresentation(session.taskType);
               const counted = isSessionCounted(session, index);
               const pendingCount = index > 0 && session.consumeQuota && !session.sessionId.trim();
               const selectedCard = session.localId === activeSession.localId;
@@ -680,65 +901,101 @@ export default function TaskDetailDrawer({
               const preview = session.userConversation?.trim() || session.evaluation?.trim() || '当前没有补充内容';
 
               return (
-                <button
+                <div
                   key={session.localId}
-                  type="button"
-                  onClick={() => handleSelectSession(session.localId)}
                   className={clsx(
                     'w-full rounded-2xl border p-3 text-left transition',
                     selectedCard
                       ? 'border-indigo-500/35 bg-indigo-500/10 shadow-[0_0_24px_rgba(99,102,241,0.12)]'
-                      : 'border-transparent bg-zinc-900/35 hover:border-zinc-700/70 hover:bg-zinc-800/40',
+                      : 'border-transparent bg-stone-100 hover:border-stone-200 hover:bg-stone-200/50 dark:bg-zinc-900/35 dark:hover:border-zinc-700/70 dark:hover:bg-zinc-800/40',
                   )}
                 >
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="min-w-0">
-                      <div className="flex items-center gap-2">
-                        <span className={clsx('text-xs font-semibold', selectedCard ? 'text-indigo-200' : 'text-zinc-200')}>
-                          第 {index + 1} 轮
-                        </span>
-                        {index === 0 && <WorkspaceBadge tone="neutral">主 session</WorkspaceBadge>}
-                        <WorkspaceBadge tone={index === 0 || counted ? 'success' : pendingCount ? 'warning' : 'neutral'}>
-                          {index === 0 ? '固定计数' : counted ? '计数' : pendingCount ? '待计数' : '不计数'}
-                        </WorkspaceBadge>
+                  {/* 卡片头部：点击选中 */}
+                  <button
+                    type="button"
+                    onClick={() => handleSelectSession(session.localId)}
+                    className="w-full text-left"
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-2">
+                          <span className={clsx('text-xs font-semibold', selectedCard ? 'text-indigo-200' : 'text-stone-700 dark:text-zinc-200')}>
+                            第 {index + 1} 轮
+                          </span>
+                          {index === 0 && <WorkspaceBadge tone="neutral">主 session</WorkspaceBadge>}
+                          <WorkspaceBadge tone={index === 0 || counted ? 'success' : pendingCount ? 'warning' : 'neutral'}>
+                            {index === 0 ? '固定计数' : counted ? '计数' : pendingCount ? '待计数' : '不计数'}
+                          </WorkspaceBadge>
+                        </div>
+                        <p className="mt-2 line-clamp-2 text-[11px] leading-5 text-stone-500 dark:text-zinc-500">{preview}</p>
                       </div>
-                      <p className="mt-2 line-clamp-2 text-[11px] leading-5 text-zinc-500">{preview}</p>
                     </div>
-                    <div className="flex items-center gap-1 text-zinc-500">
-                      {sessionCompleted ? (
-                        <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400" />
-                      ) : (
-                        <CircleDashed className="h-3.5 w-3.5 text-amber-400" />
-                      )}
-                      {sessionSatisfied ? (
-                        <ThumbsUp className="h-3.5 w-3.5 text-indigo-400" />
-                      ) : (
-                        <ThumbsDown className="h-3.5 w-3.5 text-red-400" />
-                      )}
-                    </div>
-                  </div>
+                  </button>
 
-                  <div className="mt-3 flex flex-wrap gap-1.5">
-                    <span className="inline-flex items-center gap-1 rounded-full border border-zinc-700/70 bg-zinc-900 px-2 py-0.5 text-[10px] font-medium text-zinc-300">
-                      <span className={clsx('h-1.5 w-1.5 rounded-full', presentation.dot)} />
-                      {presentation.label}
-                    </span>
-                    <WorkspaceBadge tone="neutral" className="font-mono">
-                      {session.sessionId.trim() ? maskSessionId(session.sessionId) : '待填写 sessionId'}
-                    </WorkspaceBadge>
+                  {/* 任务类型 + 扣任务数开关 */}
+                  <div className="mt-2.5 flex items-center gap-2">
+                    {/* 任务类型下拉 */}
+                    <TaskTypeSelect
+                      value={session.taskType}
+                      disabled={taskTypeChanging || index === 0}
+                      selected={selectedCard}
+                      options={sessionTaskTypeOptions.map((t) => {
+                        const p = getTaskTypePresentation(t);
+                        return { value: p.value, label: p.label };
+                      })}
+                      onChange={(val) => onSessionChange(session.localId, { taskType: val })}
+                      onClick={(e) => e.stopPropagation()}
+                    />
+
+                    {/* 扣任务数开关 */}
+                    <div className="group relative flex items-center gap-1.5 shrink-0">
+                      {/* 帮助按钮 - 移到左侧 */}
+                      <Tooltip content={index === 0 ? '首个 session 固定扣减任务数，无法更改' : '开启后将扣减对应任务类型的配额，关闭则不扣减'}>
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                          }}
+                          className="flex h-5 w-5 items-center justify-center rounded-md text-stone-400 opacity-0 transition hover:bg-stone-100 hover:text-stone-600 group-hover:opacity-100 dark:text-zinc-600 dark:hover:bg-zinc-800 dark:hover:text-zinc-400"
+                        >
+                          <HelpCircle className="h-3.5 w-3.5" />
+                        </button>
+                      </Tooltip>
+                      <button
+                        type="button"
+                        disabled={index === 0}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          if (index > 0) {
+                            onSessionChange(session.localId, { consumeQuota: !session.consumeQuota });
+                          }
+                        }}
+                        className={clsx(
+                          'flex h-6 items-center gap-1.5 rounded-md border px-2.5 text-[10px] font-medium transition',
+                          index === 0
+                            ? 'cursor-default border-indigo-500/30 bg-indigo-500/10 text-indigo-400 opacity-70'
+                            : session.consumeQuota
+                              ? 'border-indigo-500/50 bg-indigo-500/20 text-indigo-300 hover:bg-indigo-500/30'
+                              : 'border-stone-200 bg-stone-50 text-stone-500 hover:border-stone-300 hover:text-stone-700 dark:border-zinc-700/70 dark:bg-zinc-900/80 dark:text-zinc-500 dark:hover:border-zinc-600 dark:hover:text-zinc-400',
+                        )}
+                      >
+                        <div className={clsx('h-2 w-2 rounded-full', session.consumeQuota || index === 0 ? 'bg-current' : 'bg-stone-300 dark:bg-zinc-600')} />
+                        {index === 0 ? '固定' : session.consumeQuota ? '计数' : '不计'}
+                      </button>
+                    </div>
                   </div>
-                </button>
+                </div>
               );
             })}
           </div>
 
-          <div className="border-t border-zinc-800/70 px-4 py-3">
+          <div className="border-t border-stone-200 px-4 py-3 dark:border-zinc-800/70">
             <div className="flex gap-2">
               <button
                 type="button"
                 onClick={onResetSessions}
                 disabled={sessionListSaving}
-                className="flex-1 rounded-xl border border-zinc-700/70 bg-zinc-900 px-3 py-2 text-xs font-medium text-zinc-300 transition hover:border-zinc-600 hover:bg-zinc-800 disabled:opacity-50"
+                className="flex-1 rounded-xl border border-stone-200 bg-white px-3 py-2 text-xs font-medium text-stone-700 transition hover:border-stone-300 hover:bg-stone-50 disabled:opacity-50 dark:border-zinc-700/70 dark:bg-zinc-900 dark:text-zinc-300 dark:hover:border-zinc-600 dark:hover:bg-zinc-800"
               >
                 还原
               </button>
@@ -763,21 +1020,21 @@ export default function TaskDetailDrawer({
               transition={{ duration: 0.18 }}
               className="mx-auto max-w-5xl space-y-6 px-4 py-5 pb-28 sm:px-6 lg:px-8"
             >
-              <section className="flex flex-col gap-4 border-b border-zinc-800/60 pb-4 lg:flex-row lg:items-start lg:justify-between">
+              <section className="flex flex-col gap-4 border-b border-stone-200 pb-4 lg:flex-row lg:items-start lg:justify-between dark:border-zinc-800/60">
                 <div className="min-w-0">
                   <div className="flex flex-wrap items-center gap-2">
-                    <h3 className="text-lg font-semibold text-white">第 {activeSessionIndex + 1} 轮详情</h3>
+                    <h3 className="text-lg font-semibold text-stone-900 dark:text-white">第 {activeSessionIndex + 1} 轮详情</h3>
                     {selectedSessionModelName && <WorkspaceBadge tone="blue">{selectedSessionModelName}</WorkspaceBadge>}
                     {activeSessionIndex === 0 && <WorkspaceBadge tone="neutral">主 session</WorkspaceBadge>}
                     <WorkspaceBadge tone={isCounted ? 'success' : isPendingCount ? 'warning' : 'neutral'}>
                       {activeSessionIndex === 0 ? '固定计数' : isCounted ? '计数中' : isPendingCount ? '待计数' : '不计数'}
                     </WorkspaceBadge>
-                    <span className="inline-flex items-center gap-1 rounded-full border border-zinc-700/70 bg-zinc-900 px-2 py-0.5 text-[10px] font-medium text-zinc-300">
+                    <span className="inline-flex items-center gap-1 rounded-full border border-stone-200 bg-stone-100 px-2 py-0.5 text-[10px] font-medium text-stone-700 dark:border-zinc-700/70 dark:bg-zinc-900 dark:text-zinc-300">
                       <span className={clsx('h-1.5 w-1.5 rounded-full', activeSessionPresentation.dot)} />
                       {activeSessionPresentation.label}
                     </span>
                   </div>
-                  <p className="mt-2 text-sm leading-6 text-zinc-400">
+                  <p className="mt-2 text-sm leading-6 text-stone-600 dark:text-zinc-400">
                     {activeSession.userConversation?.trim() || '这一轮还没有补充用户对话信息，可以直接在下面编辑。'}
                   </p>
                 </div>
@@ -800,8 +1057,9 @@ export default function TaskDetailDrawer({
                 description="保留原始 sessionId，同时允许直接修正记录值。"
               >
                 <div className="grid gap-3 lg:grid-cols-2">
+                  {/* 用户对话 */}
                   <div
-                    className="group rounded-2xl border border-zinc-800/70 bg-zinc-900/40 px-4 py-3"
+                    className="group rounded-2xl border border-stone-200 bg-white/60 px-4 py-3 dark:border-zinc-800/70 dark:bg-zinc-900/40"
                     onDoubleClick={() => {
                       if (conversationEditMode !== activeSession.localId) {
                         setConversationEditMode(activeSession.localId);
@@ -811,7 +1069,7 @@ export default function TaskDetailDrawer({
                   >
                     <div className="flex items-start justify-between gap-3">
                       <div className="min-w-0 flex-1">
-                        <p className="text-[10px] font-semibold uppercase tracking-[0.22em] text-zinc-500">
+                        <p className="text-[10px] font-semibold uppercase tracking-[0.22em] text-stone-500 dark:text-zinc-500">
                           用户对话
                         </p>
                         {conversationEditMode === activeSession.localId ? (
@@ -824,12 +1082,12 @@ export default function TaskDetailDrawer({
                               if (e.key === 'Escape') setConversationEditMode(null);
                             }}
                             rows={5}
-                            className="mt-2 w-full resize-none rounded-xl border border-indigo-500/40 bg-black/30 px-2 py-1.5 text-xs leading-6 text-zinc-200 outline-none focus:ring-1 focus:ring-indigo-500/40"
+                            className="mt-2 w-full resize-none rounded-xl border border-indigo-500/40 bg-black/30 px-2 py-1.5 text-xs leading-6 text-stone-900 outline-none focus:ring-1 focus:ring-indigo-500/40 dark:text-zinc-200"
                           />
                         ) : (
-                          <div className="mt-2 line-clamp-6 cursor-text text-xs leading-6 text-zinc-200">
+                          <div className="mt-2 line-clamp-6 cursor-text text-xs leading-6 text-stone-800 dark:text-zinc-200">
                             {activeSession.userConversation?.trim() || (
-                              <span className="text-zinc-600">双击添加用户对话…</span>
+                              <span className="text-stone-400 dark:text-zinc-600">双击添加用户对话…</span>
                             )}
                           </div>
                         )}
@@ -853,20 +1111,66 @@ export default function TaskDetailDrawer({
                       )}
                     </div>
                   </div>
-                  <label className="space-y-2">
-                    <FieldLabel label="编辑 Session ID" />
-                    <input
-                      value={activeSession.sessionId}
-                      onChange={(event) => onSessionChange(activeSession.localId, { sessionId: event.target.value })}
-                      placeholder="记录实际 sessionId"
-                      className="w-full rounded-xl border border-zinc-800 bg-black/30 px-3 py-2.5 font-mono text-xs text-zinc-200 outline-none transition focus:border-indigo-500/60 focus:ring-1 focus:ring-indigo-500/40"
-                    />
-                  </label>
+
+                  {/* SessionID - 双击编辑 */}
+                  <div
+                    className="group rounded-2xl border border-stone-200 bg-white/60 px-4 py-3 dark:border-zinc-800/70 dark:bg-zinc-900/40"
+                    onDoubleClick={() => {
+                      if (sessionIdEditMode !== activeSession.localId) {
+                        setSessionIdEditMode(activeSession.localId);
+                      }
+                    }}
+                    title={sessionIdEditMode === activeSession.localId ? undefined : '双击编辑 Session ID'}
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0 flex-1">
+                        <p className="text-[10px] font-semibold uppercase tracking-[0.22em] text-stone-500 dark:text-zinc-500">
+                          Session ID
+                        </p>
+                        {sessionIdEditMode === activeSession.localId ? (
+                          <input
+                            autoFocus
+                            value={activeSession.sessionId}
+                            onChange={(e) => onSessionChange(activeSession.localId, { sessionId: e.target.value })}
+                            onBlur={() => setSessionIdEditMode(null)}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Escape' || e.key === 'Enter') setSessionIdEditMode(null);
+                            }}
+                            className="mt-2 w-full rounded-xl border border-indigo-500/40 bg-black/30 px-2 py-1.5 font-mono text-xs text-stone-900 outline-none focus:ring-1 focus:ring-indigo-500/40 dark:text-zinc-200"
+                            placeholder="输入 Session ID"
+                          />
+                        ) : (
+                          <div className="mt-2 break-words cursor-text font-mono text-xs text-stone-800 dark:text-zinc-200">
+                            {activeSession.sessionId?.trim() || (
+                              <span className="text-stone-400 dark:text-zinc-600">双击添加 Session ID…</span>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                      {activeSession.sessionId?.trim() && sessionIdEditMode !== activeSession.localId && (
+                        <ActionIconButton
+                          label={copiedDetailSessionId === activeSession.localId ? '已复制' : '复制 Session ID'}
+                          onClick={() => {
+                            void navigator.clipboard.writeText(activeSession.sessionId ?? '').then(() => {
+                              setCopiedDetailSessionId(activeSession.localId);
+                              setTimeout(() => setCopiedDetailSessionId(null), 2000);
+                            });
+                          }}
+                        >
+                          {copiedDetailSessionId === activeSession.localId ? (
+                            <Check className="h-4 w-4" />
+                          ) : (
+                            <Copy className="h-4 w-4" />
+                          )}
+                        </ActionIconButton>
+                      )}
+                    </div>
+                  </div>
                 </div>
                 {sessionEvidence && (
                   <div className="mt-4 rounded-2xl border border-sky-500/20 bg-sky-500/5 px-4 py-4">
                     <div className="flex flex-wrap items-center gap-2">
-                      <span className="text-[11px] font-medium text-zinc-500">Session 依据</span>
+                      <span className="text-[11px] font-medium text-stone-600 dark:text-zinc-500">Session 依据</span>
                       <WorkspaceBadge tone="blue">
                         {matchKindLabel(sessionEvidence.matchKind)}
                       </WorkspaceBadge>
@@ -903,91 +1207,6 @@ export default function TaskDetailDrawer({
                   </div>
                 )}
               </SectionBlock>
-
-              <SectionBlock
-                icon={Settings2}
-                title="任务配置"
-                description="保持这一轮的任务类型、扣减规则和完成状态都可独立控制。"
-              >
-                <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_240px_240px]">
-                  <label className="space-y-2">
-                    <FieldLabel label="任务类型" />
-                    <div className="relative">
-                      <select
-                        value={activeSession.taskType}
-                        disabled={taskTypeChanging}
-                        onChange={(event) => onSessionChange(activeSession.localId, { taskType: event.target.value })}
-                        className="w-full appearance-none rounded-xl border border-zinc-800 bg-black/30 px-3 py-2.5 pr-9 text-sm font-medium text-zinc-200 outline-none transition focus:border-indigo-500/60 focus:ring-1 focus:ring-indigo-500/40 disabled:opacity-60"
-                      >
-                        {sessionTaskTypeOptions.map((taskType) => {
-                          const optionPresentation = getTaskTypePresentation(taskType);
-                          const optionRemainingToComplete = getRemainingToCompleteValue(
-                            optionPresentation.value,
-                          );
-                          return (
-                            <option key={optionPresentation.value} value={optionPresentation.value}>
-                              {optionPresentation.label}
-                              {formatRemainingToComplete(optionRemainingToComplete, 'option')}
-                            </option>
-                          );
-                        })}
-                      </select>
-                      <ChevronRight className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 rotate-90 text-zinc-500" />
-                    </div>
-                  </label>
-
-                  <SessionSwitchCard
-                    label="扣任务数"
-                    description={quotaHint}
-                    checked={isQuotaToggleOn}
-                    disabled={activeSessionIndex === 0}
-                    onChange={(checked) => onSessionChange(activeSession.localId, { consumeQuota: checked })}
-                    onLabel={activeSessionIndex === 0 ? '固定开启' : '开启'}
-                    offLabel="关闭"
-                    tone="indigo"
-                  />
-
-                  <SessionSwitchCard
-                    label="是否完成"
-                    description="关闭后标记为未完成"
-                    checked={isCompleted}
-                    onChange={(checked) => onSessionChange(activeSession.localId, { isCompleted: checked })}
-                    onLabel="完成"
-                    offLabel="未完成"
-                    tone="emerald"
-                  />
-                </div>
-              </SectionBlock>
-
-              <SectionBlock
-                icon={AlertCircle}
-                title="结果评价"
-                description="记录本轮是否满意，以及为什么满意或不满意。"
-                badge={<WorkspaceBadge tone={isSatisfied ? 'success' : 'danger'}>{isSatisfied ? '满意' : '不满意'}</WorkspaceBadge>}
-              >
-                <div className="space-y-3">
-                  <BinaryChoiceGroup
-                    title="是否满意"
-                    value={isSatisfied}
-                    positiveLabel="满意"
-                    negativeLabel="不满意"
-                    onPositive={() => onSessionChange(activeSession.localId, { isSatisfied: true })}
-                    onNegative={() => onSessionChange(activeSession.localId, { isSatisfied: false })}
-                  />
-                  <textarea
-                    value={activeSession.evaluation ?? ''}
-                    onChange={(event) => onSessionChange(activeSession.localId, { evaluation: event.target.value })}
-                    placeholder="补充本轮 session 的结果、问题或主观评价"
-                    rows={4}
-                    className={clsx(
-                      'w-full rounded-2xl border bg-zinc-950/60 px-4 py-3 text-sm leading-6 text-zinc-200 outline-none transition placeholder:text-zinc-600 focus:ring-1',
-                      isSatisfied
-                        ? 'border-emerald-500/25 focus:border-emerald-500/50 focus:ring-emerald-500/35'
-                        : 'border-amber-500/25 focus:border-amber-500/50 focus:ring-amber-500/35',
-                    )}
-                  />
-                </div>
-              </SectionBlock>
             </motion.div>
           </div>
         </div>
@@ -1017,7 +1236,7 @@ export default function TaskDetailDrawer({
                 'rounded-full border px-3.5 py-1.5 text-xs font-medium transition-all duration-150',
                 genTaskType === t
                   ? 'border-indigo-500/60 bg-indigo-500/15 text-indigo-300 shadow-[0_0_12px_rgba(99,102,241,0.15)]'
-                  : 'border-zinc-700/60 bg-zinc-900/80 text-zinc-400 hover:border-zinc-600 hover:text-zinc-300',
+                  : 'border-stone-200 bg-stone-100 text-stone-600 hover:border-stone-300 hover:text-stone-700 dark:border-zinc-700/60 dark:bg-zinc-900/80 dark:text-zinc-400 dark:hover:border-zinc-600 dark:hover:text-zinc-300',
               )}
             >
               {t}
@@ -1039,7 +1258,7 @@ export default function TaskDetailDrawer({
                 'rounded-full border px-3.5 py-1.5 text-xs font-medium transition-all duration-150',
                 genConstraints.has(c)
                   ? 'border-indigo-500/60 bg-indigo-500/15 text-indigo-300 shadow-[0_0_12px_rgba(99,102,241,0.15)]'
-                  : 'border-zinc-700/60 bg-zinc-900/80 text-zinc-400 hover:border-zinc-600 hover:text-zinc-300',
+                  : 'border-stone-200 bg-stone-100 text-stone-600 hover:border-stone-300 hover:text-stone-700 dark:border-zinc-700/60 dark:bg-zinc-900/80 dark:text-zinc-400 dark:hover:border-zinc-600 dark:hover:text-zinc-300',
               )}
             >
               {c}
@@ -1061,7 +1280,7 @@ export default function TaskDetailDrawer({
                 'rounded-full border px-3.5 py-1.5 text-xs font-medium transition-all duration-150',
                 genScopes.has(s)
                   ? 'border-indigo-500/60 bg-indigo-500/15 text-indigo-300 shadow-[0_0_12px_rgba(99,102,241,0.15)]'
-                  : 'border-zinc-700/60 bg-zinc-900/80 text-zinc-400 hover:border-zinc-600 hover:text-zinc-300',
+                  : 'border-stone-200 bg-stone-100 text-stone-600 hover:border-stone-300 hover:text-stone-700 dark:border-zinc-700/60 dark:bg-zinc-900/80 dark:text-zinc-400 dark:hover:border-zinc-600 dark:hover:text-zinc-300',
               )}
             >
               {s}
@@ -1099,7 +1318,7 @@ export default function TaskDetailDrawer({
                     <select
                       value={genProviderId}
                       onChange={(e) => setGenProviderId(e.target.value)}
-                      className="w-full rounded-xl border border-zinc-700/70 bg-zinc-900 px-3 py-2 text-sm text-zinc-200 outline-none focus:border-indigo-500/60"
+                      className="w-full rounded-xl border border-stone-200 bg-white px-3 py-2 text-sm text-stone-800 outline-none focus:border-indigo-500/60 dark:border-zinc-700/70 dark:bg-zinc-900 dark:text-zinc-200"
                     >
                       {promptLlmProviders.map(p => (
                         <option key={p.id} value={p.id}>
@@ -1115,7 +1334,7 @@ export default function TaskDetailDrawer({
                     <select
                       value={genThinking}
                       onChange={(e) => setGenThinking(e.target.value)}
-                      className="w-full rounded-xl border border-zinc-700/70 bg-zinc-900 px-3 py-2 text-sm text-zinc-200 outline-none focus:border-indigo-500/60"
+                      className="w-full rounded-xl border border-stone-200 bg-white px-3 py-2 text-sm text-stone-800 outline-none focus:border-indigo-500/60 dark:border-zinc-700/70 dark:bg-zinc-900 dark:text-zinc-200"
                     >
                       {THINKING_OPTIONS.map(opt => (
                         <option key={opt.value} value={opt.value}>{opt.label}</option>
@@ -1131,7 +1350,7 @@ export default function TaskDetailDrawer({
                     onChange={(e) => setGenNotes(e.target.value)}
                     rows={2}
                     placeholder="对出题方向的补充描述…"
-                    className="w-full rounded-xl border border-zinc-700/70 bg-zinc-900 px-3 py-2 text-sm text-zinc-200 outline-none placeholder:text-zinc-600 focus:border-indigo-500/60"
+                    className="w-full rounded-xl border border-stone-200 bg-white px-3 py-2 text-sm text-stone-800 outline-none placeholder:text-stone-400 focus:border-indigo-500/60 dark:border-zinc-700/70 dark:bg-zinc-900 dark:text-zinc-200 dark:placeholder:text-zinc-600"
                   />
                 </label>
               </div>
@@ -1212,7 +1431,7 @@ export default function TaskDetailDrawer({
                     type="button"
                     onClick={() => setShowRegenForm(prev => !prev)}
                     disabled={promptGenerating}
-                    className="inline-flex items-center gap-1 rounded-full border border-zinc-700/60 bg-zinc-900/80 px-2.5 py-0.5 text-[10px] font-medium text-zinc-400 transition hover:border-indigo-500/50 hover:text-indigo-300 disabled:opacity-50"
+                    className="inline-flex items-center gap-1 rounded-full border border-stone-200 bg-stone-100 px-2.5 py-0.5 text-[10px] font-medium text-stone-500 transition hover:border-indigo-500/50 hover:text-indigo-600 disabled:opacity-50 dark:border-zinc-700/60 dark:bg-zinc-900/80 dark:text-zinc-400 dark:hover:text-indigo-300"
                   >
                     <RefreshCw className="h-3 w-3" />
                     重新生成
@@ -1252,7 +1471,7 @@ export default function TaskDetailDrawer({
                       type="button"
                       onClick={onPromptReset}
                       disabled={promptSaving}
-                      className="rounded-xl border border-zinc-700/70 bg-zinc-900 px-4 py-2 text-xs font-medium text-zinc-300 transition hover:border-zinc-600 hover:bg-zinc-800 disabled:opacity-50"
+                      className="rounded-xl border border-stone-200 bg-white px-4 py-2 text-xs font-medium text-stone-700 transition hover:border-stone-300 hover:bg-stone-50 disabled:opacity-50 dark:border-zinc-700/70 dark:bg-zinc-900 dark:text-zinc-300 dark:hover:border-zinc-600 dark:hover:bg-zinc-800"
                     >
                       还原
                     </button>
@@ -1311,7 +1530,7 @@ export default function TaskDetailDrawer({
           title="工作目录"
           description="题卡本地目录和模型执行副本会集中展示在这里。"
         >
-          <div className="rounded-2xl border border-zinc-800/70 bg-zinc-950/60 px-4 py-3 font-mono text-xs leading-6 text-zinc-300">
+          <div className="rounded-2xl border border-stone-200 bg-stone-100 px-4 py-3 font-mono text-xs leading-6 text-stone-800 dark:border-zinc-800/70 dark:bg-zinc-950/60 dark:text-zinc-300">
             {selectedTaskDetail?.localPath || '当前题卡未记录本地目录'}
           </div>
         </SectionBlock>
@@ -1322,7 +1541,7 @@ export default function TaskDetailDrawer({
           description="模型记录包含源码模型和执行副本；执行副本才会计入看板上的执行进度。"
         >
           {safeSelectedModelRuns.length === 0 ? (
-            <div className="rounded-2xl border border-dashed border-zinc-800 bg-zinc-900/20 px-4 py-10 text-center text-sm text-zinc-500">
+            <div className="rounded-2xl border border-dashed border-stone-300 bg-stone-50 px-4 py-10 text-center text-sm text-stone-500 dark:border-zinc-800 dark:bg-zinc-900/20 dark:text-zinc-500">
               当前任务还没有模型记录。先到项目配置里的“模型列表”添加源码模型和执行副本。
             </div>
           ) : (
@@ -1460,266 +1679,522 @@ export default function TaskDetailDrawer({
     </div>
   );
 
-  const renderAiReviewWorkspace = () => (
-    <div className="h-full overflow-y-auto px-4 py-5 sm:px-6 lg:px-8">
-      <div className="mx-auto max-w-5xl space-y-6 pb-6">
-        <div className="grid gap-3 md:grid-cols-5">
-          <InfoTile label="已跟踪目录">{String(aiReviewStatusEntries.length)}</InfoTile>
-          <InfoTile label="复审通过">{String(aiReviewPassCount)}</InfoTile>
-          <InfoTile label="复审未过">{String(aiReviewWarningCount)}</InfoTile>
-          <InfoTile label="复审中">{String(aiReviewRunningCount)}</InfoTile>
-          <InfoTile label="最近任务">{String(taskAiReviewJobs.length)}</InfoTile>
-        </div>
+  const renderAiReviewWorkspace = () => {
+    const rootTreeNodes = aiReviewTreeNodes.filter((t) => t.depth === 1);
+    const nonRootTreeNodes = aiReviewTreeNodes.filter((t) => t.depth > 1);
+    const topOriginalPrompt =
+      rootTreeNodes.find((t) => t.node.originalPrompt?.trim())?.node.originalPrompt?.trim() ?? null;
+    const getDescendants = (rootId: string) =>
+      nonRootTreeNodes.filter((t) => t.node.rootId === rootId);
 
-        <SectionBlock
-          icon={CheckCircle2}
-          title="当前复审状态"
-          description="这里显示当前任务下各个模型或目录的最新复审状态。直接右键发起的目录复审，结果会同步出现在下方任务记录里。"
+    const renderNodeCard = (
+      treeNode: { node: AiReviewNodeFromDB; depth: number; serial: number },
+      depthOffset: number,
+      displaySerial: number,
+    ) => {
+      const node = treeNode.node;
+      const draft = getAiReviewNodeDraft(node);
+      const reviewMeta =
+        node.status === 'none'
+          ? null
+          : reviewStatusPresentation(node.status, Math.max(node.runCount, 1));
+      const latestJob = latestAiReviewJobByNodeId.get(node.id) ?? null;
+      const latestJobStatus = latestJob ? backgroundJobStatusPresentation(latestJob.job.status) : null;
+      const dirty = hasAiReviewNodeDraftChanges(node, draft);
+      const nodeDetails = extractAiReviewDetailsFromNode(node);
+      const canRun = Boolean(onAiReviewNode) && Boolean(node.localPath) && node.status !== 'running';
+      const isCollapsed = collapsedNodeIds.has(node.id);
+
+      return (
+        <div
+          key={node.id}
+          className="overflow-hidden rounded-xl border border-zinc-800/70 bg-zinc-900/40"
+          style={{ marginLeft: `${Math.max(treeNode.depth - depthOffset, 0) * 20}px` }}
         >
-          {aiReviewStatusEntries.length === 0 ? (
-            <div className="rounded-2xl border border-dashed border-zinc-800 bg-zinc-900/20 px-4 py-10 text-center text-sm text-zinc-500">
-              还没有可展示的复审结果。先在任务卡右键菜单或“执行概况”里发起一次 AI 复审。
-            </div>
-          ) : (
-            <div className="space-y-3">
-              {aiReviewStatusEntries.map((entry) => {
-                const reviewMeta = reviewStatusPresentation(entry.reviewStatus, entry.reviewRound);
-                const latestNotes = entry.reviewNotes;
-                const latestNextPrompt = entry.nextPrompt;
-                const latestJob = entry.latestJob;
-                const details = entry.details;
-                const latestJobStatus = latestJob
-                  ? backgroundJobStatusPresentation(latestJob.job.status)
-                  : null;
-
-                return (
-                  <div
-                    key={entry.key}
-                    className="rounded-2xl border border-zinc-800/70 bg-zinc-900/35 px-4 py-4"
+          {/* 节点头部 */}
+          <div className="flex items-start gap-2.5 px-3 py-2.5">
+            <button
+              type="button"
+              className="mt-0.5 shrink-0 text-zinc-600 transition hover:text-zinc-300"
+              onClick={() =>
+                setCollapsedNodeIds((prev) => {
+                  const next = new Set(prev);
+                  if (next.has(node.id)) next.delete(node.id);
+                  else next.add(node.id);
+                  return next;
+                })
+              }
+              aria-label={isCollapsed ? '展开' : '收起'}
+            >
+              {isCollapsed ? (
+                <ChevronRight className="h-3.5 w-3.5" />
+              ) : (
+                <ChevronDown className="h-3.5 w-3.5" />
+              )}
+            </button>
+            <div className="min-w-0 flex-1">
+              <div className="flex flex-wrap items-center gap-1.5">
+                <span className="shrink-0 rounded-md bg-violet-500/15 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-violet-300">
+                  #{displaySerial}
+                </span>
+                <span className="text-[10px] text-zinc-500">{draft.issueType || 'Bug修复'}</span>
+                {reviewMeta ? (
+                  <span
+                    className={clsx(
+                      'inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold',
+                      reviewMeta.badgeCls,
+                    )}
                   >
-                    <div className="min-w-0">
-                      <div>
+                    {reviewMeta.icon}
+                    {reviewMeta.label}
+                  </span>
+                ) : (
+                  <WorkspaceBadge tone="neutral">未复审</WorkspaceBadge>
+                )}
+                {node.runCount > 0 && (
+                  <WorkspaceBadge tone="blue">第 {node.runCount} 轮</WorkspaceBadge>
+                )}
+                {node.modelRunId === null && (
+                  <WorkspaceBadge tone="warning">未关联模型</WorkspaceBadge>
+                )}
+                {dirty && <WorkspaceBadge tone="warning">待保存</WorkspaceBadge>}
+                {latestJobStatus && (
+                  <WorkspaceBadge tone={latestJobStatus.tone}>
+                    任务{latestJobStatus.label}
+                  </WorkspaceBadge>
+                )}
+              </div>
+              <input
+                value={draft.title}
+                onChange={(event) =>
+                  handleAiReviewNodeDraftChange(node.id, { title: event.target.value })
+                }
+                className="mt-1.5 w-full rounded-lg border border-zinc-800/60 bg-black/20 px-2.5 py-1.5 text-sm font-medium text-zinc-100 outline-none transition focus:border-indigo-500/60 focus:ring-1 focus:ring-indigo-500/40"
+                placeholder="问题标题"
+              />
+            </div>
+            <div className="flex shrink-0 items-center gap-1.5">
+              {onSaveAiReviewNode && (
+                <button
+                  type="button"
+                  disabled={!dirty || savingAiReviewNodeId === node.id}
+                  onClick={() => void handleSaveAiReviewNodeDraft(node)}
+                  className="inline-flex items-center justify-center gap-1 rounded-lg border border-zinc-700/70 bg-zinc-900 px-2.5 py-1.5 text-xs font-medium text-zinc-300 transition hover:border-zinc-600 hover:bg-zinc-800 disabled:opacity-40"
+                >
+                  {savingAiReviewNodeId === node.id ? (
+                    <RefreshCw className="h-3 w-3 animate-spin" />
+                  ) : (
+                    <Check className="h-3 w-3" />
+                  )}
+                  保存
+                </button>
+              )}
+              {canRun && (
+                <button
+                  type="button"
+                  disabled={runningAiReviewNodeId === node.id}
+                  onClick={() => void handleRunAiReviewNode(node)}
+                  className="inline-flex items-center justify-center gap-1 rounded-lg border border-violet-500/25 bg-violet-500/10 px-2.5 py-1.5 text-xs font-medium text-violet-300 transition hover:bg-violet-500/15 disabled:opacity-40"
+                >
+                  {runningAiReviewNodeId === node.id ? (
+                    <RefreshCw className="h-3 w-3 animate-spin" />
+                  ) : (
+                    <CheckCircle2 className="h-3 w-3" />
+                  )}
+                  复核
+                </button>
+              )}
+            </div>
+          </div>
+
+          {/* 可折叠主体 */}
+          {!isCollapsed && (
+            <div className="space-y-2.5 border-t border-zinc-800/40 px-3 py-3">
+              {/* 元信息 */}
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[11px] text-zinc-500">
+                <span className="break-all">{node.localPath || '未记录目录'}</span>
+                {latestJob && (
+                  <span>
+                    复核于{' '}
+                    {formatAiReviewTimestamp(
+                      latestJob.job.finishedAt ??
+                        latestJob.job.startedAt ??
+                        latestJob.job.createdAt,
+                    )}
+                  </span>
+                )}
+              </div>
+
+              {/* 问题类型（内联，不单独成卡） */}
+              <div className="flex items-center gap-2">
+                <span className="shrink-0 text-[10px] font-medium text-zinc-500">问题类型</span>
+                <input
+                  value={draft.issueType}
+                  onChange={(event) =>
+                    handleAiReviewNodeDraftChange(node.id, { issueType: event.target.value })
+                  }
+                  className="min-w-0 flex-1 rounded-lg border border-zinc-800/60 bg-black/20 px-2.5 py-1 text-xs text-zinc-300 outline-none transition focus:border-indigo-500/60 focus:ring-1 focus:ring-indigo-500/40"
+                  placeholder="Bug修复"
+                />
+              </div>
+
+              {/* 决策标签 + 关键代码位置 */}
+              {nodeDetails && (nodeDetails.isCompleted !== null || nodeDetails.isSatisfied !== null || nodeDetails.projectType || nodeDetails.changeScope) && (
+                <div className="flex flex-wrap gap-1.5">
+                  <AiReviewDecisionBadge label="是否完成" value={nodeDetails.isCompleted} />
+                  <AiReviewDecisionBadge label="是否满意" value={nodeDetails.isSatisfied} />
+                  {nodeDetails.projectType && (
+                    <WorkspaceBadge tone="blue">{nodeDetails.projectType}</WorkspaceBadge>
+                  )}
+                  {nodeDetails.changeScope && (
+                    <WorkspaceBadge tone="neutral">{nodeDetails.changeScope}</WorkspaceBadge>
+                  )}
+                </div>
+              )}
+              {nodeDetails?.keyLocations && (
+                <div className="rounded-xl border border-zinc-800/60 bg-black/15 px-3 py-2">
+                  <p className="text-[10px] font-medium text-zinc-500">关键代码位置</p>
+                  <p className="mt-0.5 break-all font-mono text-[11px] leading-5 text-zinc-400">
+                    {nodeDetails.keyLocations}
+                  </p>
+                </div>
+              )}
+
+              {/* 当前节点提示词 - 双击编辑 */}
+              <div
+                className="cursor-text rounded-xl border border-indigo-500/20 bg-indigo-500/8 px-3 py-2.5"
+                onDoubleClick={() => {
+                  if (editingNodePrompt !== node.id) setEditingNodePrompt(node.id);
+                }}
+                title={editingNodePrompt === node.id ? undefined : '双击编辑提示词'}
+              >
+                <div className="flex items-start justify-between gap-2">
+                  <div className="min-w-0 flex-1">
+                    <p className="text-[10px] font-medium text-indigo-400/70">推荐提示词</p>
+                    {editingNodePrompt === node.id ? (
+                      <textarea
+                        autoFocus
+                        value={draft.promptText}
+                        onChange={(e) =>
+                          handleAiReviewNodeDraftChange(node.id, { promptText: e.target.value })
+                        }
+                        onBlur={() => setEditingNodePrompt(null)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Escape') setEditingNodePrompt(null);
+                        }}
+                        rows={4}
+                        placeholder="填写该节点下一次复核要带上的提示词"
+                        className="mt-1.5 w-full resize-y rounded-lg border border-indigo-500/40 bg-black/30 px-2 py-1.5 text-xs leading-6 text-indigo-100 outline-none focus:ring-1 focus:ring-indigo-500/40"
+                      />
+                    ) : (
+                      <div className="mt-1 whitespace-pre-wrap text-xs leading-5 text-indigo-100/90">
+                        {draft.promptText || (
+                          <span className="text-indigo-300/30">双击添加提示词…</span>
+                        )}
+                      </div>
+                    )}
+                    {node.nextPrompt && node.nextPrompt !== draft.promptText && (
+                      <div className="mt-2 border-t border-indigo-500/15 pt-1.5">
+                        <div className="flex items-center justify-between gap-1">
+                          <p className="text-[9px] font-medium text-indigo-400/40">AI 建议</p>
+                          <ActionIconButton
+                            label="应用 AI 建议"
+                            onClick={() => handleAiReviewNodeDraftChange(node.id, { promptText: node.nextPrompt, polishedPromptText: '' })}
+                          >
+                            <Check className="h-3 w-3" />
+                          </ActionIconButton>
+                        </div>
+                        <p className="mt-0.5 text-[11px] leading-5 text-indigo-200/50">
+                          {node.nextPrompt}
+                        </p>
+                      </div>
+                    )}
+                    {draft.polishedPromptText && draft.polishedPromptText !== draft.promptText && (
+                      <div className="mt-2 border-t border-indigo-500/15 pt-1.5">
+                        <div className="flex items-center justify-between gap-1">
+                          <p className="text-[9px] font-medium text-indigo-400/40">润色建议</p>
+                          <ActionIconButton
+                            label="应用润色建议"
+                            onClick={() => handleAiReviewNodeDraftChange(node.id, { promptText: draft.polishedPromptText, polishedPromptText: '' })}
+                          >
+                            <Check className="h-3 w-3" />
+                          </ActionIconButton>
+                        </div>
+                        <p className="mt-0.5 text-[11px] leading-5 text-indigo-200/50">
+                          {draft.polishedPromptText}
+                        </p>
+                      </div>
+                    )}
+                  </div>
+                  {draft.promptText && editingNodePrompt !== node.id && (
+                    <div className="flex items-center gap-1">
+                      <ActionIconButton
+                        label={
+                          polishingField?.nodeId === node.id && polishingField.field === 'promptText'
+                            ? '润色中…'
+                            : '润色提示词'
+                        }
+                        disabled={!!polishingField}
+                        onClick={() => {
+                          void handlePolishText(node.id, 'promptText', draft.promptText, node.localPath);
+                        }}
+                      >
+                        {polishingField?.nodeId === node.id && polishingField.field === 'promptText' ? (
+                          <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                        ) : (
+                          <Wand2 className="h-3.5 w-3.5" />
+                        )}
+                      </ActionIconButton>
+                      <ActionIconButton
+                        label={
+                          copiedNodeField?.id === node.id && copiedNodeField.field === 'prompt'
+                            ? '已复制'
+                            : '复制提示词'
+                        }
+                        onClick={() => {
+                          void navigator.clipboard.writeText(draft.promptText).then(() => {
+                            setCopiedNodeField({ id: node.id, field: 'prompt' });
+                            setTimeout(() => setCopiedNodeField(null), 2000);
+                          });
+                        }}
+                      >
+                        {copiedNodeField?.id === node.id && copiedNodeField.field === 'prompt' ? (
+                          <Check className="h-3.5 w-3.5" />
+                        ) : (
+                          <Copy className="h-3.5 w-3.5" />
+                        )}
+                      </ActionIconButton>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* 不满意结论 - 双击编辑 */}
+              <div
+                className="cursor-text rounded-xl border border-amber-500/20 bg-amber-500/8 px-3 py-2.5"
+                onDoubleClick={() => {
+                  if (editingNodeNotes !== node.id) setEditingNodeNotes(node.id);
+                }}
+                title={editingNodeNotes === node.id ? undefined : '双击编辑不满意结论'}
+              >
+                <div className="flex items-start justify-between gap-2">
+                  <div className="min-w-0 flex-1">
+                    <p className="text-[10px] font-medium text-amber-400/70">不满意结论</p>
+                    {editingNodeNotes === node.id ? (
+                      <textarea
+                        autoFocus
+                        value={draft.reviewNotes}
+                        onChange={(e) =>
+                          handleAiReviewNodeDraftChange(node.id, { reviewNotes: e.target.value })
+                        }
+                        onBlur={() => setEditingNodeNotes(null)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Escape') setEditingNodeNotes(null);
+                        }}
+                        rows={3}
+                        placeholder="填写当前节点的不满意结论，子复核会带上父节点结论"
+                        className="mt-1.5 w-full resize-y rounded-lg border border-amber-500/40 bg-black/30 px-2 py-1.5 text-xs leading-6 text-amber-100 outline-none focus:ring-1 focus:ring-amber-500/20"
+                      />
+                    ) : (
+                      <div className="mt-1 whitespace-pre-wrap text-xs leading-5 text-amber-100/90">
+                        {draft.reviewNotes || (
+                          <span className="text-amber-300/30">双击添加不满意结论…</span>
+                        )}
+                      </div>
+                    )}
+                    {draft.polishedReviewNotes && draft.polishedReviewNotes !== draft.reviewNotes && (
+                      <div className="mt-2 border-t border-amber-500/15 pt-1.5">
+                        <div className="flex items-center justify-between gap-1">
+                          <p className="text-[9px] font-medium text-amber-400/40">润色建议</p>
+                          <ActionIconButton
+                            label="应用润色建议"
+                            onClick={() => handleAiReviewNodeDraftChange(node.id, { reviewNotes: draft.polishedReviewNotes, polishedReviewNotes: '' })}
+                          >
+                            <Check className="h-3 w-3" />
+                          </ActionIconButton>
+                        </div>
+                        <p className="mt-0.5 text-[11px] leading-5 text-amber-200/50">
+                          {draft.polishedReviewNotes}
+                        </p>
+                      </div>
+                    )}
+                  </div>
+                  {draft.reviewNotes && editingNodeNotes !== node.id && (
+                    <div className="flex items-center gap-1">
+                      <ActionIconButton
+                        label={
+                          polishingField?.nodeId === node.id && polishingField.field === 'reviewNotes'
+                            ? '润色中…'
+                            : '润色结论'
+                        }
+                        disabled={!!polishingField}
+                        onClick={() => {
+                          void handlePolishText(node.id, 'reviewNotes', draft.reviewNotes, node.localPath);
+                        }}
+                      >
+                        {polishingField?.nodeId === node.id && polishingField.field === 'reviewNotes' ? (
+                          <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                        ) : (
+                          <Wand2 className="h-3.5 w-3.5" />
+                        )}
+                      </ActionIconButton>
+                      <ActionIconButton
+                        label={
+                          copiedNodeField?.id === node.id && copiedNodeField.field === 'notes'
+                            ? '已复制'
+                            : '复制结论'
+                        }
+                        onClick={() => {
+                          void navigator.clipboard.writeText(draft.reviewNotes).then(() => {
+                            setCopiedNodeField({ id: node.id, field: 'notes' });
+                            setTimeout(() => setCopiedNodeField(null), 2000);
+                          });
+                        }}
+                      >
+                        {copiedNodeField?.id === node.id && copiedNodeField.field === 'notes' ? (
+                          <Check className="h-3.5 w-3.5" />
+                        ) : (
+                          <Copy className="h-3.5 w-3.5" />
+                        )}
+                      </ActionIconButton>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    };
+
+    return (
+      <div className="h-full overflow-y-auto px-4 py-5 sm:px-6 lg:px-8">
+        <div className="mx-auto max-w-5xl space-y-6 pb-6">
+          {/* 统计概况 */}
+          <div className="grid gap-3 md:grid-cols-4">
+            <InfoTile label="问题节点">
+              {String(nonRootTreeNodes.length > 0 ? nonRootTreeNodes.length : safeSelectedAiReviewNodes.length)}
+            </InfoTile>
+            <InfoTile label="复审通过">{String(aiReviewPassCount)}</InfoTile>
+            <InfoTile label="复审未过">{String(aiReviewWarningCount)}</InfoTile>
+            <InfoTile label="复审中">{String(aiReviewRunningCount)}</InfoTile>
+          </div>
+
+          {/* 原始任务提示词 - 顶层展示 */}
+          {topOriginalPrompt && (
+            <SectionBlock icon={Terminal} title="原始任务提示词" description="首轮审核所用的完整任务提示词。">
+              <AiReviewTextCard
+                title=""
+                value={topOriginalPrompt}
+                copyLabel="复制原始任务提示词"
+                tone="indigo"
+              />
+            </SectionBlock>
+          )}
+
+          {/* 复核树 */}
+          <SectionBlock
+            icon={CheckCircle2}
+            title="复核树"
+            description="首轮审核是组织者：发现多个问题时自动拆分为子节点，每个子节点可独立进行多轮复核。"
+          >
+            {aiReviewNodeError && (
+              <p className="mb-3 rounded-2xl border border-red-500/20 bg-red-500/10 px-3 py-2 text-sm text-red-200">
+                {aiReviewNodeError}
+              </p>
+            )}
+            {rootTreeNodes.length === 0 ? (
+              <div className="rounded-2xl border border-dashed border-stone-300 bg-stone-50 px-4 py-10 text-center text-sm text-stone-500 dark:border-zinc-800 dark:bg-zinc-900/20 dark:text-zinc-500">
+                还没有复核树。先在「执行概况」里发起一次首轮 AI 复核。
+              </div>
+            ) : (
+              <div className="space-y-5">
+                {rootTreeNodes.map((rootTreeNode) => {
+                  const rootNode = rootTreeNode.node;
+                  const rootReviewMeta =
+                    rootNode.status === 'none'
+                      ? null
+                      : reviewStatusPresentation(rootNode.status, Math.max(rootNode.runCount, 1));
+                  const rootLatestJob = latestAiReviewJobByNodeId.get(rootNode.id) ?? null;
+                  const descendants = getDescendants(rootNode.id);
+
+                  return (
+                    <div key={rootNode.id} className="space-y-2">
+                      {/* 首轮审核 organizer */}
+                      <div className="rounded-2xl border border-zinc-700/50 bg-zinc-900/60 px-4 py-3">
                         <div className="flex flex-wrap items-center gap-2">
-                          <span className="font-mono text-sm text-zinc-100">{entry.displayName}</span>
-                          {entry.reviewStatus === 'none' ? (
-                            <WorkspaceBadge tone="neutral">未复审</WorkspaceBadge>
-                          ) : (
-                            <>
-                              {entry.reviewRound > 0 && (
-                                <WorkspaceBadge tone="blue">第 {entry.reviewRound} 轮</WorkspaceBadge>
+                          <span className="text-xs font-semibold text-zinc-300">首轮审核</span>
+                          {rootReviewMeta ? (
+                            <span
+                              className={clsx(
+                                'inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold',
+                                rootReviewMeta.badgeCls,
                               )}
-                              <span
-                                className={clsx('inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold', reviewMeta.badgeCls)}
-                                title={entry.reviewNotes ?? undefined}
-                              >
-                                {reviewMeta.icon}
-                                {reviewMeta.label}
-                              </span>
-                            </>
+                            >
+                              {rootReviewMeta.icon}
+                              {rootReviewMeta.label}
+                            </span>
+                          ) : (
+                            <WorkspaceBadge tone="neutral">未复审</WorkspaceBadge>
                           )}
-                          {entry.isUnlinked && (
+                          {rootNode.runCount > 0 && (
+                            <WorkspaceBadge tone="blue">已执行 {rootNode.runCount} 次</WorkspaceBadge>
+                          )}
+                          {rootNode.modelRunId === null && (
                             <WorkspaceBadge tone="warning">未关联模型</WorkspaceBadge>
                           )}
-                          {latestJobStatus && (
-                            <WorkspaceBadge tone={latestJobStatus.tone}>
-                              任务{latestJobStatus.label}
-                            </WorkspaceBadge>
-                          )}
                         </div>
-                        <div className="mt-3 space-y-1.5 text-xs text-zinc-400">
-                          <p className="break-all">{entry.localPath || '未记录目录'}</p>
-                          {latestJob && (
-                            <p>
-                              最近复审：{formatAiReviewTimestamp(latestJob.job.finishedAt ?? latestJob.job.startedAt ?? latestJob.job.createdAt)}
-                            </p>
-                          )}
-                        </div>
-                        {details && (
-                          <div className="mt-3 flex flex-wrap gap-2">
-                            <AiReviewDecisionBadge label="是否完成" value={details.isCompleted} />
-                            <AiReviewDecisionBadge label="是否满意" value={details.isSatisfied} />
-                            {details.projectType && (
-                              <WorkspaceBadge tone="blue">{details.projectType}</WorkspaceBadge>
+                        <p className="mt-1 break-all text-xs text-zinc-500">
+                          {rootNode.localPath || '未记录目录'}
+                        </p>
+                        {rootLatestJob && (
+                          <p className="mt-0.5 text-xs text-zinc-600">
+                            最近复核：
+                            {formatAiReviewTimestamp(
+                              rootLatestJob.job.finishedAt ??
+                                rootLatestJob.job.startedAt ??
+                                rootLatestJob.job.createdAt,
                             )}
-                            {details.changeScope && (
-                              <WorkspaceBadge tone="neutral">{details.changeScope}</WorkspaceBadge>
-                            )}
-                          </div>
+                          </p>
                         )}
-                        {details?.keyLocations && (
-                          <div className="mt-3 rounded-2xl border border-zinc-800/70 bg-black/20 px-3 py-2.5">
-                            <p className="text-[10px] font-semibold uppercase tracking-[0.22em] text-zinc-500">
-                              关键代码位置
+                        {rootNode.reviewNotes?.trim() && (
+                          <div className="mt-3 border-t border-zinc-700/40 pt-3">
+                            <p className="text-[10px] font-semibold uppercase tracking-[0.22em] text-amber-300">
+                              首轮发现问题
                             </p>
-                            <p className="mt-2 break-all font-mono text-xs leading-6 text-zinc-300">
-                              {details.keyLocations}
+                            <p className="mt-1.5 whitespace-pre-wrap text-xs leading-6 text-amber-100/80">
+                              {rootNode.reviewNotes}
                             </p>
                           </div>
                         )}
                       </div>
-                      {(latestNotes || latestNextPrompt) && (
-                        <div className="mt-3 grid gap-3 lg:grid-cols-2">
-                          {latestNotes && (
-                            <AiReviewTextCard
-                              title="不满意点评"
-                              value={latestNotes}
-                              copyLabel={`复制 ${entry.displayName} 不满意点评`}
-                              tone="warning"
-                            />
-                          )}
-                          {latestNextPrompt && (
-                            <AiReviewTextCard
-                              title="下一轮提示词"
-                              value={latestNextPrompt}
-                              copyLabel={`复制 ${entry.displayName} 下一轮提示词`}
-                              tone="indigo"
-                            />
-                          )}
+
+                      {/* 子问题列表 */}
+                      {descendants.length === 0 ? (
+                        rootNode.status === 'none' || rootNode.status === 'running' ? (
+                          <div className="rounded-2xl border border-dashed border-zinc-800 px-4 py-6 text-center text-sm text-zinc-500">
+                            首轮复核完成后，发现的问题会在这里自动展开。
+                          </div>
+                        ) : (
+                          <div className="rounded-2xl border border-dashed border-emerald-800/40 bg-emerald-900/10 px-4 py-6 text-center text-sm text-emerald-400">
+                            首轮审核通过，未发现需修复的子问题。
+                          </div>
+                        )
+                      ) : (
+                        <div className="space-y-2 pl-2">
+                          {descendants.map((treeNode, idx) => renderNodeCard(treeNode, 2, idx + 1))}
                         </div>
                       )}
                     </div>
-                  </div>
-                );
-              })}
-            </div>
-          )}
-        </SectionBlock>
-
-        <SectionBlock
-          icon={FileText}
-          title="最近复审记录"
-          description="保留每次 ai_review 的后台任务结果，包括未关联模型的子目录复审。"
-          badge={<WorkspaceBadge tone="neutral">最近 {taskAiReviewJobs.length} 条</WorkspaceBadge>}
-        >
-          {deleteAiReviewError && (
-            <p className="mb-3 rounded-2xl border border-red-500/20 bg-red-500/10 px-3 py-2 text-sm text-red-200">
-              {deleteAiReviewError}
-            </p>
-          )}
-          {taskAiReviewJobs.length === 0 ? (
-            <div className="rounded-2xl border border-dashed border-zinc-800 bg-zinc-900/20 px-4 py-10 text-center text-sm text-zinc-500">
-              当前任务还没有 AI 复审记录。
-            </div>
-          ) : (
-            <div className="space-y-3">
-              {taskAiReviewJobs.map((entry) => {
-                const taskStatus = backgroundJobStatusPresentation(entry.job.status);
-                const reviewMeta = entry.output
-                  ? reviewStatusPresentation(entry.output.reviewStatus, entry.output.reviewRound)
-                  : null;
-                const reviewNotes = meaningfulAiReviewText(entry.output?.reviewNotes);
-                const nextPrompt = meaningfulAiReviewText(entry.output?.nextPrompt);
-                const progressMessage = trimToNull(entry.job.progressMessage);
-                const errorMessage = trimToNull(entry.job.errorMessage);
-                const details = entry.details;
-
-                return (
-                  <div
-                    key={entry.job.id}
-                    className="rounded-2xl border border-zinc-800/70 bg-zinc-950/60 px-4 py-4"
-                  >
-                    <div className="min-w-0">
-                      <div>
-                        <div className="flex items-start justify-between gap-3">
-                          <div className="flex flex-wrap items-center gap-2">
-                            <span className="font-mono text-sm text-zinc-100">{entry.displayName}</span>
-                            {entry.output?.reviewRound ? (
-                              <WorkspaceBadge tone="blue">第 {entry.output.reviewRound} 轮</WorkspaceBadge>
-                            ) : null}
-                            <WorkspaceBadge tone={taskStatus.tone}>{taskStatus.label}</WorkspaceBadge>
-                            {reviewMeta && (
-                              <span className={clsx('inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold', reviewMeta.badgeCls)}>
-                                {reviewMeta.icon}
-                                {reviewMeta.label}
-                              </span>
-                            )}
-                            {!entry.modelRunId && (
-                              <WorkspaceBadge tone="warning">未关联模型</WorkspaceBadge>
-                            )}
-                          </div>
-                          {onDeleteAiReviewRecord &&
-                            entry.job.status !== 'pending' &&
-                            entry.job.status !== 'running' && (
-                              <ActionIconButton
-                                label={`删除 ${entry.displayName} 复审记录`}
-                                danger
-                                disabled={deletingAiReviewJobId === entry.job.id}
-                                onClick={() => {
-                                  void handleDeleteAiReviewRecord(entry);
-                                }}
-                              >
-                                {deletingAiReviewJobId === entry.job.id ? (
-                                  <RefreshCw className="h-4 w-4 animate-spin" />
-                                ) : (
-                                  <Trash2 className="h-4 w-4" />
-                                )}
-                              </ActionIconButton>
-                            )}
-                        </div>
-                        <div className="mt-3 space-y-1.5 text-xs text-zinc-400">
-                          <p className="break-all">{entry.localPath || '未记录目录'}</p>
-                          <p>提交时间：{formatAiReviewTimestamp(entry.job.createdAt)}</p>
-                          <p>完成时间：{formatAiReviewTimestamp(entry.job.finishedAt)}</p>
-                        </div>
-                        {details && (
-                          <div className="mt-3 flex flex-wrap gap-2">
-                            <AiReviewDecisionBadge label="是否完成" value={details.isCompleted} />
-                            <AiReviewDecisionBadge label="是否满意" value={details.isSatisfied} />
-                            {details.projectType && (
-                              <WorkspaceBadge tone="blue">{details.projectType}</WorkspaceBadge>
-                            )}
-                            {details.changeScope && (
-                              <WorkspaceBadge tone="neutral">{details.changeScope}</WorkspaceBadge>
-                            )}
-                          </div>
-                        )}
-                        {progressMessage && entry.job.status !== 'done' && entry.job.status !== 'error' && (
-                          <p className="mt-3 text-sm leading-6 text-zinc-300">{progressMessage}</p>
-                        )}
-                        {details?.keyLocations && (
-                          <div className="mt-3 rounded-2xl border border-zinc-800/70 bg-black/20 px-3 py-2.5">
-                            <p className="text-[10px] font-semibold uppercase tracking-[0.22em] text-zinc-500">
-                              关键代码位置
-                            </p>
-                            <p className="mt-2 break-all font-mono text-xs leading-6 text-zinc-300">
-                              {details.keyLocations}
-                            </p>
-                          </div>
-                        )}
-                        {errorMessage && (
-                          <p className="mt-3 text-sm leading-6 text-red-300">{errorMessage}</p>
-                        )}
-                      </div>
-                      {(reviewNotes || nextPrompt) && (
-                        <div className="mt-3 grid gap-3 lg:grid-cols-2">
-                          {reviewNotes && (
-                            <AiReviewTextCard
-                              title="不满意点评"
-                              value={reviewNotes}
-                              copyLabel={`复制 ${entry.displayName} 不满意点评`}
-                              tone="warning"
-                            />
-                          )}
-                          {nextPrompt && (
-                            <AiReviewTextCard
-                              title="下一轮提示词"
-                              value={nextPrompt}
-                              copyLabel={`复制 ${entry.displayName} 下一轮提示词`}
-                              tone="indigo"
-                            />
-                          )}
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          )}
-        </SectionBlock>
+                  );
+                })}
+              </div>
+            )}
+          </SectionBlock>
+        </div>
       </div>
-    </div>
-  );
+    );
+  };
 
   return (
     <>
@@ -1727,7 +2202,7 @@ export default function TaskDetailDrawer({
         initial={{ opacity: 0 }}
         animate={{ opacity: 1 }}
         exit={{ opacity: 0 }}
-        className="fixed inset-0 z-20 bg-[radial-gradient(circle_at_top,rgba(99,102,241,0.16),transparent_28%),rgba(0,0,0,0.78)] backdrop-blur-xl"
+        className="fixed inset-0 z-20 bg-[radial-gradient(circle_at_top,rgba(99,102,241,0.16),transparent_28%),rgba(0,0,0,0.3)] backdrop-blur-xl dark:bg-[radial-gradient(circle_at_top,rgba(99,102,241,0.16),transparent_28%),rgba(0,0,0,0.78)]"
       />
       <motion.div
         initial={{ opacity: 0, y: 18, scale: 0.985 }}
@@ -1739,9 +2214,9 @@ export default function TaskDetailDrawer({
       >
         <div
           onClick={(event) => event.stopPropagation()}
-          className="flex h-full max-h-[960px] w-full max-w-[1420px] flex-col overflow-hidden rounded-[28px] border border-zinc-800/80 bg-[#0a0a0c]/95 shadow-[0_30px_120px_rgba(0,0,0,0.55)] ring-1 ring-white/5"
+          className="flex h-full max-h-[960px] w-full max-w-[1420px] flex-col overflow-hidden rounded-[28px] border border-stone-200 bg-white shadow-[0_30px_120px_rgba(0,0,0,0.15)] ring-1 ring-black/5 dark:border-zinc-800/80 dark:bg-[#0a0a0c]/95 dark:shadow-[0_30px_120px_rgba(0,0,0,0.55)] dark:ring-white/5"
         >
-          <header className="border-b border-zinc-800/70 bg-[#0b0b0e] px-4 py-4 sm:px-5 lg:px-6">
+          <header className="border-b border-stone-200 bg-white px-4 py-4 sm:px-5 lg:px-6 dark:border-zinc-800/70 dark:bg-[#0b0b0e]">
             <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
               <div className="min-w-0">
                 <div className="flex flex-wrap items-center gap-2">
@@ -1766,8 +2241,8 @@ export default function TaskDetailDrawer({
                     提示词 {selectedPromptGenerationMeta.label}
                   </span>
                 </div>
-                <h2 className="mt-3 truncate text-xl font-semibold tracking-tight text-white">{selected.projectName}</h2>
-                <div className="mt-1 flex flex-wrap items-center gap-3 text-[11px] text-zinc-500">
+                <h2 className="mt-3 truncate text-xl font-semibold tracking-tight text-stone-900 dark:text-white">{selected.projectName}</h2>
+                <div className="mt-1 flex flex-wrap items-center gap-3 text-[11px] text-stone-500 dark:text-zinc-500">
                   <span className="inline-flex items-center gap-1 font-mono">
                     <Hash className="h-3.5 w-3.5" />
                     #{selected.projectId}
@@ -1778,7 +2253,7 @@ export default function TaskDetailDrawer({
               </div>
 
               <div className="flex flex-wrap items-center gap-3">
-                <div className="inline-flex rounded-xl border border-zinc-800 bg-zinc-900/80 p-1">
+                <div className="inline-flex rounded-xl border border-stone-200 bg-stone-100/80 p-1 dark:border-zinc-800 dark:bg-zinc-900/80">
                   {availableTabItems.map((tab) => {
                     const Icon = tab.icon;
                     const active = effectiveActiveDrawerTab === tab.id;
@@ -1789,7 +2264,7 @@ export default function TaskDetailDrawer({
                         onClick={() => handleTabSwitch(tab.id)}
                         className={clsx(
                           'inline-flex items-center gap-1.5 rounded-lg px-3 py-2 text-xs font-medium transition',
-                          active ? 'bg-zinc-800 text-white shadow-sm' : 'text-zinc-400 hover:text-zinc-200',
+                          active ? 'bg-white text-stone-900 shadow-sm dark:bg-zinc-800 dark:text-white' : 'text-stone-500 hover:text-stone-700 dark:text-zinc-400 dark:hover:text-zinc-200',
                         )}
                       >
                         <Icon className="h-3.5 w-3.5" />
@@ -1825,7 +2300,7 @@ export default function TaskDetailDrawer({
             </div>
           )}
 
-          <div className="min-h-0 flex-1 overflow-hidden bg-[#09090b]">
+          <div className="min-h-0 flex-1 overflow-hidden bg-stone-50 dark:bg-[#09090b]">
             {drawerLoading ? (
               <div className="flex h-full items-center justify-center text-sm text-zinc-500">正在加载任务详情…</div>
             ) : (
@@ -1838,7 +2313,7 @@ export default function TaskDetailDrawer({
             )}
           </div>
 
-          <footer className="border-t border-zinc-800/70 bg-[#0b0b0e] px-4 py-4 sm:px-5 lg:px-6">
+          <footer className="border-t border-stone-200 bg-white px-4 py-4 sm:px-5 lg:px-6 dark:border-zinc-800/70 dark:bg-[#0b0b0e]">
             <div className="flex flex-col gap-2 sm:flex-row sm:justify-end">
               <button
                 type="button"
@@ -1878,8 +2353,8 @@ function ActionIconButton({
       className={clsx(
         'inline-flex h-9 w-9 items-center justify-center rounded-xl border transition',
         danger
-          ? 'border-red-500/20 bg-red-500/10 text-red-300 hover:bg-red-500/15'
-          : 'border-zinc-700/70 bg-zinc-900 text-zinc-300 hover:border-zinc-600 hover:bg-zinc-800 hover:text-white',
+          ? 'border-red-500/20 bg-red-500/10 text-red-600 hover:bg-red-500/15 dark:text-red-300'
+          : 'border-stone-200 bg-white text-stone-500 hover:border-stone-300 hover:bg-stone-50 hover:text-stone-700 dark:border-zinc-700/70 dark:bg-zinc-900 dark:text-zinc-300 dark:hover:border-zinc-600 dark:hover:bg-zinc-800 dark:hover:text-white',
         disabled && 'cursor-not-allowed opacity-50 hover:border-red-500/20 hover:bg-red-500/10 hover:text-red-300',
       )}
     >
@@ -1949,12 +2424,12 @@ function WorkspaceBadge({
   className?: string;
 }) {
   const tones: Record<string, string> = {
-    neutral: 'border-zinc-700/70 bg-zinc-900 text-zinc-300',
-    success: 'border-emerald-500/20 bg-emerald-500/10 text-emerald-200',
-    warning: 'border-amber-500/20 bg-amber-500/10 text-amber-200',
-    danger: 'border-red-500/20 bg-red-500/10 text-red-200',
-    purple: 'border-indigo-500/20 bg-indigo-500/10 text-indigo-200',
-    blue: 'border-sky-500/20 bg-sky-500/10 text-sky-200',
+    neutral: 'border-stone-200 bg-stone-100 text-stone-600 dark:border-zinc-700/70 dark:bg-zinc-900 dark:text-zinc-300',
+    success: 'border-emerald-500/20 bg-emerald-500/10 text-emerald-700 dark:text-emerald-200',
+    warning: 'border-amber-500/20 bg-amber-500/10 text-amber-700 dark:text-amber-200',
+    danger: 'border-red-500/20 bg-red-500/10 text-red-700 dark:text-red-200',
+    purple: 'border-indigo-500/20 bg-indigo-500/10 text-indigo-700 dark:text-indigo-200',
+    blue: 'border-sky-500/20 bg-sky-500/10 text-sky-700 dark:text-sky-200',
   };
 
   return (
@@ -1978,14 +2453,14 @@ function SectionBlock({
   children: React.ReactNode;
 }) {
   return (
-    <section className="space-y-3 rounded-[24px] border border-zinc-800/70 bg-zinc-900/35 p-4 sm:p-5">
+    <section className="space-y-3 rounded-[24px] border border-stone-200 bg-white/60 p-4 sm:p-5 dark:border-zinc-800/70 dark:bg-zinc-900/35">
       <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
         <div className="min-w-0">
-          <div className="flex items-center gap-2 text-sm font-medium text-zinc-100">
+          <div className="flex items-center gap-2 text-sm font-medium text-stone-800 dark:text-zinc-100">
             <Icon className="h-4 w-4 text-indigo-400" />
             {title}
           </div>
-          <p className="mt-1 text-xs leading-5 text-zinc-500">{description}</p>
+          <p className="mt-1 text-xs leading-5 text-stone-600 dark:text-zinc-500">{description}</p>
         </div>
         {badge}
       </div>
@@ -2004,9 +2479,9 @@ function InfoTile({
   mono?: boolean;
 }) {
   return (
-    <div className="rounded-2xl border border-zinc-800/70 bg-zinc-900/40 px-4 py-3">
-      <p className="text-[10px] font-semibold uppercase tracking-[0.22em] text-zinc-500">{label}</p>
-      <div className={clsx('mt-2 break-all text-sm text-zinc-200', mono && 'font-mono text-xs leading-6')}>{children}</div>
+    <div className="rounded-2xl border border-stone-200 bg-white/60 px-4 py-3 dark:border-zinc-800/70 dark:bg-zinc-900/40">
+      <p className="text-[10px] font-semibold uppercase tracking-[0.22em] text-stone-500 dark:text-zinc-500">{label}</p>
+      <div className={clsx('mt-2 break-all text-sm text-stone-800 dark:text-zinc-200', mono && 'font-mono text-xs leading-6')}>{children}</div>
     </div>
   );
 }
@@ -2026,8 +2501,8 @@ function StatusBanner({
     <div className={clsx(
       'rounded-2xl border px-4 py-3 text-xs',
       tone === 'warning'
-        ? 'border-amber-500/20 bg-amber-500/10 text-amber-200'
-        : 'border-red-500/20 bg-red-500/10 text-red-200',
+        ? 'border-amber-500/20 bg-amber-500/10 text-amber-700 dark:text-amber-200'
+        : 'border-red-500/20 bg-red-500/10 text-red-700 dark:text-red-200',
     )}>
       {children}
     </div>
@@ -2213,34 +2688,34 @@ function AiReviewTextCard({
 function taskStatusTone(status: TaskStatus) {
   switch (status) {
     case 'Claimed':
-      return 'border-blue-500/20 bg-blue-500/10 text-blue-200';
+      return 'border-blue-500/20 bg-blue-500/10 text-blue-700 dark:text-blue-200';
     case 'Downloading':
-      return 'border-amber-500/20 bg-amber-500/10 text-amber-200';
+      return 'border-amber-500/20 bg-amber-500/10 text-amber-700 dark:text-amber-200';
     case 'Downloaded':
-      return 'border-zinc-700/70 bg-zinc-900 text-zinc-200';
+      return 'border-stone-300 bg-stone-100 text-stone-700 dark:border-zinc-700/70 dark:bg-zinc-900 dark:text-zinc-200';
     case 'PromptReady':
-      return 'border-indigo-500/20 bg-indigo-500/10 text-indigo-200';
+      return 'border-indigo-500/20 bg-indigo-500/10 text-indigo-700 dark:text-indigo-200';
     case 'ExecutionCompleted':
-      return 'border-cyan-500/20 bg-cyan-500/10 text-cyan-200';
+      return 'border-cyan-500/20 bg-cyan-500/10 text-cyan-700 dark:text-cyan-200';
     case 'Submitted':
-      return 'border-emerald-500/20 bg-emerald-500/10 text-emerald-200';
+      return 'border-emerald-500/20 bg-emerald-500/10 text-emerald-700 dark:text-emerald-200';
     case 'Error':
-      return 'border-red-500/20 bg-red-500/10 text-red-200';
+      return 'border-red-500/20 bg-red-500/10 text-red-700 dark:text-red-200';
     default:
-      return 'border-zinc-700/70 bg-zinc-900 text-zinc-200';
+      return 'border-stone-300 bg-stone-100 text-stone-700 dark:border-zinc-700/70 dark:bg-zinc-900 dark:text-zinc-200';
   }
 }
 
 function promptStatusTone(status: PromptGenerationStatus) {
   switch (status) {
     case 'running':
-      return 'border border-amber-500/20 bg-amber-500/10 text-amber-200';
+      return 'border border-amber-500/20 bg-amber-500/10 text-amber-700 dark:text-amber-200';
     case 'done':
-      return 'border border-emerald-500/20 bg-emerald-500/10 text-emerald-200';
+      return 'border border-emerald-500/20 bg-emerald-500/10 text-emerald-700 dark:text-emerald-200';
     case 'error':
-      return 'border border-red-500/20 bg-red-500/10 text-red-200';
+      return 'border border-red-500/20 bg-red-500/10 text-red-700 dark:text-red-200';
     default:
-      return 'border border-zinc-700/70 bg-zinc-900 text-zinc-300';
+      return 'border border-stone-300 bg-stone-100 text-stone-700 dark:border-zinc-700/70 dark:bg-zinc-900 dark:text-zinc-300';
   }
 }
 
@@ -2304,6 +2779,7 @@ function parseAiReviewPayload(raw: string | null | undefined): AiReviewPayload |
   try {
     const parsed = JSON.parse(text) as Partial<AiReviewPayload>;
     return {
+      reviewNodeId: typeof parsed.reviewNodeId === 'string' ? parsed.reviewNodeId : null,
       modelRunId: parsed.modelRunId ?? null,
       modelName: typeof parsed.modelName === 'string' ? parsed.modelName : '',
       localPath: typeof parsed.localPath === 'string' ? parsed.localPath : '',
@@ -2327,6 +2803,7 @@ function parseAiReviewResult(raw: string | null | undefined): AiReviewResult | n
       return null;
     }
     return {
+      reviewNodeId: typeof parsed.reviewNodeId === 'string' ? parsed.reviewNodeId : '',
       modelRunId: typeof parsed.modelRunId === 'string' ? parsed.modelRunId : '',
       modelName: parsed.modelName,
       reviewStatus: parsed.reviewStatus,
@@ -2338,6 +2815,20 @@ function parseAiReviewResult(raw: string | null | undefined): AiReviewResult | n
       projectType: typeof parsed.projectType === 'string' ? parsed.projectType : undefined,
       changeScope: typeof parsed.changeScope === 'string' ? parsed.changeScope : undefined,
       keyLocations: typeof parsed.keyLocations === 'string' ? parsed.keyLocations : undefined,
+      issues: Array.isArray(parsed.issues)
+        ? parsed.issues
+            .map((issue) => {
+              const candidate = issue as unknown as Record<string, unknown>;
+              return {
+                title: typeof candidate.title === 'string' ? candidate.title : '',
+                issueType: typeof candidate.issueType === 'string' ? candidate.issueType : '',
+                reviewNotes: typeof candidate.reviewNotes === 'string' ? candidate.reviewNotes : '',
+                nextPrompt: typeof candidate.nextPrompt === 'string' ? candidate.nextPrompt : '',
+                keyLocations: typeof candidate.keyLocations === 'string' ? candidate.keyLocations : '',
+              };
+            })
+            .filter((issue) => issue.title || issue.reviewNotes || issue.nextPrompt)
+        : undefined,
     };
   } catch {
     return null;
@@ -2362,6 +2853,22 @@ function extractAiReviewDetailsFromResult(
   return hasAiReviewDetails(details) ? details : null;
 }
 
+function extractAiReviewDetailsFromNode(
+  node: AiReviewNodeFromDB | null | undefined,
+): AiReviewStructuredDetails | null {
+  if (!node) {
+    return null;
+  }
+  const details: AiReviewStructuredDetails = {
+    isCompleted: typeof node.isCompleted === 'boolean' ? node.isCompleted : null,
+    isSatisfied: typeof node.isSatisfied === 'boolean' ? node.isSatisfied : null,
+    projectType: trimToNull(node.projectType),
+    changeScope: trimToNull(node.changeScope),
+    keyLocations: trimToNull(node.keyLocations),
+  };
+  return hasAiReviewDetails(details) ? details : null;
+}
+
 function parseAiReviewProgressDetails(
   raw: string | null | undefined,
 ): AiReviewStructuredDetails | null {
@@ -2378,6 +2885,7 @@ function parseAiReviewProgressDetails(
   try {
     const parsed = JSON.parse(text.slice(jsonStart)) as Partial<AiReviewResult>;
     return extractAiReviewDetailsFromResult({
+      reviewNodeId: typeof parsed.reviewNodeId === 'string' ? parsed.reviewNodeId : '',
       modelRunId: typeof parsed.modelRunId === 'string' ? parsed.modelRunId : '',
       modelName: typeof parsed.modelName === 'string' ? parsed.modelName : '',
       reviewStatus: parsed.reviewStatus === 'pass' || parsed.reviewStatus === 'warning' ? parsed.reviewStatus : 'warning',
@@ -2389,6 +2897,7 @@ function parseAiReviewProgressDetails(
       projectType: typeof parsed.projectType === 'string' ? parsed.projectType : undefined,
       changeScope: typeof parsed.changeScope === 'string' ? parsed.changeScope : undefined,
       keyLocations: typeof parsed.keyLocations === 'string' ? parsed.keyLocations : undefined,
+      issues: undefined,
     });
   } catch {
     return null;
@@ -2411,6 +2920,55 @@ function meaningfulAiReviewText(value: string | null | undefined) {
     return null;
   }
   return trimmed;
+}
+
+function hasAiReviewNodeDraftChanges(
+  node: AiReviewNodeFromDB,
+  draft: AiReviewNodeDraft,
+) {
+  return (
+    draft.title.trim() !== (node.title ?? '').trim() ||
+    draft.issueType.trim() !== (node.issueType ?? '').trim() ||
+    draft.promptText.trim() !== (node.promptText ?? '').trim() ||
+    draft.reviewNotes.trim() !== (node.reviewNotes ?? '').trim()
+  );
+}
+
+function buildAiReviewTreeNodes(nodes: AiReviewNodeFromDB[]) {
+  if (nodes.length === 0) {
+    return [] as Array<{ node: AiReviewNodeFromDB; depth: number; serial: number }>;
+  }
+
+  const childrenByParent = new Map<string | null, AiReviewNodeFromDB[]>();
+  nodes.forEach((node) => {
+    const key = node.parentId ?? null;
+    const current = childrenByParent.get(key) ?? [];
+    current.push(node);
+    childrenByParent.set(key, current);
+  });
+  childrenByParent.forEach((value) => {
+    value.sort((a, b) => {
+      if (a.level !== b.level) {
+        return a.level - b.level;
+      }
+      if (a.sequence !== b.sequence) {
+        return a.sequence - b.sequence;
+      }
+      return (a.createdAt ?? 0) - (b.createdAt ?? 0);
+    });
+  });
+
+  const result: Array<{ node: AiReviewNodeFromDB; depth: number; serial: number }> = [];
+  let serial = 1;
+  const walk = (parentId: string | null, depth: number) => {
+    (childrenByParent.get(parentId) ?? []).forEach((node) => {
+      result.push({ node, depth, serial });
+      serial += 1;
+      walk(node.id, depth + 1);
+    });
+  };
+  walk(null, 1);
+  return result;
 }
 
 function buildAiReviewKey(modelRunId: string | null | undefined, localPath: string | null | undefined) {
@@ -2515,7 +3073,185 @@ function modelRunPresentation(status: string) {
   return {
     label: '待处理',
     icon: CircleDashed,
-    iconCls: 'text-zinc-500',
-    badgeCls: 'border border-zinc-700/70 bg-zinc-900 text-zinc-300',
+    iconCls: 'text-stone-400 dark:text-zinc-500',
+    badgeCls: 'border border-stone-300 bg-stone-100 text-stone-700 dark:border-zinc-700/70 dark:bg-zinc-900 dark:text-zinc-300',
   };
+}
+
+// 自定义任务类型下拉
+function TaskTypeSelect({
+  value,
+  options,
+  disabled,
+  selected: isSelectedCard,
+  onChange,
+  onClick,
+}: {
+  value: string;
+  options: { value: string; label: string }[];
+  disabled?: boolean;
+  selected: boolean;
+  onChange: (value: string) => void;
+  onClick?: (e: React.MouseEvent) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const [menuStyle, setMenuStyle] = useState<React.CSSProperties>({});
+
+  const currentLabel = options.find((o) => o.value === value)?.label ?? value;
+
+  const handleToggle = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    onClick?.(e);
+    if (disabled) return;
+    if (!open && containerRef.current) {
+      const rect = containerRef.current.getBoundingClientRect();
+      const spaceBelow = window.innerHeight - rect.bottom;
+      const menuH = Math.min(options.length * 32 + 8, 240);
+      if (spaceBelow >= menuH || spaceBelow >= 120) {
+        setMenuStyle({ top: rect.bottom + 4, left: rect.left, minWidth: rect.width });
+      } else {
+        setMenuStyle({ bottom: window.innerHeight - rect.top + 4, left: rect.left, minWidth: rect.width });
+      }
+    }
+    setOpen((v) => !v);
+  };
+
+  useEffect(() => {
+    if (!open) return;
+    const handler = (e: MouseEvent) => {
+      if (!containerRef.current?.contains(e.target as Node) && !menuRef.current?.contains(e.target as Node)) {
+        setOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [open]);
+
+  return (
+    <div ref={containerRef} className="relative min-w-0 flex-1">
+      <button
+        type="button"
+        disabled={disabled}
+        onClick={handleToggle}
+        className={clsx(
+          'flex w-full items-center justify-between gap-1 rounded-lg border px-2.5 py-1.5 text-[10px] font-medium outline-none transition',
+          disabled
+            ? 'cursor-default border-indigo-500/30 bg-indigo-500/10 text-indigo-400 opacity-70'
+            : isSelectedCard
+            ? 'border-indigo-500/40 bg-indigo-500/15 text-indigo-200 hover:bg-indigo-500/25'
+            : 'border-stone-200 bg-stone-50 text-stone-700 hover:bg-stone-100 dark:border-zinc-700/70 dark:bg-zinc-900/80 dark:text-zinc-300 dark:hover:bg-zinc-800',
+        )}
+      >
+        <span className="truncate">{currentLabel}</span>
+        <ChevronDown className={clsx('h-3 w-3 shrink-0 transition-transform', open && 'rotate-180', isSelectedCard ? 'text-indigo-400' : 'text-stone-400 dark:text-zinc-500')} />
+      </button>
+
+      <AnimatePresence>
+        {open && (
+          <motion.div
+            ref={menuRef}
+            initial={{ opacity: 0, y: -4 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -4 }}
+            transition={{ duration: 0.12 }}
+            className="fixed z-50 overflow-y-auto rounded-xl border border-zinc-700/80 bg-zinc-900 py-1 shadow-2xl"
+            style={{ ...menuStyle, maxHeight: 240 }}
+            onMouseDown={(e) => e.stopPropagation()}
+          >
+            {options.map((opt) => (
+              <button
+                key={opt.value}
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onChange(opt.value);
+                  setOpen(false);
+                }}
+                className={clsx(
+                  'flex w-full items-center gap-2 px-3 py-1.5 text-[11px] transition',
+                  opt.value === value
+                    ? 'bg-indigo-500/20 text-indigo-300'
+                    : 'text-zinc-300 hover:bg-zinc-800 hover:text-white',
+                )}
+              >
+                {opt.value === value && <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-indigo-400" />}
+                <span className={opt.value === value ? '' : 'ml-3.5'}>{opt.label}</span>
+              </button>
+            ))}
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  );
+}
+
+// Tooltip 组件
+function Tooltip({
+  content,
+  children,
+}: {
+  content: string;
+  children: React.ReactElement<{ onMouseEnter?: () => void; onMouseLeave?: () => void }>;
+}) {
+  const [isVisible, setIsVisible] = useState(false);
+  const [position, setPosition] = useState({ top: 0, left: 0 });
+  const childRef = useRef<HTMLDivElement>(null);
+  const timeoutRef = useRef<NodeJS.Timeout>();
+
+  const handleMouseEnter = () => {
+    clearTimeout(timeoutRef.current);
+    timeoutRef.current = setTimeout(() => {
+      if (childRef.current) {
+        const rect = childRef.current.getBoundingClientRect();
+        setPosition({
+          top: rect.bottom + 8,
+          left: rect.left + rect.width / 2,
+        });
+        setIsVisible(true);
+      }
+    }, 300);
+  };
+
+  const handleMouseLeave = () => {
+    clearTimeout(timeoutRef.current);
+    setIsVisible(false);
+  };
+
+  const clonedChild = React.cloneElement(children, {
+    ref: childRef as any,
+    onMouseEnter: () => {
+      handleMouseEnter();
+      children.props.onMouseEnter?.();
+    },
+    onMouseLeave: () => {
+      handleMouseLeave();
+      children.props.onMouseLeave?.();
+    },
+  });
+
+  return (
+    <>
+      {clonedChild}
+      <AnimatePresence>
+        {isVisible && (
+          <motion.div
+            initial={{ opacity: 0, y: 4 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 4 }}
+            transition={{ duration: 0.15 }}
+            className="fixed z-50 max-w-xs rounded-lg border border-stone-200 bg-white px-3 py-2 text-xs text-stone-700 shadow-lg dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200"
+            style={{
+              top: `${position.top}px`,
+              left: `${position.left}px`,
+              transform: 'translateX(-50%)',
+            }}
+          >
+            {content}
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </>
+  );
 }

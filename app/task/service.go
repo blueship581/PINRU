@@ -75,6 +75,14 @@ type AddModelRunRequest struct {
 	LocalPath *string `json:"localPath"`
 }
 
+type UpdateAiReviewNodeRequest struct {
+	ID          string `json:"id"`
+	Title       string `json:"title"`
+	IssueType   string `json:"issueType"`
+	PromptText  string `json:"promptText"`
+	ReviewNotes string `json:"reviewNotes"`
+}
+
 type TaskChildDirectory struct {
 	Name         string  `json:"name"`
 	Path         string  `json:"path"`
@@ -195,6 +203,41 @@ func (s *TaskService) UpdateModelRun(req UpdateModelRunRequest) error {
 		req.BranchName, req.PrURL, req.StartedAt, req.FinishedAt)
 }
 
+func (s *TaskService) ListAiReviewNodes(taskID string) ([]store.AiReviewNode, error) {
+	nodes, err := s.store.ListAiReviewNodes(strings.TrimSpace(taskID))
+	if err != nil {
+		return nil, err
+	}
+	if nodes == nil {
+		return []store.AiReviewNode{}, nil
+	}
+	return nodes, nil
+}
+
+func (s *TaskService) UpdateAiReviewNode(req UpdateAiReviewNodeRequest) error {
+	nodeID := strings.TrimSpace(req.ID)
+	if nodeID == "" {
+		return fmt.Errorf("复审节点不能为空")
+	}
+
+	if err := s.store.UpdateAiReviewNodeEditableFields(
+		nodeID,
+		strings.TrimSpace(req.Title),
+		strings.TrimSpace(req.IssueType),
+		strings.TrimSpace(req.PromptText),
+		strings.TrimSpace(req.ReviewNotes),
+	); err != nil {
+		return err
+	}
+
+	node, err := s.store.GetAiReviewNode(nodeID)
+	if err != nil || node == nil || node.ModelRunID == nil || strings.TrimSpace(*node.ModelRunID) == "" {
+		return err
+	}
+
+	return s.syncModelRunAiReviewSummary(strings.TrimSpace(*node.ModelRunID))
+}
+
 func (s *TaskService) UpdateModelRunSessionInfo(req UpdateModelRunSessionRequest) error {
 	return s.store.UpdateModelRunSession(req.ID, req.SessionID, req.ConversationRounds, req.ConversationDate)
 }
@@ -252,6 +295,15 @@ func normalizeTaskPath(task store.Task) store.Task {
 		task.LocalPath = &normalized
 	}
 	return task
+}
+
+func (s *TaskService) syncModelRunAiReviewSummary(modelRunID string) error {
+	nodes, err := s.store.ListAiReviewNodesByModelRun(modelRunID)
+	if err != nil {
+		return err
+	}
+	status, round, notes := store.SummarizeAiReviewNodes(nodes)
+	return s.store.UpdateModelRunReview(modelRunID, status, round, notes)
 }
 
 func normalizeModelRunPaths(runs []store.ModelRun) []store.ModelRun {
@@ -823,6 +875,21 @@ type BatchUpdateResult struct {
 	Total     int                  `json:"total"`
 	Succeeded int                  `json:"succeeded"`
 	Failed    []BatchUpdateFailure `json:"failed"`
+}
+
+func (s *TaskService) BatchDeleteTasks(taskIDs []string) (*BatchUpdateResult, error) {
+	result := &BatchUpdateResult{
+		Total:  len(taskIDs),
+		Failed: []BatchUpdateFailure{},
+	}
+	for _, id := range taskIDs {
+		if err := s.DeleteTask(id); err != nil {
+			result.Failed = append(result.Failed, BatchUpdateFailure{TaskID: id, Error: err.Error()})
+		} else {
+			result.Succeeded++
+		}
+	}
+	return result, nil
 }
 
 func (s *TaskService) BatchUpdateTasks(req BatchUpdateTasksRequest) (*BatchUpdateResult, error) {

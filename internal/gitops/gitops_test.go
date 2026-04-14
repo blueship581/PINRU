@@ -167,7 +167,7 @@ func TestCopyProjectDirectoryInitializesGitRepoForGitSource(t *testing.T) {
 	gitInDir(t, src, "add", "README.md")
 	gitInDir(t, src, "commit", "-m", "initial source snapshot")
 
-	if err := CopyProjectDirectory(src, dst); err != nil {
+	if err := CopyProjectDirectory(context.Background(), src, dst); err != nil {
 		t.Fatalf("CopyProjectDirectory() error = %v", err)
 	}
 
@@ -202,7 +202,7 @@ func TestCopyProjectDirectoryLeavesPlainSourceWithoutGitRepo(t *testing.T) {
 		t.Fatalf("WriteFile() error = %v", err)
 	}
 
-	if err := CopyProjectDirectory(src, dst); err != nil {
+	if err := CopyProjectDirectory(context.Background(), src, dst); err != nil {
 		t.Fatalf("CopyProjectDirectory() error = %v", err)
 	}
 

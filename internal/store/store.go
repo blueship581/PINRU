@@ -25,6 +25,10 @@ func Open(dbPath string, migrationSQL ...string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
+	if err := s.repairLegacySchemaBeforeMigrate(); err != nil {
+		db.Close()
+		return nil, err
+	}
 	if err := s.migrate(migrationSQL...); err != nil {
 		db.Close()
 		return nil, err
@@ -72,7 +76,9 @@ func (s *Store) ensureMetaSchema() error {
 }
 
 // migrate runs each embedded migration file independently and executes the
-// semicolon-separated statements inside a single transaction.
+// semicolon-separated statements inside a single transaction unless the
+// migration toggles PRAGMA foreign_keys, which SQLite only honors outside
+// a transaction.
 // Already-applied migrations are tracked via schema_migrations and validated by checksum.
 // "duplicate column name" errors are silently skipped to make ALTER TABLE ADD COLUMN idempotent.
 func (s *Store) migrate(migrationSQL ...string) error {
@@ -92,6 +98,13 @@ func (s *Store) migrate(migrationSQL ...string) error {
 		}
 
 		statements := splitSQLStatements(sqlText)
+		if usesForeignKeyPragmas(statements) {
+			if err := s.runMigrationWithoutTransaction(migrationID, checksum, statements); err != nil {
+				return err
+			}
+			continue
+		}
+
 		tx, err := s.DB.Begin()
 		if err != nil {
 			return err
@@ -126,6 +139,39 @@ func (s *Store) migrate(migrationSQL ...string) error {
 		}
 		committed = true
 	}
+	return nil
+}
+
+func usesForeignKeyPragmas(statements []string) bool {
+	for _, stmt := range statements {
+		normalized := strings.ToUpper(strings.TrimSpace(stmt))
+		if normalized == "PRAGMA FOREIGN_KEYS = OFF" || normalized == "PRAGMA FOREIGN_KEYS = ON" {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Store) runMigrationWithoutTransaction(migrationID, checksum string, statements []string) error {
+	for _, stmt := range statements {
+		if _, err := s.DB.Exec(stmt); err != nil {
+			if strings.Contains(err.Error(), "duplicate column name") {
+				continue
+			}
+			if isIgnorableCreateIndexError(stmt, err) {
+				continue
+			}
+			return fmt.Errorf("migration exec: %w\nMigration: %s\nSQL: %s", err, migrationID, stmt)
+		}
+	}
+
+	if _, err := s.DB.Exec(
+		`INSERT INTO schema_migrations (id, checksum, statement_count) VALUES (?, ?, ?)`,
+		migrationID, checksum, len(statements),
+	); err != nil {
+		return fmt.Errorf("record migration %s: %w", migrationID, err)
+	}
+
 	return nil
 }
 
@@ -213,6 +259,82 @@ func splitSQLStatements(sqlText string) []string {
 	return statements
 }
 
+func (s *Store) repairLegacySchemaBeforeMigrate() error {
+	exists, err := s.tableExists("tasks")
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return nil
+	}
+	hasProjectConfigID, err := s.columnExists("tasks", "project_config_id")
+	if err != nil {
+		return err
+	}
+	if hasProjectConfigID {
+		return nil
+	}
+
+	if _, err := s.DB.Exec(`PRAGMA foreign_keys = OFF`); err != nil {
+		return fmt.Errorf("disable foreign keys for legacy tasks repair: %w", err)
+	}
+	defer s.DB.Exec(`PRAGMA foreign_keys = ON`)
+
+	tx, err := s.DB.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec(`
+CREATE TABLE tasks_legacy_repair (
+    id TEXT PRIMARY KEY,
+    gitlab_project_id INTEGER NOT NULL,
+    project_name TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'Claimed',
+    local_path TEXT,
+    prompt_text TEXT,
+    notes TEXT,
+    project_config_id TEXT,
+    created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+    updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+    task_type TEXT NOT NULL DEFAULT '` + defaultTaskType + `',
+    session_list TEXT NOT NULL DEFAULT '[]',
+    prompt_generation_status TEXT NOT NULL DEFAULT 'idle',
+    prompt_generation_error TEXT,
+    prompt_generation_started_at INTEGER,
+    prompt_generation_finished_at INTEGER
+)`); err != nil {
+		return fmt.Errorf("create legacy tasks repair table: %w", err)
+	}
+
+	if _, err := tx.Exec(`
+INSERT INTO tasks_legacy_repair (
+    id, gitlab_project_id, project_name, status, local_path, prompt_text, notes,
+    project_config_id, created_at, updated_at, task_type, session_list,
+    prompt_generation_status, prompt_generation_error, prompt_generation_started_at, prompt_generation_finished_at
+)
+SELECT
+    id, gitlab_project_id, project_name, status, local_path, prompt_text, notes,
+    NULL, created_at, updated_at, ?, '[]',
+    'idle', NULL, NULL, NULL
+FROM tasks
+`, defaultTaskType); err != nil {
+		return fmt.Errorf("copy legacy tasks into repair table: %w", err)
+	}
+
+	if _, err := tx.Exec(`DROP TABLE tasks`); err != nil {
+		return fmt.Errorf("drop legacy tasks table: %w", err)
+	}
+	if _, err := tx.Exec(`ALTER TABLE tasks_legacy_repair RENAME TO tasks`); err != nil {
+		return fmt.Errorf("rename repaired tasks table: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	return s.recordSchemaRepair("table", "tasks", "rebuild legacy tasks column order before migrations")
+}
+
 func (s *Store) ensureSchema() error {
 	requiredColumns := []struct {
 		table      string
@@ -249,6 +371,21 @@ func (s *Store) ensureSchema() error {
 	}
 
 	return nil
+}
+
+func (s *Store) tableExists(name string) (bool, error) {
+	var existing string
+	err := s.DB.QueryRow(
+		`SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?`,
+		name,
+	).Scan(&existing)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("check table %s: %w", name, err)
+	}
+	return true, nil
 }
 
 func (s *Store) ensureIndexes() error {

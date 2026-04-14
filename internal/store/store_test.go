@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/blueship581/pinru/migrations"
 	_ "modernc.org/sqlite"
 )
 
@@ -15,20 +16,7 @@ func TestOpenMigratesLegacyConfigsIntoNewTables(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "pinru.db")
 	seedLegacyDatabase(t, dbPath)
 
-	migrations := []string{
-		readMigrationFile(t, "001_init.sql"),
-		readMigrationFile(t, "002_model_runs_extend.sql"),
-		readMigrationFile(t, "003_submit_results.sql"),
-		readMigrationFile(t, "004_task_type.sql"),
-		readMigrationFile(t, "005_project_task_quotas.sql"),
-		readMigrationFile(t, "006_project_submit_defaults.sql"),
-		readMigrationFile(t, "007_project_task_types.sql"),
-		readMigrationFile(t, "008_task_session_list.sql"),
-		readMigrationFile(t, "009_task_prompt_generation_status.sql"),
-		readMigrationFile(t, "010_project_task_type_totals.sql"),
-		readMigrationFile(t, "011_project_overview_markdown.sql"),
-		readMigrationFile(t, "012_model_run_session_list.sql"),
-	}
+	migrations := migrations.All()
 
 	store, err := Open(dbPath, migrations...)
 	if err != nil {
@@ -46,7 +34,7 @@ func TestOpenMigratesLegacyConfigsIntoNewTables(t *testing.T) {
 	assertColumnExists(t, store.DB, "projects", "task_types")
 	assertColumnExists(t, store.DB, "projects", "task_type_totals")
 	assertColumnExists(t, store.DB, "projects", "overview_markdown")
-	assertTableCount(t, store.DB, "schema_migrations", 12)
+	assertTableCount(t, store.DB, "schema_migrations", len(migrations))
 
 	tasks, err := store.ListTasks(nil)
 	if err != nil {
@@ -141,7 +129,7 @@ func TestOpenMigratesLegacyConfigsIntoNewTables(t *testing.T) {
 	assertTableCount(t, reopened.DB, "projects", 1)
 	assertTableCount(t, reopened.DB, "github_accounts", 1)
 	assertTableCount(t, reopened.DB, "llm_providers", 1)
-	assertTableCount(t, reopened.DB, "schema_migrations", 12)
+	assertTableCount(t, reopened.DB, "schema_migrations", len(migrations))
 	assertRepairCountAtLeast(t, reopened.DB, 1)
 }
 

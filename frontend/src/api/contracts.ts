@@ -38,6 +38,7 @@ import type {
   SubmitModelRunResult,
 } from './submit';
 import type {
+  AiReviewNodeFromDB,
   AddModelRunRequest,
   BatchUpdateResult,
   BatchUpdateTasksRequest,
@@ -47,6 +48,7 @@ import type {
   TaskChildDirectory,
   TaskFromDB,
   UpdateModelRunRequest,
+  UpdateAiReviewNodeRequest,
   UpdateModelRunSessionRequest,
   UpdateTaskSessionListRequest,
 } from './task';
@@ -161,6 +163,7 @@ export type WailsServiceContract = {
     ListTasks: ServiceMethod<[projectConfigId: string | null], TaskFromDB[]>;
     GetTask: ServiceMethod<[id: string], TaskFromDB | null>;
     ListModelRuns: ServiceMethod<[taskId: string], ModelRunFromDB[]>;
+    ListAiReviewNodes: ServiceMethod<[taskId: string], AiReviewNodeFromDB[]>;
     ListTaskChildDirectories: ServiceMethod<[taskId: string], TaskChildDirectory[]>;
     CreateTask: ServiceMethod<[task: CreateTaskRequest], TaskFromDB>;
     UpdateTaskStatus: ServiceMethod<[id: string, status: string], void>;
@@ -168,6 +171,7 @@ export type WailsServiceContract = {
     UpdateTaskSessionList: ServiceMethod<[request: UpdateTaskSessionListRequest], void>;
     ExtractTaskSessions: ServiceMethod<[taskId: string], ExtractTaskSessionsResult>;
     UpdateModelRun: ServiceMethod<[request: UpdateModelRunRequest], void>;
+    UpdateAiReviewNode: ServiceMethod<[request: UpdateAiReviewNodeRequest], void>;
     DeleteTask: ServiceMethod<[id: string], void>;
     OpenTaskLocalFolder: ServiceMethod<[id: string], void>;
     UpdateModelRunSessionInfo: ServiceMethod<[request: UpdateModelRunSessionRequest], void>;

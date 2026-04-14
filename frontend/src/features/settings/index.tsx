@@ -100,6 +100,8 @@ export default function Settings() {
   const [providerForm, setProviderForm] = useState<ProviderFormState>(EMPTY_PROVIDER_FORM);
   const [providerError, setProviderError] = useState('');
   const [savingProvider, setSavingProvider] = useState(false);
+  const [testingPolishModel, setTestingPolishModel] = useState(false);
+  const [polishModelTestResult, setPolishModelTestResult] = useState<{ status: 'success' | 'error'; message: string } | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -376,6 +378,7 @@ export default function Settings() {
     });
     setProviderModalAcpOnly(false);
     setProviderError('');
+    setPolishModelTestResult(null);
     setShowProviderModal(true);
   };
 
@@ -387,6 +390,7 @@ export default function Settings() {
     });
     setProviderModalAcpOnly(true);
     setProviderError('');
+    setPolishModelTestResult(null);
     setShowProviderModal(true);
   };
 
@@ -396,6 +400,7 @@ export default function Settings() {
       name: provider.name,
       providerType: provider.providerType,
       model: provider.model,
+      polishModel: provider.polishModel ?? '',
       baseUrl: provider.baseUrl ?? '',
       apiKey: '',
       hasApiKey: Boolean(provider.hasApiKey),
@@ -403,6 +408,7 @@ export default function Settings() {
     });
     setProviderModalAcpOnly(isAcpProvider(provider.providerType));
     setProviderError('');
+    setPolishModelTestResult(null);
     setShowProviderModal(true);
   };
 
@@ -412,6 +418,7 @@ export default function Settings() {
     setProviderModalAcpOnly(false);
     setProviderForm(EMPTY_PROVIDER_FORM);
     setProviderError('');
+    setPolishModelTestResult(null);
   };
 
   const reloadLlmProviders = async () => {
@@ -449,6 +456,7 @@ export default function Settings() {
         name,
         providerType: providerForm.providerType,
         model,
+        polishModel: providerForm.polishModel.trim(),
         baseUrl: baseUrl || null,
         apiKey,
         hasApiKey: providerForm.hasApiKey || apiKey.length > 0,
@@ -543,6 +551,44 @@ export default function Settings() {
       }));
     } finally {
       setTestingProviderId('');
+    }
+  };
+
+  const handleTestPolishModel = async () => {
+    const polishModel = providerForm.polishModel.trim();
+    const testModel = polishModel || providerForm.model.trim();
+    if (!testModel) {
+      setPolishModelTestResult({ status: 'error', message: '请先填写模型名称' });
+      return;
+    }
+    setTestingPolishModel(true);
+    setPolishModelTestResult(null);
+    try {
+      const testProvider: LlmProviderConfig = {
+        id: providerForm.id ?? `llm-test-${Date.now()}`,
+        name: providerForm.name || 'test',
+        providerType: providerForm.providerType,
+        model: testModel,
+        polishModel: '',
+        baseUrl: providerForm.baseUrl || null,
+        apiKey: providerForm.apiKey,
+        hasApiKey: providerForm.hasApiKey,
+        isDefault: false,
+      };
+      const ok = await testLlmProvider(testProvider);
+      setPolishModelTestResult({
+        status: ok ? 'success' : 'error',
+        message: ok
+          ? `连接成功（${polishModel ? '润色模型' : '使用主模型'}：${testModel}）`
+          : '连接失败',
+      });
+    } catch (error) {
+      setPolishModelTestResult({
+        status: 'error',
+        message: formatErrorMessage(error, '连接失败'),
+      });
+    } finally {
+      setTestingPolishModel(false);
     }
   };
 
@@ -689,6 +735,8 @@ export default function Settings() {
           error={providerError}
           saving={savingProvider}
           acpOnly={providerModalAcpOnly}
+          testingPolishModel={testingPolishModel}
+          polishModelTestResult={polishModelTestResult}
           onClose={closeProviderModal}
           onNameChange={(value) =>
             setProviderForm((current) => ({ ...current, name: value }))
@@ -699,6 +747,10 @@ export default function Settings() {
           onModelChange={(value) =>
             setProviderForm((current) => ({ ...current, model: value }))
           }
+          onPolishModelChange={(value) => {
+            setProviderForm((current) => ({ ...current, polishModel: value }));
+            setPolishModelTestResult(null);
+          }}
           onBaseUrlChange={(value) =>
             setProviderForm((current) => ({ ...current, baseUrl: value }))
           }
@@ -708,6 +760,7 @@ export default function Settings() {
           onDefaultChange={(value) =>
             setProviderForm((current) => ({ ...current, isDefault: value }))
           }
+          onTestPolishModel={handleTestPolishModel}
           onSave={handleSaveProvider}
         />
       )}

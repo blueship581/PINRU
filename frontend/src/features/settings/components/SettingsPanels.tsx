@@ -47,6 +47,7 @@ export type ProviderFormState = {
   name: string;
   providerType: LlmProviderType;
   model: string;
+  polishModel: string;
   baseUrl: string;
   apiKey: string;
   hasApiKey: boolean;
@@ -63,6 +64,7 @@ export const EMPTY_PROVIDER_FORM: ProviderFormState = {
   name: '',
   providerType: 'openai_compatible',
   model: '',
+  polishModel: '',
   baseUrl: '',
   apiKey: '',
   hasApiKey: false,
@@ -958,26 +960,34 @@ export function ProviderModal({
   error,
   saving,
   acpOnly,
+  testingPolishModel,
+  polishModelTestResult,
   onClose,
   onNameChange,
   onProviderTypeChange,
   onModelChange,
+  onPolishModelChange,
   onBaseUrlChange,
   onApiKeyChange,
   onDefaultChange,
+  onTestPolishModel,
   onSave,
 }: {
   form: ProviderFormState;
   error: string;
   saving: boolean;
   acpOnly?: boolean;
+  testingPolishModel?: boolean;
+  polishModelTestResult?: { status: 'success' | 'error'; message: string } | null;
   onClose: () => void;
   onNameChange: (value: string) => void;
   onProviderTypeChange: (value: LlmProviderType) => void;
   onModelChange: (value: string) => void;
+  onPolishModelChange: (value: string) => void;
   onBaseUrlChange: (value: string) => void;
   onApiKeyChange: (value: string) => void;
   onDefaultChange: (value: boolean) => void;
+  onTestPolishModel: () => void;
   onSave: () => void;
 }) {
   const isAcp = isAcpProvider(form.providerType);
@@ -1062,6 +1072,34 @@ export function ProviderModal({
               ACP 提供商通过本地 CLI 工具调用，无需配置 API Key。请确保对应 CLI 工具已安装并完成登录。
             </p>
           </div>
+        )}
+
+        {isAcp && (
+          <Field label="润色文本模型" hint="留空则使用上方的主模型；填写后润色功能将使用此模型">
+            <div className="flex gap-2">
+              <input
+                type="text"
+                value={form.polishModel}
+                onChange={(event) => onPolishModelChange(event.target.value)}
+                placeholder="留空使用主模型，例如 claude-haiku-4-5-20251001"
+                className={`${inputCls} flex-1`}
+              />
+              <button
+                type="button"
+                onClick={onTestPolishModel}
+                disabled={testingPolishModel || saving}
+                className={`${btnSecondary} shrink-0 flex items-center gap-1.5`}
+              >
+                {testingPolishModel && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                测试
+              </button>
+            </div>
+            {polishModelTestResult && (
+              <p className={`mt-1.5 text-xs ${polishModelTestResult.status === 'success' ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-600 dark:text-red-400'}`}>
+                {polishModelTestResult.message}
+              </p>
+            )}
+          </Field>
         )}
 
         <label className="flex items-center gap-2.5 cursor-default">

@@ -7,6 +7,7 @@ export interface LlmProviderConfig {
   name: string;
   providerType: LlmProviderType;
   model: string;
+  polishModel: string;
   baseUrl?: string | null;
   apiKey: string;
   hasApiKey?: boolean;

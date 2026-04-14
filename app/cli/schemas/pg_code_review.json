@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "type": "object",
   "additionalProperties": false,
-  "required": ["isCompleted", "isSatisfied", "projectType", "changeScope", "reviewNotes", "nextPrompt", "keyLocations"],
+  "required": ["isCompleted", "isSatisfied", "projectType", "changeScope", "reviewNotes", "nextPrompt", "keyLocations", "issues"],
   "properties": {
     "isCompleted": {
       "type": "boolean",
@@ -32,6 +32,37 @@
     "keyLocations": {
       "type": "string",
       "description": "关键代码位置，格式：相对路径:行号；相对路径:行号，最多 3 处"
+    },
+    "issues": {
+      "type": "array",
+      "description": "当当前节点存在多个独立问题时，逐条拆分为子问题；通过时返回空数组",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["title", "issueType", "reviewNotes", "nextPrompt", "keyLocations"],
+        "properties": {
+          "title": {
+            "type": "string",
+            "description": "子问题标题，要求可直接作为树节点标题展示"
+          },
+          "issueType": {
+            "type": "string",
+            "description": "子问题类型，一般填写“Bug修复”"
+          },
+          "reviewNotes": {
+            "type": "string",
+            "description": "这个子问题对应的不满意结论"
+          },
+          "nextPrompt": {
+            "type": "string",
+            "description": "这个子问题下一次复核时应携带的提示词"
+          },
+          "keyLocations": {
+            "type": "string",
+            "description": "这个子问题对应的关键代码位置，格式同上"
+          }
+        }
+      }
     }
   }
 }

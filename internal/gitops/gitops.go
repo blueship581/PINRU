@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"net/url"
 	"os"
@@ -54,9 +55,16 @@ func CloneWithProgress(ctx context.Context, cloneURL, path, username, token stri
 		os.MkdirAll(parent, 0755)
 	}
 
+	// Clone into a staging directory; rename to the final path only on success.
+	// This ensures the target directory is never left in a partial state: on any
+	// failure the staging directory is cleaned up by the deferred RemoveAll.
+	stagingPath := expanded + "._pinru_tmp"
+	os.RemoveAll(stagingPath) // remove any leftover from a previous failed attempt
+	defer os.RemoveAll(stagingPath)
+
 	onProgress("正在启动 git clone …")
 
-	cmd := exec.CommandContext(ctx, "git", "clone", "--depth", "1", "--progress", cloneURL, expanded)
+	cmd := exec.CommandContext(ctx, "git", "clone", "--depth", "1", "--progress", cloneURL, stagingPath)
 	cmd.WaitDelay = 5 * time.Second
 	cmd.Env = append(os.Environ(), buildGitAuthEnv(cloneURL, username, token)...)
 	stderr, err := cmd.StderrPipe()
@@ -95,11 +103,19 @@ func CloneWithProgress(ctx context.Context, cloneURL, path, username, token stri
 		}
 		return fmt.Errorf("git clone 失败: %w", err)
 	}
+
+	// Atomically promote the staging directory to the final path.
+	if err := os.Rename(stagingPath, expanded); err != nil {
+		return fmt.Errorf("无法移动克隆目录到目标路径: %w", err)
+	}
 	onProgress("克隆完成")
 	return nil
 }
 
-func CopyProjectDirectory(src, dst string) error {
+func CopyProjectDirectory(ctx context.Context, src, dst string) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	expandedSrc := util.ExpandTilde(src)
 	expandedDst := util.ExpandTilde(dst)
 	if _, err := os.Stat(expandedSrc); os.IsNotExist(err) {
@@ -108,19 +124,40 @@ func CopyProjectDirectory(src, dst string) error {
 	if _, err := os.Stat(expandedDst); err == nil {
 		return fmt.Errorf("目标目录「%s」已存在", filepath.Base(expandedDst))
 	}
-	if err := os.MkdirAll(expandedDst, 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(expandedDst), 0755); err != nil {
 		return err
 	}
-	if err := copyDirRecursive(expandedSrc, expandedDst, false); err != nil {
+
+	// Copy into a staging directory; rename to the final path only on success.
+	// This ensures the target directory is never left in a partial state on failure
+	// (e.g. context cancellation during git add -A or a mid-copy I/O error).
+	stagingDst := expandedDst + "._pinru_tmp"
+	os.RemoveAll(stagingDst) // remove any leftover from a previous failed attempt
+	defer os.RemoveAll(stagingDst)
+
+	if err := os.MkdirAll(stagingDst, 0755); err != nil {
 		return err
 	}
-	if !hasGitMetadata(expandedSrc) {
-		return nil
+	if err := copyDirRecursive(ctx, expandedSrc, stagingDst, false); err != nil {
+		return err
 	}
-	return initializeSnapshotRepository(expandedSrc, expandedDst)
+	if hasGitMetadata(expandedSrc) {
+		if err := initializeSnapshotRepository(ctx, expandedSrc, stagingDst); err != nil {
+			return err
+		}
+	}
+
+	// Atomically promote the staging directory to the final path.
+	if err := os.Rename(stagingDst, expandedDst); err != nil {
+		return fmt.Errorf("无法移动复制目录到目标路径: %w", err)
+	}
+	return nil
 }
 
-func EnsureSnapshotRepository(referencePath, path string) (bool, error) {
+func EnsureSnapshotRepository(ctx context.Context, referencePath, path string) (bool, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	expandedPath := util.ExpandTilde(strings.TrimSpace(path))
 	if expandedPath == "" {
 		return false, fmt.Errorf("目标目录不能为空")
@@ -141,7 +178,7 @@ func EnsureSnapshotRepository(referencePath, path string) (bool, error) {
 	if expandedReferencePath == "" {
 		expandedReferencePath = expandedPath
 	}
-	if err := initializeSnapshotRepository(expandedReferencePath, expandedPath); err != nil {
+	if err := initializeSnapshotRepository(ctx, expandedReferencePath, expandedPath); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -173,7 +210,7 @@ func CopyProjectContents(src, dst string) error {
 	if _, err := os.Stat(src); os.IsNotExist(err) {
 		return fmt.Errorf("源目录不存在: %s", src)
 	}
-	return copyDirRecursive(src, dst, true)
+	return copyDirRecursive(context.Background(), src, dst, true)
 }
 
 func CommitAll(path, branch, authorName, authorEmail, msg string) (bool, error) {
@@ -286,6 +323,14 @@ func runGit(dir string, args ...string) error {
 	return cmd.Run()
 }
 
+func runGitCtx(ctx context.Context, dir string, args ...string) error {
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Dir = dir
+	cmd.Stderr = os.Stderr
+	cmd.WaitDelay = 5 * time.Second
+	return cmd.Run()
+}
+
 func runGitOutput(dir string, args ...string) (string, error) {
 	cmd := exec.Command("git", args...)
 	cmd.Dir = dir
@@ -341,48 +386,51 @@ func hasGitMetadata(path string) bool {
 	return err == nil && info.IsDir()
 }
 
-func initializeSnapshotRepository(sourcePath, destinationPath string) error {
+func initializeSnapshotRepository(ctx context.Context, sourcePath, destinationPath string) error {
 	branch := fallbackBranchName
 	if detectedBranch, err := runGitOutput(sourcePath, "branch", "--show-current"); err == nil && detectedBranch != "" {
 		branch = detectedBranch
 	}
 
-	if err := initGitRepository(destinationPath, branch); err != nil {
+	if err := initGitRepository(ctx, destinationPath, branch); err != nil {
 		return err
 	}
-	if err := runGit(destinationPath, "config", "user.name", localSnapshotAuthorName); err != nil {
+	if err := runGitCtx(ctx, destinationPath, "config", "user.name", localSnapshotAuthorName); err != nil {
 		return err
 	}
-	if err := runGit(destinationPath, "config", "user.email", localSnapshotAuthorEmail); err != nil {
+	if err := runGitCtx(ctx, destinationPath, "config", "user.email", localSnapshotAuthorEmail); err != nil {
 		return err
 	}
-	if err := runGit(destinationPath, "add", "-A"); err != nil {
+	if err := runGitCtx(ctx, destinationPath, "add", "-A"); err != nil {
 		return err
 	}
-	return runGit(destinationPath, "commit", "--allow-empty", "-m", localSnapshotCommitMsg)
+	return runGitCtx(ctx, destinationPath, "commit", "--allow-empty", "-m", localSnapshotCommitMsg)
 }
 
-func initGitRepository(path, branch string) error {
+func initGitRepository(ctx context.Context, path, branch string) error {
 	if branch == "" {
 		branch = fallbackBranchName
 	}
-	if err := runGit(path, "init", "-b", branch); err == nil {
+	if err := runGitCtx(ctx, path, "init", "-b", branch); err == nil {
 		return nil
 	}
-	if err := runGit(path, "init"); err != nil {
+	if err := runGitCtx(ctx, path, "init"); err != nil {
 		return err
 	}
 	currentBranch, err := runGitOutput(path, "branch", "--show-current")
 	if err == nil && currentBranch == branch {
 		return nil
 	}
-	return runGit(path, "checkout", "-b", branch)
+	return runGitCtx(ctx, path, "checkout", "-b", branch)
 }
 
-func copyDirRecursive(src, dst string, publishMode bool) error {
+func copyDirRecursive(ctx context.Context, src, dst string, publishMode bool) error {
 	return filepath.WalkDir(src, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
 		}
 		rel, _ := filepath.Rel(src, path)
 		if rel == "." {
@@ -409,11 +457,31 @@ func copyDirRecursive(src, dst string, publishMode bool) error {
 		}
 
 		dstPath := filepath.Join(dst, rel)
-		os.MkdirAll(filepath.Dir(dstPath), 0755)
-		data, err := os.ReadFile(path)
-		if err != nil {
+		if err := os.MkdirAll(filepath.Dir(dstPath), 0755); err != nil {
 			return err
 		}
-		return os.WriteFile(dstPath, data, 0644)
+		return copyFileStreaming(path, dstPath)
 	})
+}
+
+func copyFileStreaming(src, dst string) error {
+	srcFile, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer srcFile.Close()
+
+	srcInfo, err := srcFile.Stat()
+	if err != nil {
+		return err
+	}
+
+	dstFile, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, srcInfo.Mode())
+	if err != nil {
+		return err
+	}
+	defer dstFile.Close()
+
+	_, err = io.Copy(dstFile, srcFile)
+	return err
 }

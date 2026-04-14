@@ -11,12 +11,14 @@ const {
   mockListJobs,
   mockGetTask,
   mockListModelRuns,
+  mockListAiReviewNodes,
 } = vi.hoisted(() => ({
   mockGetLlmProviders: vi.fn(),
   mockSubmitJob: vi.fn(),
   mockListJobs: vi.fn(),
   mockGetTask: vi.fn(),
   mockListModelRuns: vi.fn(),
+  mockListAiReviewNodes: vi.fn(),
 }));
 
 vi.mock('../../../api/config', async () => {
@@ -48,6 +50,7 @@ vi.mock('../../../api/task', async () => {
     ...actual,
     getTask: mockGetTask,
     listModelRuns: mockListModelRuns,
+    listAiReviewNodes: mockListAiReviewNodes,
   };
 });
 
@@ -98,6 +101,7 @@ describe('useBoardTaskDetail prompt generation', () => {
     mockSubmitJob.mockResolvedValue({ id: 'job-1' });
     mockListJobs.mockResolvedValue([]);
     mockListModelRuns.mockResolvedValue([]);
+    mockListAiReviewNodes.mockResolvedValue([]);
     useAppStore.setState({ tasks: [] });
   });
 

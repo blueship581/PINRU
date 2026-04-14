@@ -243,7 +243,7 @@ func TestRunCodexReviewIncludesRecentCliOutputInError(t *testing.T) {
 		return mockPath, nil
 	})
 
-	_, err := svc.RunCodexReview(context.Background(), repoDir, nil)
+	_, err := svc.RunCodexReview(context.Background(), CodexReviewRequest{LocalPath: repoDir}, nil)
 	if err == nil {
 		t.Fatalf("RunCodexReview() error = nil, want failure")
 	}
@@ -256,7 +256,15 @@ func TestRunCodexReviewIncludesRecentCliOutputInError(t *testing.T) {
 }
 
 func TestBuildCodexReviewPromptIncludesEvidenceGuardrails(t *testing.T) {
-	prompt := buildCodexReviewPrompt(&pgCodeProjectContext{
+	prompt := buildCodexReviewPrompt(CodexReviewRequest{
+		LocalPath:         "/tmp/demo",
+		OriginalPrompt:    "实现每日任务与奖励记录",
+		CurrentPrompt:     "修复奖励记录漏记问题",
+		ParentReviewNotes: "奖励记录路径缺少空值保护",
+		IssueType:         "Bug修复",
+		IssueTitle:        "奖励记录异常处理",
+		ModelName:         "cotv21-pro",
+	}, &pgCodeProjectContext{
 		ResolvedPath:     "/tmp/demo",
 		PromptCandidates: []string{"/tmp/demo/任务提示词.md"},
 		PromptSources: []pgCodePromptSource{
@@ -282,6 +290,12 @@ func TestBuildCodexReviewPromptIncludesEvidenceGuardrails(t *testing.T) {
 	}
 	if !strings.Contains(prompt, "实现每日任务与奖励记录") {
 		t.Fatalf("prompt missing prompt source content: %q", prompt)
+	}
+	if !strings.Contains(prompt, "\"parent_review_notes\": \"奖励记录路径缺少空值保护\"") {
+		t.Fatalf("prompt missing parent review notes: %q", prompt)
+	}
+	if !strings.Contains(prompt, "\"issue_title\": \"奖励记录异常处理\"") {
+		t.Fatalf("prompt missing issue title: %q", prompt)
 	}
 }
 

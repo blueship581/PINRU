@@ -2,6 +2,7 @@ package chat
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 	"strings"
 	"time"
@@ -238,9 +239,13 @@ func (s *ChatService) SendMessage(req SendMessageRequest) (*SendMessageResponse,
 				Offset:    offset,
 			})
 			if err != nil {
-				_ = s.store.UpdateChatMessage(assistantMsgID, "[轮询失败: "+err.Error()+"]")
+				if uerr := s.store.UpdateChatMessage(assistantMsgID, "[轮询失败: "+err.Error()+"]"); uerr != nil {
+					slog.Error("failed to update chat message after poll error", "msg_id", assistantMsgID, "error", uerr)
+				}
 				if req.AutoSavePrompt {
-					_ = s.store.FailTaskPromptGeneration(swm.Session.TaskID, "轮询失败: "+err.Error(), promptStartedAt)
+					if ferr := s.store.FailTaskPromptGeneration(swm.Session.TaskID, "轮询失败: "+err.Error(), promptStartedAt); ferr != nil {
+						slog.Error("failed to mark prompt generation as failed", "task_id", swm.Session.TaskID, "error", ferr)
+					}
 				}
 				return
 			}
@@ -255,11 +260,17 @@ func (s *ChatService) SendMessage(req SendMessageRequest) (*SendMessageResponse,
 					promptStartedAt,
 				)
 				if err != nil {
-					_ = s.store.FailTaskPromptGeneration(swm.Session.TaskID, err.Error(), promptStartedAt)
+					if ferr := s.store.FailTaskPromptGeneration(swm.Session.TaskID, err.Error(), promptStartedAt); ferr != nil {
+						slog.Error("failed to mark prompt generation as failed", "task_id", swm.Session.TaskID, "error", ferr)
+					}
 					if trimmed := strings.TrimSpace(strings.Join(lines, "\n")); trimmed != "" {
-						_ = s.store.UpdateChatMessage(assistantMsgID, trimmed+"\n\n[提示词回写失败: "+err.Error()+"]")
+						if uerr := s.store.UpdateChatMessage(assistantMsgID, trimmed+"\n\n[提示词回写失败: "+err.Error()+"]"); uerr != nil {
+							slog.Error("failed to update chat message after persist error", "msg_id", assistantMsgID, "error", uerr)
+						}
 					} else {
-						_ = s.store.UpdateChatMessage(assistantMsgID, "[提示词回写失败: "+err.Error()+"]")
+						if uerr := s.store.UpdateChatMessage(assistantMsgID, "[提示词回写失败: "+err.Error()+"]"); uerr != nil {
+							slog.Error("failed to update chat message after persist error", "msg_id", assistantMsgID, "error", uerr)
+						}
 					}
 					return
 				}
@@ -267,7 +278,9 @@ func (s *ChatService) SendMessage(req SendMessageRequest) (*SendMessageResponse,
 					promptPersisted = true
 					persistedPromptText = promptText
 					persistedWarning = warning
-					_ = s.store.UpdateChatMessage(assistantMsgID, renderPersistedPromptResult(promptText, warning))
+					if uerr := s.store.UpdateChatMessage(assistantMsgID, renderPersistedPromptResult(promptText, warning)); uerr != nil {
+						slog.Error("failed to update chat message with persisted prompt", "msg_id", assistantMsgID, "error", uerr)
+					}
 				}
 			}
 			if poll.Done {
@@ -277,11 +290,15 @@ func (s *ChatService) SendMessage(req SendMessageRequest) (*SendMessageResponse,
 				}
 				if req.AutoSavePrompt {
 					if poll.ErrMsg != "" && !promptPersisted {
-						_ = s.store.FailTaskPromptGeneration(swm.Session.TaskID, poll.ErrMsg, promptStartedAt)
+						if ferr := s.store.FailTaskPromptGeneration(swm.Session.TaskID, poll.ErrMsg, promptStartedAt); ferr != nil {
+							slog.Error("failed to mark prompt generation as failed", "task_id", swm.Session.TaskID, "error", ferr)
+						}
 					} else if !promptPersisted {
 						promptText, warning, err := s.persistGeneratedPrompt(swm.Session.TaskID, req.WorkDir, promptSnapshot, result, promptStartedAt)
 						if err != nil {
-							_ = s.store.FailTaskPromptGeneration(swm.Session.TaskID, err.Error(), promptStartedAt)
+							if ferr := s.store.FailTaskPromptGeneration(swm.Session.TaskID, err.Error(), promptStartedAt); ferr != nil {
+								slog.Error("failed to mark prompt generation as failed", "task_id", swm.Session.TaskID, "error", ferr)
+							}
 							if strings.TrimSpace(result) != "" {
 								result += "\n\n"
 							}
@@ -311,9 +328,13 @@ func (s *ChatService) SendMessage(req SendMessageRequest) (*SendMessageResponse,
 						}
 					}
 				}
-				_ = s.store.UpdateChatMessage(assistantMsgID, result)
+				if uerr := s.store.UpdateChatMessage(assistantMsgID, result); uerr != nil {
+					slog.Error("failed to update chat message with final result", "msg_id", assistantMsgID, "error", uerr)
+				}
 				// Auto-title the session from first user message
-				_ = s.autoTitleSession(swm.Session.ID, swm.Messages, content)
+				if err := s.autoTitleSession(swm.Session.ID, swm.Messages, content); err != nil {
+					slog.Error("failed to auto-title session", "session_id", swm.Session.ID, "error", err)
+				}
 				return
 			}
 		}
