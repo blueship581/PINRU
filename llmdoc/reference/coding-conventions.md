@@ -103,3 +103,5 @@ callService('TaskService', 'ListTasks', projectConfigId ?? null);
 - **前端**：vitest，测试文件与源文件同目录，命名 `<name>.test.ts(x)`。
 - **后端**：Go testing 标准库，文件命名 `<name>_test.go`，包名与被测包相同。
 - 测试只覆盖纯函数和关键业务逻辑，UI 快照测试不强制。
+- Windows helper-process 测试若会取消外部命令或制造悬挂子进程，不要直接复用当前 `*.test.exe` 作为被调二进制；应先复制出独立 helper 可执行文件，再由 `.bat` 包装器调用，避免 `go test` 清理临时测试二进制时出现 `Access is denied`。当前实现见 `app/job/service_test.go`（`copyTestExecutable`、`createMockGitCloneFailureExecutable`、`createMockGitCloneHangingExecutable`）。
+- GitHub Actions 构建链路默认按 Node 24 维护；升级 CI action 时保持与 `.github/workflows/build.yml` 一致：`actions/checkout@v5`、`actions/setup-go@v6`、`actions/setup-node@v5`、`actions/upload-artifact@v6`，并保留 `FORCE_JAVASCRIPT_ACTIONS_TO_NODE24=true`。
