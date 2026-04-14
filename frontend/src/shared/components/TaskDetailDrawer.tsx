@@ -281,9 +281,18 @@ export default function TaskDetailDrawer({
   const [copiedConversation, setCopiedConversation] = useState<string | null>(null);
   const [sessionIdEditMode, setSessionIdEditMode] = useState<string | null>(null);
   const [copiedDetailSessionId, setCopiedDetailSessionId] = useState<string | null>(null);
-  const safeLlmProviders = Array.isArray(llmProviders) ? llmProviders : [];
-  const safeSelectedModelRuns = Array.isArray(selectedModelRuns) ? selectedModelRuns : [];
-  const safeSelectedAiReviewNodes = Array.isArray(selectedAiReviewNodes) ? selectedAiReviewNodes : [];
+  const safeLlmProviders = useMemo(
+    () => (Array.isArray(llmProviders) ? llmProviders : []),
+    [llmProviders],
+  );
+  const safeSelectedModelRuns = useMemo(
+    () => (Array.isArray(selectedModelRuns) ? selectedModelRuns : []),
+    [selectedModelRuns],
+  );
+  const safeSelectedAiReviewNodes = useMemo(
+    () => (Array.isArray(selectedAiReviewNodes) ? selectedAiReviewNodes : []),
+    [selectedAiReviewNodes],
+  );
   const promptLlmProviders = useMemo(
     () => safeLlmProviders.filter((provider) => provider.providerType === 'claude_code_acp'),
     [safeLlmProviders],
@@ -658,6 +667,26 @@ export default function TaskDetailDrawer({
         },
       };
     });
+  };
+
+  const applyPolishedAiReviewNodeField = (
+    nodeId: string,
+    field: 'promptText' | 'reviewNotes',
+    value: string,
+  ) => {
+    if (field === 'promptText') {
+      handleAiReviewNodeDraftChange(nodeId, {
+        promptText: value,
+        polishedPromptText: '',
+      });
+      setEditingNodePrompt((current) => (current === nodeId ? null : current));
+      return;
+    }
+    handleAiReviewNodeDraftChange(nodeId, {
+      reviewNotes: value,
+      polishedReviewNotes: '',
+    });
+    setEditingNodeNotes((current) => (current === nodeId ? null : current));
   };
 
   const handlePolishText = async (
@@ -1915,7 +1944,13 @@ export default function TaskDetailDrawer({
                           <p className="text-[9px] font-medium text-indigo-400/40">润色建议</p>
                           <ActionIconButton
                             label="应用润色建议"
-                            onClick={() => handleAiReviewNodeDraftChange(node.id, { promptText: draft.polishedPromptText, polishedPromptText: '' })}
+                            onClick={() =>
+                              applyPolishedAiReviewNodeField(
+                                node.id,
+                                'promptText',
+                                draft.polishedPromptText,
+                              )
+                            }
                           >
                             <Check className="h-3 w-3" />
                           </ActionIconButton>
@@ -2008,7 +2043,13 @@ export default function TaskDetailDrawer({
                           <p className="text-[9px] font-medium text-amber-400/40">润色建议</p>
                           <ActionIconButton
                             label="应用润色建议"
-                            onClick={() => handleAiReviewNodeDraftChange(node.id, { reviewNotes: draft.polishedReviewNotes, polishedReviewNotes: '' })}
+                            onClick={() =>
+                              applyPolishedAiReviewNodeField(
+                                node.id,
+                                'reviewNotes',
+                                draft.polishedReviewNotes,
+                              )
+                            }
                           >
                             <Check className="h-3 w-3" />
                           </ActionIconButton>

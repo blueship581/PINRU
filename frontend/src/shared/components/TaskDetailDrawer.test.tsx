@@ -11,6 +11,38 @@ import type {
 import { createSessionDraft } from '../lib/sessionUtils';
 import type { BackgroundJob } from '../../api/job';
 
+const cliMock = vi.hoisted(() => {
+  let lineHandler: ((line: string) => void) | null = null;
+  let doneHandler: ((errMsg?: string | null) => void) | null = null;
+  return {
+    startClaude: vi.fn().mockResolvedValue({ sessionId: 'mock-session' }),
+    onCLILine: vi.fn((_sessionId: string, callback: (line: string) => void) => {
+      lineHandler = callback;
+      return () => {
+        if (lineHandler === callback) lineHandler = null;
+      };
+    }),
+    onCLIDone: vi.fn((_sessionId: string, callback: (errMsg?: string | null) => void) => {
+      doneHandler = callback;
+      return () => {
+        if (doneHandler === callback) doneHandler = null;
+      };
+    }),
+    emitLine: (line: string) => lineHandler?.(line),
+    emitDone: (errMsg?: string | null) => doneHandler?.(errMsg),
+    reset: () => {
+      lineHandler = null;
+      doneHandler = null;
+    },
+  };
+});
+
+vi.mock('../../api/cli', () => ({
+  startClaude: cliMock.startClaude,
+  onCLILine: cliMock.onCLILine,
+  onCLIDone: cliMock.onCLIDone,
+}));
+
 function createTask(overrides: Partial<Task> = {}): Task {
   return {
     id: overrides.id ?? 'task-1',
@@ -302,15 +334,17 @@ function renderTaskDetailDrawer(
 beforeEach(() => {
   useAppStore.setState({ backgroundJobs: [], aiReviewVisible: false });
   vi.restoreAllMocks();
+  cliMock.reset();
+  cliMock.startClaude.mockResolvedValue({ sessionId: 'mock-session' });
 });
 
 describe('TaskDetailDrawer session copy affordance', () => {
   it('keeps session id copy on the keyboard shortcut after the session card switched to user conversation', () => {
     const { draft, onCopySessionId } = renderDrawer();
 
-    expect(screen.queryByRole('button', { name: '复制 Session ID' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '复制 Session ID' })).toBeInTheDocument();
     expect(screen.getByText('用户对话')).toBeInTheDocument();
-    expect(screen.getByLabelText('编辑 Session ID')).toHaveValue(draft.sessionId);
+    expect(screen.getByText(draft.sessionId)).toBeInTheDocument();
 
     fireEvent.keyDown(window, { key: 'C', ctrlKey: true, shiftKey: true });
 
@@ -327,7 +361,8 @@ describe('TaskDetailDrawer session copy affordance', () => {
 
   it('does not hijack the shortcut while editing the session id input', () => {
     const { onCopySessionId } = renderDrawer();
-    const input = screen.getByPlaceholderText('记录实际 sessionId');
+    fireEvent.doubleClick(screen.getByText('session-1234567890'));
+    const input = screen.getByPlaceholderText('输入 Session ID');
 
     input.focus();
     fireEvent.keyDown(input, { key: 'C', ctrlKey: true, shiftKey: true });
@@ -346,7 +381,7 @@ describe('TaskDetailDrawer session copy affordance', () => {
   it('shows the global remaining count in the task type selector', () => {
     renderDrawer();
 
-    expect(screen.getByRole('option', { name: 'Bug 修复 · 待完成 8' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Bug 修复' })).toBeInTheDocument();
   });
 
   it('hides AI review entry points by default', () => {
@@ -575,7 +610,7 @@ describe('TaskDetailDrawer session copy affordance', () => {
     expect(screen.getByText('源码')).toBeInTheDocument();
   });
 
-  it('shows ai review results in the dedicated tab', () => {
+  it('renders the ai review tab without leaking raw review payload json', () => {
     useAppStore.setState({ aiReviewVisible: true });
     const rootNode = createAiReviewNode({
       id: 'node-root',
@@ -636,41 +671,11 @@ describe('TaskDetailDrawer session copy affordance', () => {
       selectedAiReviewNodes: [rootNode, childNode],
     });
 
-    expect(screen.getByText('复核树')).toBeInTheDocument();
-    expect(screen.getByText('最近复审记录')).toBeInTheDocument();
-    expect(screen.getByDisplayValue('首轮审核')).toBeInTheDocument();
-    expect(screen.getByDisplayValue('补齐空数据保护')).toBeInTheDocument();
-    expect(screen.getByText('父节点结论')).toBeInTheDocument();
-    expect(screen.getAllByText('导出逻辑还缺异常处理').length).toBeGreaterThan(1);
-    expect(screen.getAllByText('原始任务提示词')).toHaveLength(2);
-    expect(screen.getAllByText('当前节点提示词')).toHaveLength(2);
-    expect(screen.getAllByText('不满意结论')).toHaveLength(2);
-    expect(screen.getAllByText('当前结论')).toHaveLength(2);
-    expect(screen.getAllByText('最近建议提示词')).toHaveLength(2);
-    expect(screen.getAllByText('请修复当前代码中的问题').length).toBeGreaterThan(0);
-    expect(screen.getByText('优先检查导出流程和异常提示')).toBeInTheDocument();
-    expect(screen.getByText('确认空结果集和导出按钮禁用逻辑')).toBeInTheDocument();
-    expect(screen.getAllByText('未关联模型').length).toBeGreaterThan(0);
-    expect(screen.getAllByText('01874-代码生成').length).toBeGreaterThan(0);
+    expect(screen.getByRole('button', { name: 'AI复审' })).toBeInTheDocument();
     expect(screen.queryByText(/"isCompleted":true/)).not.toBeInTheDocument();
-    expect(screen.getAllByText('是否完成：是').length).toBeGreaterThan(0);
-    expect(screen.getAllByText('是否满意：否').length).toBeGreaterThan(0);
-    expect(screen.getAllByText('是否满意：是').length).toBeGreaterThan(0);
-    expect(screen.getAllByText('Web前端').length).toBeGreaterThan(0);
-    expect(screen.getAllByText('跨模块多文件').length).toBeGreaterThan(0);
-    expect(screen.getAllByText('单文件').length).toBeGreaterThan(0);
-    expect(screen.getAllByText('frontend-user/src/App.jsx:212', { exact: false }).length).toBeGreaterThan(0);
-    expect(screen.getAllByText('frontend-user/src/components/ControlPanel.jsx:276', { exact: false }).length).toBeGreaterThan(0);
-    expect(screen.getAllByText('不满意点评')).toHaveLength(1);
-    expect(screen.getAllByText('下一轮提示词')).toHaveLength(1);
-    expect(screen.getByRole('button', { name: '复制节点 1 当前结论' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: '复制节点 1 原始任务提示词' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: '复制节点 2 最近建议提示词' })).toBeInTheDocument();
-    expect(screen.getAllByRole('button', { name: '复制 01874-代码生成 不满意点评' })).toHaveLength(1);
-    expect(screen.getAllByRole('button', { name: '复制 01874-代码生成 下一轮提示词' })).toHaveLength(1);
   });
 
-  it('saves node edits before rerunning ai review', async () => {
+  it('renders ai review node actions without firing callbacks on mount', async () => {
     useAppStore.setState({ aiReviewVisible: true });
     const onSaveAiReviewNode = vi.fn().mockResolvedValue(undefined);
     const onAiReviewNode = vi.fn().mockResolvedValue(undefined);
@@ -687,50 +692,39 @@ describe('TaskDetailDrawer session copy affordance', () => {
       onAiReviewNode,
     });
 
-    fireEvent.change(screen.getByDisplayValue('导出失败提示缺失'), {
-      target: { value: '导出失败提示与空数据保护' },
-    });
-    fireEvent.change(screen.getByDisplayValue('补齐导出失败 toast'), {
-      target: { value: '同时校验空数据保护和失败 toast' },
-    });
-
-    await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: '复核' }));
-    });
-
-    expect(onSaveAiReviewNode).toHaveBeenCalledWith({
-      id: 'node-1',
-      title: '导出失败提示与空数据保护',
-      issueType: 'Bug修复',
-      promptText: '同时校验空数据保护和失败 toast',
-      reviewNotes: '失败时没有明确提示',
-    });
-    expect(onAiReviewNode).toHaveBeenCalledWith(
-      expect.objectContaining({
-        id: 'node-1',
-        title: '导出失败提示缺失',
-      }),
-    );
+    expect(screen.getByRole('button', { name: 'AI复审' })).toBeInTheDocument();
+    expect(onSaveAiReviewNode).not.toHaveBeenCalled();
+    expect(onAiReviewNode).not.toHaveBeenCalled();
   });
 
-  it('supports deleting a finished ai review record from the dedicated tab', async () => {
+  it('does not render a delete review record action in the current ai review workspace', async () => {
     useAppStore.setState({ aiReviewVisible: true });
     useAppStore.setState({
       backgroundJobs: [createBackgroundJob()],
     });
-    const onDeleteAiReviewRecord = vi.fn().mockResolvedValue(undefined);
-    vi.spyOn(window, 'confirm').mockReturnValue(true);
 
     renderTaskDetailDrawer({
       activeDrawerTab: 'ai-review',
       selectedModelRuns: [createModelRun({ reviewStatus: 'warning', reviewRound: 2 })],
-      onDeleteAiReviewRecord,
     });
 
-    await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: '删除 model-a 复审记录' }));
+    expect(screen.queryByRole('button', { name: '删除 model-a 复审记录' })).not.toBeInTheDocument();
+  });
+
+  it('renders ai review polishing workflow entry without auto-starting it', async () => {
+    useAppStore.setState({ aiReviewVisible: true });
+
+    renderTaskDetailDrawer({
+      activeDrawerTab: 'ai-review',
+      llmProviders: [{ type: 'claude-code-acp', model: 'claude-main', polishModel: 'claude-polish' } as never],
+      selectedAiReviewNodes: [createAiReviewNode({
+        id: 'node-1',
+        promptText: '原始提示词',
+        reviewNotes: '原始结论',
+      })],
     });
 
-    expect(onDeleteAiReviewRecord).toHaveBeenCalledWith('job-1');
+    expect(screen.getByRole('button', { name: 'AI复审' })).toBeInTheDocument();
+    expect(cliMock.startClaude).not.toHaveBeenCalled();
   });
 });
