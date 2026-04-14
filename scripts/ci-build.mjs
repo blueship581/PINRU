@@ -21,6 +21,35 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function quoteWindowsArg(value) {
+  if (value.length === 0) {
+    return '""';
+  }
+
+  if (!/[\s"]/u.test(value)) {
+    return value;
+  }
+
+  return `"${value.replace(/(\\*)"/g, '$1$1\\"').replace(/(\\+)$/g, '$1$1')}"`;
+}
+
+function resolveSpawnTarget(command, args) {
+  if (!isWindows || !/\.(cmd|bat)$/i.test(command)) {
+    return {
+      file: command,
+      args,
+    };
+  }
+
+  const comspec = process.env.ComSpec || 'cmd.exe';
+  const commandLine = [quoteWindowsArg(command), ...args.map(quoteWindowsArg)].join(' ');
+
+  return {
+    file: comspec,
+    args: ['/d', '/s', '/c', commandLine],
+  };
+}
+
 function run(command, args, options = {}) {
   const {
     cwd = rootDir,
@@ -35,7 +64,8 @@ function run(command, args, options = {}) {
 
     const runOnce = () => {
       attempt += 1;
-      const child = spawn(command, args, {
+      const target = resolveSpawnTarget(command, args);
+      const child = spawn(target.file, target.args, {
         cwd,
         env: {
           ...process.env,
