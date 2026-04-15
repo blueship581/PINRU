@@ -1276,11 +1276,13 @@ func (s *JobService) ensureAiReviewTargetNode(taskID string, payload AiReviewPay
 }
 
 func (s *JobService) syncAiReviewNodeChildren(node store.AiReviewNode, result *appcli.CodexReviewResult) error {
+	if result == nil || len(result.Issues) == 0 || node.Status != "warning" {
+		// 复审通过或无新问题时，保留历史子节点，维持完整审核链路
+		return nil
+	}
+	// 有新问题需要写入时，先清理旧子节点再重建
 	if err := s.store.DeactivateAiReviewNodeChildren(node.ID); err != nil {
 		return fmt.Errorf("清理旧的子复审节点失败: %w", err)
-	}
-	if result == nil || len(result.Issues) == 0 || node.Status != "warning" {
-		return nil
 	}
 
 	for index, issue := range result.Issues {
