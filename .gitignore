@@ -4,6 +4,7 @@ dist/
 frontend/dist/
 frontend/bindings/
 frontend/node_modules/
+PINRU-macos-arm64.zip
 
 # Database
 *.db
