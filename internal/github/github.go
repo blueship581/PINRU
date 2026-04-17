@@ -3,11 +3,14 @@ package github
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/blueship581/pinru/internal/errs"
 )
 
 const apiBase = "https://api.github.com"
@@ -34,10 +37,10 @@ type apiError struct {
 
 func TestConnection(username, token string) (bool, error) {
 	if strings.TrimSpace(username) == "" {
-		return false, fmt.Errorf("GitHub 用户名不能为空")
+		return false, errors.New(errs.MsgGitHubUsernameRequired)
 	}
 	if strings.TrimSpace(token) == "" {
-		return false, fmt.Errorf("GitHub 访问令牌不能为空")
+		return false, errors.New(errs.MsgGitHubTokenRequired)
 	}
 
 	user, err := GetAuthenticatedUser(token)
@@ -49,7 +52,7 @@ func TestConnection(username, token string) (bool, error) {
 
 func GetAuthenticatedUser(token string) (*User, error) {
 	if strings.TrimSpace(token) == "" {
-		return nil, fmt.Errorf("GitHub 访问令牌不能为空")
+		return nil, errors.New(errs.MsgGitHubTokenRequired)
 	}
 
 	resp, err := doRequest("GET", apiBase+"/user", token, nil)
@@ -127,7 +130,7 @@ func getRepository(targetRepo, token string) (*Repo, error) {
 func createRepository(targetRepo, token string, description *string) (*Repo, error) {
 	parts := strings.SplitN(targetRepo, "/", 2)
 	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
-		return nil, fmt.Errorf("源码仓库格式应为 owner/repo")
+		return nil, errors.New(errs.MsgSourceRepoFormat)
 	}
 	owner, repoName := parts[0], parts[1]
 
@@ -215,14 +218,14 @@ func checkStatus(resp *http.Response) error {
 	}
 	switch resp.StatusCode {
 	case 401:
-		return fmt.Errorf("GitHub 认证失败，请检查访问令牌")
+		return errors.New(errs.MsgGitHubAuthFail)
 	case 403:
-		return fmt.Errorf("GitHub 拒绝了本次操作，请确认令牌权限")
+		return errors.New(errs.MsgGitHubForbidden)
 	case 404:
-		return fmt.Errorf("Not Found")
+		return errors.New(errs.MsgGitHubNotFound)
 	case 422:
-		return fmt.Errorf("GitHub 无法创建 PR，请检查分支是否有实际改动")
+		return errors.New(errs.MsgGitHubPRCreateFail)
 	default:
-		return fmt.Errorf("GitHub API 请求失败: HTTP %d", resp.StatusCode)
+		return fmt.Errorf(errs.FmtGitHubAPIFailStatus, resp.StatusCode)
 	}
 }

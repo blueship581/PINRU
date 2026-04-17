@@ -3,6 +3,7 @@ package store
 import (
 	"strings"
 
+	"github.com/blueship581/pinru/internal/errs"
 	"github.com/google/uuid"
 )
 
@@ -77,26 +78,26 @@ func (s *Store) UpdateChatSessionTitle(id, title string) error {
 	res, err := s.DB.Exec(
 		`UPDATE chat_sessions SET title = ?, updated_at = strftime('%s','now') WHERE id = ?`, title, id,
 	)
-	return ensureRowsAffected(res, err, "chat session %q not found", id)
+	return ensureRowsAffected(res, err, errs.FmtStoreChatSessionNotFound, id)
 }
 
 func (s *Store) UpdateChatSessionModel(id, model string) error {
 	res, err := s.DB.Exec(
 		`UPDATE chat_sessions SET model = ?, updated_at = strftime('%s','now') WHERE id = ?`, model, id,
 	)
-	return ensureRowsAffected(res, err, "chat session %q not found", id)
+	return ensureRowsAffected(res, err, errs.FmtStoreChatSessionNotFound, id)
 }
 
 func (s *Store) TouchChatSession(id string) error {
 	res, err := s.DB.Exec(
 		`UPDATE chat_sessions SET updated_at = strftime('%s','now') WHERE id = ?`, id,
 	)
-	return ensureRowsAffected(res, err, "chat session %q not found", id)
+	return ensureRowsAffected(res, err, errs.FmtStoreChatSessionNotFound, id)
 }
 
 func (s *Store) DeleteChatSession(id string) error {
 	res, err := s.DB.Exec(`DELETE FROM chat_sessions WHERE id = ?`, id)
-	return ensureRowsAffected(res, err, "chat session %q not found", id)
+	return ensureRowsAffected(res, err, errs.FmtStoreChatSessionNotFound, id)
 }
 
 func (s *Store) AddChatMessage(sessionID, role, content string) (*ChatMessage, error) {
@@ -122,7 +123,7 @@ func (s *Store) AddChatMessage(sessionID, role, content string) (*ChatMessage, e
 	res, err := tx.Exec(
 		`UPDATE chat_sessions SET updated_at = strftime('%s','now') WHERE id = ?`, sessionID,
 	)
-	if err := ensureRowsAffected(res, err, "chat session %q not found", sessionID); err != nil {
+	if err := ensureRowsAffected(res, err, errs.FmtStoreChatSessionNotFound, sessionID); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -166,10 +167,10 @@ func (s *Store) ListChatMessages(sessionID string) ([]ChatMessage, error) {
 
 func (s *Store) UpdateChatMessage(id, content string) error {
 	res, err := s.DB.Exec(`UPDATE chat_messages SET content = ? WHERE id = ?`, content, id)
-	return ensureRowsAffected(res, err, "chat message %q not found", id)
+	return ensureRowsAffected(res, err, errs.FmtStoreChatMessageNotFound, id)
 }
 
 func (s *Store) DeleteChatMessage(id string) error {
 	res, err := s.DB.Exec(`DELETE FROM chat_messages WHERE id = ?`, id)
-	return ensureRowsAffected(res, err, "chat message %q not found", id)
+	return ensureRowsAffected(res, err, errs.FmtStoreChatMessageNotFound, id)
 }

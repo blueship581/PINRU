@@ -2,9 +2,12 @@ package prompt
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/blueship581/pinru/internal/errs"
 )
 
 // ── CLI 输出中提取提示词 ─────────────────────────────────────────────────────
@@ -50,7 +53,7 @@ func (p GeneratedPromptPayload) PromptValue() string {
 func ExtractPromptFromCLIOutput(output string) (string, error) {
 	normalized := strings.TrimSpace(strings.ReplaceAll(output, "\r\n", "\n"))
 	if normalized == "" {
-		return "", fmt.Errorf("模型输出为空")
+		return "", errors.New(errs.MsgModelOutputEmpty)
 	}
 
 	// 第一层：JSON payload 提取（最可靠，skill 正常输出时命中）
@@ -89,44 +92,43 @@ func ExtractPromptFromCLIOutput(output string) (string, error) {
 		return best, nil
 	}
 
-	return "", fmt.Errorf("模型输出中没有识别到可用的提示词正文")
+	return "", errors.New(errs.MsgPromptNotDetected)
 }
 
 func ExtractPromptJSONPayload(output string) (GeneratedPromptPayload, bool, error) {
-	candidates := []string{strings.TrimSpace(output)}
-	if trimmedFence := strings.TrimSpace(TrimPromptCodeFence(output)); trimmedFence != "" && trimmedFence != candidates[0] {
-		candidates = append(candidates, trimmedFence)
+	seen := make(map[string]bool)
+	addCandidate := func(candidates []string, s string) []string {
+		s = strings.TrimSpace(s)
+		if s != "" && !seen[s] {
+			seen[s] = true
+			candidates = append(candidates, s)
+		}
+		return candidates
 	}
-	if jsonObject, ok := extractFirstJSONObject(output); ok {
-		jsonObject = strings.TrimSpace(jsonObject)
-		alreadyIncluded := false
-		for _, candidate := range candidates {
-			if candidate == jsonObject {
-				alreadyIncluded = true
-				break
-			}
-		}
-		if !alreadyIncluded {
-			candidates = append(candidates, jsonObject)
-		}
+
+	var candidates []string
+	candidates = addCandidate(candidates, output)
+	candidates = addCandidate(candidates, TrimPromptCodeFence(output))
+	// Scan all JSON objects in the output, not just the first one.
+	// Claude Code may emit tool-result JSON objects before the final prompt payload.
+	for _, jsonObject := range extractAllJSONObjects(output) {
+		candidates = addCandidate(candidates, jsonObject)
 	}
 
 	var jsonErr error
 	for _, candidate := range candidates {
 		payload, ok, err := tryParsePromptJSONPayload(candidate)
-		if ok {
-			if err != nil {
-				return GeneratedPromptPayload{}, true, err
-			}
+		if ok && err == nil {
 			return payload, true, nil
 		}
-		if err != nil && jsonErr == nil {
+		// ok=true but prompt empty: record and keep trying remaining candidates.
+		if ok && err != nil && jsonErr == nil {
 			jsonErr = err
 		}
 	}
 
 	if jsonErr != nil {
-		return GeneratedPromptPayload{}, false, nil
+		return GeneratedPromptPayload{}, true, jsonErr
 	}
 	return GeneratedPromptPayload{}, false, nil
 }
@@ -139,28 +141,34 @@ func tryParsePromptJSONPayload(candidate string) (GeneratedPromptPayload, bool, 
 
 	var payload GeneratedPromptPayload
 	if err := json.Unmarshal([]byte(trimmed), &payload); err != nil {
-		return GeneratedPromptPayload{}, true, fmt.Errorf("JSON 解析失败: %w", err)
+		return GeneratedPromptPayload{}, true, fmt.Errorf("JSON 解析失败：%w", err)
 	}
 
 	promptText := payload.PromptValue()
 	if promptText == "" {
-		return GeneratedPromptPayload{}, true, fmt.Errorf("JSON 中 prompt 为空")
+		return GeneratedPromptPayload{}, true, errors.New(errs.MsgPromptJSONEmpty)
 	}
 
 	payload.Prompt = promptText
 	return payload, true, nil
 }
 
-func extractFirstJSONObject(text string) (string, bool) {
-	for start := 0; start < len(text); start++ {
+func extractAllJSONObjects(text string) []string {
+	var results []string
+	start := 0
+	for start < len(text) {
 		if text[start] != '{' {
+			start++
 			continue
 		}
 		if candidate, ok := extractBalancedJSONObject(text[start:]); ok {
-			return candidate, true
+			results = append(results, candidate)
+			start += len(candidate)
+		} else {
+			start++
 		}
 	}
-	return "", false
+	return results
 }
 
 func extractBalancedJSONObject(text string) (string, bool) {
@@ -213,6 +221,113 @@ func ExtractPromptBetweenMarkers(output string) (string, bool) {
 		return "", false
 	}
 	return strings.TrimSpace(afterStart[:end]), true
+}
+
+func ExtractHumanizedTextFromCLIOutput(output string) (string, error) {
+	normalized := strings.TrimSpace(strings.ReplaceAll(output, "\r\n", "\n"))
+	if normalized == "" {
+		return "", errors.New(errs.MsgModelOutputEmpty)
+	}
+
+	candidate := CleanHumanizedCandidate(normalized)
+	if candidate != "" {
+		return candidate, nil
+	}
+
+	best := ""
+	for _, block := range strings.Split(normalized, "\n\n") {
+		cleaned := CleanHumanizedCandidate(block)
+		if utf8.RuneCountInString(cleaned) > utf8.RuneCountInString(best) {
+			best = cleaned
+		}
+	}
+	if best != "" {
+		return best, nil
+	}
+
+	return "", errors.New(errs.MsgPolishContentNotFound)
+}
+
+func CleanHumanizedCandidate(raw string) string {
+	text := strings.TrimSpace(strings.ReplaceAll(raw, "\r\n", "\n"))
+	if text == "" {
+		return ""
+	}
+
+	text = TrimPromptCodeFence(text)
+	lines := strings.Split(text, "\n")
+	cleaned := make([]string, 0, len(lines))
+	lastWasBlank := false
+
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			if len(cleaned) == 0 || lastWasBlank {
+				continue
+			}
+			cleaned = append(cleaned, "")
+			lastWasBlank = true
+			continue
+		}
+
+		lastWasBlank = false
+		line = strings.TrimSpace(StripHumanizedLeadIn(line))
+		if line == "" || IsHumanizedNoiseLine(line) {
+			continue
+		}
+		cleaned = append(cleaned, line)
+	}
+
+	return strings.TrimSpace(strings.Join(cleaned, "\n"))
+}
+
+func StripHumanizedLeadIn(line string) string {
+	prefixes := []string{
+		"以下是润色后的文本：",
+		"以下是润色后的文本:",
+		"以下是处理后的文本：",
+		"以下是处理后的文本:",
+		"以下是改写后的文本：",
+		"以下是改写后的文本:",
+		"润色后：",
+		"润色后:",
+		"处理后：",
+		"处理后:",
+		"改写后：",
+		"改写后:",
+		"结果如下：",
+		"结果如下:",
+	}
+	for _, prefix := range prefixes {
+		if strings.HasPrefix(line, prefix) {
+			return strings.TrimSpace(strings.TrimPrefix(line, prefix))
+		}
+	}
+	return line
+}
+
+func IsHumanizedNoiseLine(line string) bool {
+	trimmed := strings.TrimSpace(line)
+	if trimmed == "" {
+		return false
+	}
+
+	prefixes := []string{
+		"以下是润色后的文本",
+		"以下是处理后的文本",
+		"以下是改写后的文本",
+		"我已经将文本调整为更自然的表达",
+		"我已将文本调整为更自然的表达",
+		"下面是去除 AI 痕迹后的版本",
+		"下面是润色后的版本",
+	}
+	for _, prefix := range prefixes {
+		if strings.HasPrefix(trimmed, prefix) {
+			return true
+		}
+	}
+
+	return false
 }
 
 func CleanPromptCandidate(raw string) string {

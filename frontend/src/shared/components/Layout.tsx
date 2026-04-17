@@ -2,6 +2,7 @@ import { Outlet, NavLink, useLocation, useNavigate } from 'react-router-dom';
 import {
   Check,
   ChevronDown,
+  FileSpreadsheet,
   FolderDown,
   FolderOpen,
   GitPullRequest,
@@ -37,11 +38,20 @@ import {
   SIDEBAR_MAX_WIDTH_PX,
   SIDEBAR_WIDTH_STORAGE_KEY,
 } from '../lib/layoutSizing';
+import {
+  MsgDirNotExist,
+  MsgPathNotDir,
+  MsgDirNotEmpty,
+  MsgSourceRepoFormat,
+  MsgOriginRequired,
+  MsgSourceModelInList,
+} from '../constants/messages';
 
 const NAV_ITEMS: Array<{ to: string; label: string; icon: typeof FolderDown; end?: boolean }> = [
   { to: '/', icon: Home, label: '主页', end: true },
   { to: '/claim', icon: FolderDown, label: '领题' },
   { to: '/submit', icon: GitPullRequest, label: '提交' },
+  { to: '/report', icon: FileSpreadsheet, label: '报表' },
 ];
 
 type ModelEntry = {
@@ -102,13 +112,13 @@ function measureProjectNameWidth(text: string) {
 async function ensureEmptyProjectDirectory(path: string) {
   const inspection = await inspectDirectory(path);
   if (!inspection.exists) {
-    throw new Error('所选目录不存在');
+    throw new Error(MsgDirNotExist);
   }
   if (!inspection.isDir) {
-    throw new Error('所选路径不是文件夹');
+    throw new Error(MsgPathNotDir);
   }
   if (!inspection.isEmpty) {
-    throw new Error('请选择空文件夹，当前目录中已有内容');
+    throw new Error(MsgDirNotEmpty);
   }
   return inspection;
 }
@@ -285,6 +295,7 @@ export default function Layout() {
         '2': '/claim',
         '3': '/prompt',
         '4': '/submit',
+        '5': '/report',
       };
 
       const nextRoute = routeMap[event.key];
@@ -340,6 +351,7 @@ export default function Layout() {
     setPickingProjectDir(true);
     setProjectError('');
 
+    let selectedPath = '';
     try {
       const result = await Dialogs.OpenFile({
         CanChooseDirectories: true,
@@ -352,19 +364,36 @@ export default function Layout() {
         Directory: projectForm.basePath.trim() || undefined,
       });
 
-      const selectedPath = Array.isArray(result) ? result[0] : result;
-      if (!selectedPath || !selectedPath.trim()) {
-        return;
-      }
+      // Wails 在 Windows 非多选模式下应返回字符串，macOS/Linux 也是字符串。
+      // 但用户若选中 OneDrive 未同步、库文件夹、"这台电脑"等虚拟位置，
+      // Wails 底层 SIGDN_FILESYSPATH 可能返回空串或异常。
+      const picked = Array.isArray(result) ? result[0] ?? '' : result ?? '';
+      selectedPath = typeof picked === 'string' ? picked.trim() : '';
+    } catch (error) {
+      // 原始错误通常形如 "Dialog.OpenFile failed: error getting selection"，
+      // 对用户没意义，统一翻译成可操作的中文提示。
+      setProjectError(
+        '无法从所选位置获取文件路径（可能是 OneDrive 未同步目录、系统库或网络位置）。请改选本机真实目录，或直接在输入框粘贴完整路径。',
+      );
+      setPickingProjectDir(false);
+      return;
+    }
 
-      const inspection = await ensureEmptyProjectDirectory(selectedPath.trim());
+    if (!selectedPath) {
+      // 点击取消不提示；但如果是 Wails 返回空串的异常场景，给一行提示，避免"点了没反应"。
+      setPickingProjectDir(false);
+      return;
+    }
+
+    try {
+      const inspection = await ensureEmptyProjectDirectory(selectedPath);
       setProjectForm((prev) => ({
         ...prev,
         basePath: inspection.path,
         name: inspection.name || prev.name,
       }));
     } catch (error) {
-      setProjectError(error instanceof Error ? error.message : '打开目录选择器失败');
+      setProjectError(error instanceof Error ? error.message : '校验所选目录失败');
     } finally {
       setPickingProjectDir(false);
     }
@@ -529,15 +558,15 @@ export default function Layout() {
       return;
     }
     if (projectForm.defaultSubmitRepo.trim() && !/^[^/\s]+\/[^/\s]+$/.test(projectForm.defaultSubmitRepo.trim())) {
-      setProjectError('源码仓库格式应为 owner/repo');
+      setProjectError(MsgSourceRepoFormat);
       return;
     }
     if (!normalizedModels.includes('ORIGIN')) {
-      setProjectError('ORIGIN 必须存在，作为原始参照副本');
+      setProjectError(MsgOriginRequired);
       return;
     }
     if (!normalizedModels.some((model) => model.toUpperCase() === sourceModelFolder.toUpperCase())) {
-      setProjectError('源码模型必须在模型列表中');
+      setProjectError(MsgSourceModelInList);
       return;
     }
 

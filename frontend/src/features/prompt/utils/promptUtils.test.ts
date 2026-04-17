@@ -25,6 +25,8 @@ function buildTask(overrides: Partial<TaskFromDB>): TaskFromDB {
     updatedAt: overrides.updatedAt ?? 1712550300,
     notes: overrides.notes ?? null,
     projectConfigId: overrides.projectConfigId ?? null,
+    projectType: overrides.projectType ?? '',
+    changeScope: overrides.changeScope ?? '',
   };
 }
 

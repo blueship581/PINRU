@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/blueship581/pinru/internal/errs"
 )
 
 const (
@@ -154,7 +156,7 @@ func parseTaskTypeCountMap(raw string) (map[string]int, error) {
 
 	var counts map[string]int
 	if err := json.Unmarshal([]byte(trimmed), &counts); err != nil {
-		return nil, fmt.Errorf("invalid task type count JSON: %w", err)
+		return nil, fmt.Errorf(errs.FmtStoreInvalidTaskTypeCountJSON, err)
 	}
 	return cloneTaskTypeCountMap(counts), nil
 }
@@ -226,11 +228,11 @@ func (s *Store) backfillProjectTaskTypeTotals() error {
 
 		remainingCounts, err := parseTaskTypeCountMap(project.TaskTypeQuotas)
 		if err != nil {
-			return fmt.Errorf("backfill project %s quotas: %w", project.ID, err)
+			return fmt.Errorf(errs.FmtStoreBackfillQuotas, project.ID, err)
 		}
 		usedCounts, err := s.countProjectUsedQuotaByTaskType(project.ID)
 		if err != nil {
-			return fmt.Errorf("backfill project %s usage: %w", project.ID, err)
+			return fmt.Errorf(errs.FmtStoreBackfillUsage, project.ID, err)
 		}
 
 		totalCounts := make(map[string]int, len(remainingCounts)+len(usedCounts))
@@ -245,7 +247,7 @@ func (s *Store) backfillProjectTaskTypeTotals() error {
 
 		totalJSON, err := marshalTaskTypeCountMap(totalCounts)
 		if err != nil {
-			return fmt.Errorf("backfill project %s totals: %w", project.ID, err)
+			return fmt.Errorf(errs.FmtStoreBackfillTotals, project.ID, err)
 		}
 
 		if _, err := s.DB.Exec(
@@ -436,7 +438,7 @@ func (s *Store) ConsumeProjectQuota(projectID, taskType string) error {
 		return err
 	}
 	if p == nil {
-		return fmt.Errorf("project not found: %s", projectID)
+		return fmt.Errorf(errs.FmtStoreProjectNotFound, projectID)
 	}
 
 	quotas, err := parseTaskTypeCountMap(p.TaskTypeQuotas)
@@ -446,7 +448,7 @@ func (s *Store) ConsumeProjectQuota(projectID, taskType string) error {
 
 	current, ok := quotas[taskType]
 	if !ok {
-		return fmt.Errorf("任务类型 %q 未配置配额", taskType)
+		return fmt.Errorf(errs.FmtTaskTypeNoQuota, taskType)
 	}
 	quotas[taskType] = current - 1
 

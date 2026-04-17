@@ -1,6 +1,11 @@
 import type { Dispatch, SetStateAction } from 'react';
 import type { GitHubAccountConfig } from '../../../api/config';
 import type { LlmProviderConfig, LlmProviderType } from '../../../api/llm';
+import {
+  MsgGitLabURLRequired,
+  MsgGitLabURLScheme,
+  MsgGitLabTokenRequired,
+} from '../../../shared/constants/messages';
 
 type SaveStatus = 'idle' | 'saved' | 'error';
 
@@ -57,41 +62,16 @@ export function validateGitLabSettings(url: string, token: string, hasStoredToke
   const trimmedToken = token.trim();
 
   if (!trimmedURL) {
-    return 'GitLab 服务器地址不能为空';
+    return MsgGitLabURLRequired;
   }
   if (!/^https?:\/\//i.test(trimmedURL)) {
-    return 'GitLab 服务器地址必须以 http:// 或 https:// 开头';
+    return MsgGitLabURLScheme;
   }
   if (!trimmedToken && !hasStoredToken) {
-    return 'GitLab 访问令牌不能为空';
+    return MsgGitLabTokenRequired;
   }
 
   return '';
-}
-
-export function formatErrorMessage(error: unknown, fallback: string) {
-  if (typeof error === 'string') {
-    return error;
-  }
-
-  if (error instanceof Error && error.message.trim()) {
-    return error.message;
-  }
-
-  if (error && typeof error === 'object') {
-    const maybeMessage = Reflect.get(error, 'message');
-    if (typeof maybeMessage === 'string' && maybeMessage.trim()) {
-      return maybeMessage;
-    }
-
-    try {
-      return JSON.stringify(error);
-    } catch {
-      return fallback;
-    }
-  }
-
-  return fallback;
 }
 
 export function maskSecret(value: string) {

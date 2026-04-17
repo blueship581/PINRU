@@ -5,10 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"strings"
 	"time"
 
 	appcli "github.com/blueship581/pinru/app/cli"
+	"github.com/blueship581/pinru/internal/errs"
 	"github.com/blueship581/pinru/internal/llm"
 	internalprompt "github.com/blueship581/pinru/internal/prompt"
 	"github.com/blueship581/pinru/internal/store"
@@ -81,10 +83,10 @@ func (s *PromptService) GenerateTaskPromptWithContext(ctx context.Context, req G
 		ctx = context.Background()
 	}
 	if strings.TrimSpace(req.TaskID) == "" {
-		return nil, fmt.Errorf("任务不能为空")
+		return nil, errors.New(errs.MsgTaskRequired)
 	}
 	if strings.TrimSpace(req.TaskType) == "" {
-		return nil, fmt.Errorf("任务类型不能为空")
+		return nil, errors.New(errs.MsgTaskTypeRequired)
 	}
 
 	task, err := s.store.GetTask(req.TaskID)
@@ -92,14 +94,14 @@ func (s *PromptService) GenerateTaskPromptWithContext(ctx context.Context, req G
 		return nil, err
 	}
 	if task == nil {
-		return nil, fmt.Errorf("未找到任务: %s", req.TaskID)
+		return nil, fmt.Errorf(errs.FmtTaskNotFound, req.TaskID)
 	}
 	if task.LocalPath == nil {
-		return nil, fmt.Errorf("当前任务没有本地代码目录，请先完成领题 Clone")
+		return nil, errors.New(errs.MsgTaskMissingWorkDir)
 	}
 
 	if _, err := s.cliSvc.CheckCLI(); err != nil {
-		return nil, fmt.Errorf("请先安装 Claude Code CLI: npm install -g @anthropic-ai/claude-code")
+		return nil, errors.New(errs.MsgClaudeCodeCliNotInstalledInstallGuide)
 	}
 
 	selection, err := resolveProviderForPromptGeneration(s.store, req.ProviderID)
@@ -134,9 +136,9 @@ func (s *PromptService) GenerateTaskPromptWithContext(ctx context.Context, req G
 		)
 		errMsg := normalizePromptGenerationError(err)
 		if failErr := s.store.FailTaskPromptGeneration(task.ID, errMsg, startedAt); failErr != nil {
-			return nil, fmt.Errorf("%s；提示词状态回写失败: %v", errMsg, failErr)
+			return nil, fmt.Errorf(errs.FmtPromptStatusBack, errMsg, failErr)
 		}
-		return nil, fmt.Errorf("%s", errMsg)
+		return nil, errors.New(errMsg)
 	}
 	slog.Info("CLI prompt generation completed",
 		"project", task.ProjectName,
@@ -159,10 +161,10 @@ func (s *PromptService) GenerateTaskPromptWithContext(ctx context.Context, req G
 
 func (s *PromptService) SaveTaskPrompt(taskID, promptText string) error {
 	if strings.TrimSpace(taskID) == "" {
-		return fmt.Errorf("任务不能为空")
+		return errors.New(errs.MsgTaskRequired)
 	}
 	if strings.TrimSpace(promptText) == "" {
-		return fmt.Errorf("提示词内容不能为空")
+		return errors.New(errs.MsgPromptContentRequired)
 	}
 
 	task, err := LoadTaskForPromptSync(s.store, taskID)
@@ -200,11 +202,39 @@ func (s *PromptService) executeCliWithRetry(ctx context.Context, workDir, prompt
 		}
 		lastErr = err
 	}
-	return "", fmt.Errorf("提示词生成失败，已重试 %d 次。请检查 Claude Code 配置后重试。最后一次错误: %v", maxRetries, lastErr)
+	return "", fmt.Errorf(errs.FmtPromptRetryFailed, maxRetries, lastErr)
 }
 
 // executeCliPromptGeneration 启动一次 CLI Agent 执行并从输出中提取提示词。
 func (s *PromptService) executeCliPromptGeneration(ctx context.Context, workDir, prompt, model string) (string, error) {
+	output, err := s.executeCliRaw(ctx, workDir, prompt, model)
+	if err != nil {
+		return "", err
+	}
+
+	promptText, err := ExtractPromptFromCLIOutput(output)
+	if err != nil {
+		return "", fmt.Errorf(errs.FmtPromptExtractFail, err)
+	}
+
+	return promptText, nil
+}
+
+func (s *PromptService) executeCliHumanizer(ctx context.Context, workDir, prompt, model string) (string, error) {
+	output, err := s.executeCliRaw(ctx, workDir, prompt, model)
+	if err != nil {
+		return "", err
+	}
+
+	humanizedText, err := ExtractHumanizedTextFromCLIOutput(output)
+	if err != nil {
+		return "", fmt.Errorf(errs.FmtPolishExtractFail, err)
+	}
+
+	return humanizedText, nil
+}
+
+func (s *PromptService) executeCliRaw(ctx context.Context, workDir, prompt, model string) (string, error) {
 	additionalDirs := cliAdditionalDirs()
 
 	resp, err := s.cliSvc.StartClaude(appcli.StartClaudeRequest{
@@ -215,20 +245,14 @@ func (s *PromptService) executeCliPromptGeneration(ctx context.Context, workDir,
 		AdditionalDirs: additionalDirs,
 	})
 	if err != nil {
-		return "", fmt.Errorf("启动 Claude Code 失败: %w", err)
+		return "", fmt.Errorf(errs.FmtClaudeStartFail, err)
 	}
 
 	output, err := s.waitForCliCompletion(ctx, resp.SessionID)
 	if err != nil {
 		return "", err
 	}
-
-	promptText, err := ExtractPromptFromCLIOutput(output)
-	if err != nil {
-		return "", fmt.Errorf("无法从 Agent 输出中提取提示词: %w", err)
-	}
-
-	return promptText, nil
+	return output, nil
 }
 
 // waitForCliCompletion 同步轮询等待 CLI 执行完成，返回完整输出。
@@ -249,7 +273,7 @@ func (s *PromptService) waitForCliCompletion(ctx context.Context, sessionID stri
 			Offset:    offset,
 		})
 		if err != nil {
-			return "", fmt.Errorf("轮询 CLI 输出失败: %w", err)
+			return "", fmt.Errorf(errs.FmtCliPollFail, err)
 		}
 
 		lines = append(lines, poll.Lines...)
@@ -257,11 +281,11 @@ func (s *PromptService) waitForCliCompletion(ctx context.Context, sessionID stri
 
 		if poll.Done {
 			if poll.ErrMsg != "" {
-				return "", fmt.Errorf("Claude Code 执行出错: %s", poll.ErrMsg)
+				return "", fmt.Errorf(errs.FmtClaudeRunErr, poll.ErrMsg)
 			}
 			combined := strings.Join(lines, "\n")
 			if strings.Contains(combined, "No available accounts") || strings.Contains(combined, "no available accounts") {
-				return "", fmt.Errorf("Claude Code ACP 账号池暂时耗尽（503），请稍后重试或检查 ACP 配置")
+				return "", errors.New(errs.MsgClaudeCodeAcpBusy)
 			}
 			return combined, nil
 		}
@@ -320,6 +344,28 @@ type promptProviderSelection struct {
 	Model string
 }
 
+func buildPolishSkillPrompt(text string) string {
+	trimmed := strings.TrimSpace(text)
+	return strings.Join([]string{
+		"/humanizer-zh",
+		"",
+		"请把下面内容改成更自然、更口语化的业务描述。",
+		"不要出现代码片段、伪代码、命令、路径、变量名或技术实现细节。",
+		"重点保留业务现象、用户感知、场景变化和需要补齐的业务处理。",
+		"只返回润色后的正文。",
+		"",
+		trimmed,
+	}, "\n")
+}
+
+func defaultPolishWorkDir() string {
+	workDir, err := os.Getwd()
+	if err != nil || strings.TrimSpace(workDir) == "" {
+		return "."
+	}
+	return workDir
+}
+
 // resolveProviderForPromptGeneration 从 LLM provider 配置中解析出提示词生成使用的 Claude Code provider。
 func resolveProviderForPromptGeneration(st *store.Store, requestedID *string) (promptProviderSelection, error) {
 	providers, err := st.ListLLMProviders()
@@ -336,10 +382,10 @@ func resolveProviderForPromptGeneration(st *store.Store, requestedID *string) (p
 	if requestedID != nil && strings.TrimSpace(*requestedID) != "" {
 		selected := selectProvider(providers, requestedID)
 		if selected == nil {
-			return promptProviderSelection{}, fmt.Errorf("未找到所选的提示词提供商，请重新选择 Claude Code (ACP)")
+			return promptProviderSelection{}, errors.New(errs.MsgClaudeCodeAcpMissing)
 		}
 		if selected.ProviderType != "claude_code_acp" {
-			return promptProviderSelection{}, fmt.Errorf("生成提示词当前仅支持 Claude Code (ACP) 提供商，请在设置中改为 Claude Code (ACP)")
+			return promptProviderSelection{}, errors.New(errs.MsgClaudeCodeAcpOnly)
 		}
 		return buildPromptProviderSelection(*selected), nil
 	}
@@ -351,7 +397,7 @@ func resolveProviderForPromptGeneration(st *store.Store, requestedID *string) (p
 		return buildPromptProviderSelection(*selected), nil
 	}
 
-	return promptProviderSelection{}, fmt.Errorf("未找到可用的 Claude Code (ACP) 提供商，请先在设置中配置一个")
+	return promptProviderSelection{}, errors.New(errs.MsgClaudeCodeAcpNotConfigured)
 }
 
 func buildPromptProviderSelection(provider store.LLMProvider) promptProviderSelection {
@@ -359,10 +405,18 @@ func buildPromptProviderSelection(provider store.LLMProvider) promptProviderSele
 	if name == "" {
 		name = "Claude Code CLI"
 	}
+	model := strings.TrimSpace(provider.Model)
+	if model == "" {
+		model = defaultPromptGenerationModel
+	}
 	return promptProviderSelection{
 		Name:  name,
-		Model: strings.TrimSpace(provider.Model),
+		Model: model,
 	}
+}
+
+func resolveProviderForPolish(st *store.Store, requestedID *string) (promptProviderSelection, error) {
+	return resolveProviderForPromptGeneration(st, requestedID)
 }
 
 func selectDefaultClaudeCodeProvider(providers []store.LLMProvider) *store.LLMProvider {
@@ -444,10 +498,10 @@ func (s *PromptService) resolveProviderForTest(provider store.LLMProvider) (stor
 	}
 
 	if provider.ProviderType == "" {
-		return store.LLMProvider{}, fmt.Errorf("提供商类型不能为空")
+		return store.LLMProvider{}, errors.New(errs.MsgProviderTypeRequired)
 	}
 	if provider.Model == "" {
-		return store.LLMProvider{}, fmt.Errorf("模型名称不能为空")
+		return store.LLMProvider{}, errors.New(errs.MsgModelNameRequired)
 	}
 
 	baseURL := provider.BaseURL
@@ -462,4 +516,56 @@ func (s *PromptService) resolveProviderForTest(provider store.LLMProvider) (stor
 	provider.BaseURL = baseURL
 
 	return provider, nil
+}
+
+// ── 润色文本 ────────────────────────────────────────────────────────────────
+
+// PolishTextRequest 润色请求。
+type PolishTextRequest struct {
+	Text       string  `json:"text"`
+	ProviderID *string `json:"providerId"`
+}
+
+// PolishTextResult 润色结果。
+type PolishTextResult struct {
+	PolishedText string `json:"polishedText"`
+	ProviderName string `json:"providerName"`
+	Model        string `json:"model"`
+}
+
+// PolishText 使用 Claude Code CLI 执行 /humanizer-zh 并返回输出正文。
+func (s *PromptService) PolishText(req PolishTextRequest) (*PolishTextResult, error) {
+	text := strings.TrimSpace(req.Text)
+	if text == "" {
+		return nil, errors.New(errs.MsgPolishTextRequired)
+	}
+
+	if _, err := s.cliSvc.CheckCLI(); err != nil {
+		return nil, errors.New(errs.MsgClaudeCodeCliNotInstalledInstallGuide)
+	}
+
+	selection, err := resolveProviderForPolish(s.store, req.ProviderID)
+	if err != nil {
+		return nil, err
+	}
+
+	workDir := defaultPolishWorkDir()
+	skillPrompt := buildPolishSkillPrompt(text)
+	slog.Info("PolishText started", "model", selection.Model, "provider", selection.Name, "textLen", len(text))
+	polished, err := s.executeCliHumanizer(context.Background(), workDir, skillPrompt, selection.Model)
+	if err != nil {
+		return nil, fmt.Errorf(errs.FmtPolishFailed, err)
+	}
+
+	polished = strings.TrimSpace(polished)
+	if polished == "" {
+		return nil, errors.New(errs.MsgHumanizerEmpty)
+	}
+
+	slog.Info("PolishText completed", "model", selection.Model, "resultLen", len(polished))
+	return &PolishTextResult{
+		PolishedText: polished,
+		ProviderName: selection.Name,
+		Model:        selection.Model,
+	}, nil
 }

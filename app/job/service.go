@@ -18,6 +18,7 @@ import (
 	appprompt "github.com/blueship581/pinru/app/prompt"
 	appsubmit "github.com/blueship581/pinru/app/submit"
 	apptask "github.com/blueship581/pinru/app/task"
+	"github.com/blueship581/pinru/internal/errs"
 	"github.com/blueship581/pinru/internal/store"
 	"github.com/blueship581/pinru/internal/util"
 	"github.com/google/uuid"
@@ -31,7 +32,7 @@ const (
 	gitCloneIdleTimeout      = 30 * time.Second
 )
 
-var errGitCloneIdleTimeout = fmt.Errorf("git clone 超过 %s 无进度输出，已中止", gitCloneIdleTimeout)
+var errGitCloneIdleTimeout = fmt.Errorf(errs.FmtJobGitCloneIdleTimeout, gitCloneIdleTimeout)
 
 type JobService struct {
 	store     *store.Store
@@ -98,7 +99,7 @@ func (s *JobService) SubmitJob(req SubmitJobRequest) (*store.BackgroundJob, erro
 	if req.JobType == "ai_review" {
 		payload, ok := parseAiReviewPayloadForDedup(req.InputPayload)
 		if !ok {
-			return nil, fmt.Errorf("解析 ai_review 参数失败")
+			return nil, errors.New(errs.MsgJobAiReviewParseFail)
 		}
 		preparedPayload, err := s.prepareAiReviewPayload(req.TaskID, payload)
 		if err != nil {
@@ -106,7 +107,7 @@ func (s *JobService) SubmitJob(req SubmitJobRequest) (*store.BackgroundJob, erro
 		}
 		payloadJSON, err := json.Marshal(preparedPayload)
 		if err != nil {
-			return nil, fmt.Errorf("序列化 ai_review 参数失败: %w", err)
+			return nil, fmt.Errorf(errs.FmtJobSerializeAiReview, err)
 		}
 		req.InputPayload = string(payloadJSON)
 	}
@@ -142,7 +143,7 @@ func (s *JobService) SubmitJob(req SubmitJobRequest) (*store.BackgroundJob, erro
 	}
 	if err := s.store.CreateBackgroundJob(job); err != nil {
 		s.mu.Unlock()
-		return nil, fmt.Errorf("创建后台任务失败: %w", err)
+		return nil, fmt.Errorf(errs.FmtJobCreateFail, err)
 	}
 	s.mu.Unlock()
 
@@ -171,7 +172,7 @@ func (s *JobService) findActiveJobLocked(req SubmitJobRequest) (*store.Backgroun
 	filter := &store.JobFilter{TaskID: &req.TaskID}
 	jobs, err := s.store.ListBackgroundJobs(filter)
 	if err != nil {
-		return nil, fmt.Errorf("查询后台任务失败: %w", err)
+		return nil, fmt.Errorf(errs.FmtJobQueryFail, err)
 	}
 
 	for _, job := range jobs {
@@ -215,13 +216,13 @@ func (s *JobService) RetryJob(id string) (*store.BackgroundJob, error) {
 		return nil, err
 	}
 	if job == nil {
-		return nil, fmt.Errorf("任务不存在: %s", id)
+		return nil, fmt.Errorf(errs.FmtTaskNotFound, id)
 	}
 	if job.Status != "error" {
-		return nil, fmt.Errorf("只能重试失败的任务")
+		return nil, errors.New(errs.MsgJobRetryOnlyFailed)
 	}
 	if job.RetryCount >= job.MaxRetries {
-		return nil, fmt.Errorf("已达最大重试次数 (%d)", job.MaxRetries)
+		return nil, fmt.Errorf(errs.FmtJobMaxRetryReached, job.MaxRetries)
 	}
 
 	if err := s.store.IncrementBackgroundJobRetry(id); err != nil {
@@ -248,7 +249,7 @@ func (s *JobService) CancelJob(id string) error {
 		return err
 	}
 	if job == nil {
-		return fmt.Errorf("任务不存在: %s", id)
+		return fmt.Errorf(errs.FmtTaskNotFound, id)
 	}
 
 	s.mu.Lock()
@@ -261,7 +262,7 @@ func (s *JobService) CancelJob(id string) error {
 	if err := s.store.CancelBackgroundJob(id); err != nil {
 		return err
 	}
-	if err := s.restoreAiReviewNodeAfterCancellation(job); err != nil {
+	if err := s.restoreAiReviewRoundAfterCancellation(job); err != nil {
 		return err
 	}
 
@@ -279,13 +280,13 @@ func (s *JobService) DeleteAiReviewJob(id string) error {
 		return err
 	}
 	if job == nil {
-		return fmt.Errorf("任务不存在: %s", id)
+		return fmt.Errorf(errs.FmtTaskNotFound, id)
 	}
 	if job.JobType != "ai_review" {
-		return fmt.Errorf("只能删除 AI 复审记录")
+		return errors.New(errs.MsgJobDeleteOnlyReview)
 	}
 	if job.Status == "pending" || job.Status == "running" {
-		return fmt.Errorf("复审任务仍在进行中，请先取消后再删除")
+		return errors.New(errs.MsgJobReviewStillRunning)
 	}
 	if err := s.store.DeleteBackgroundJob(id); err != nil {
 		return err
@@ -294,51 +295,35 @@ func (s *JobService) DeleteAiReviewJob(id string) error {
 	return nil
 }
 
-func (s *JobService) restoreAiReviewNodeAfterCancellation(job *store.BackgroundJob) error {
+func (s *JobService) restoreAiReviewRoundAfterCancellation(job *store.BackgroundJob) error {
 	if job == nil || job.JobType != "ai_review" || job.TaskID == nil {
 		return nil
 	}
 
 	payload, ok := parseAiReviewPayloadForDedup(job.InputPayload)
-	if !ok || payload.ReviewNodeID == nil || strings.TrimSpace(*payload.ReviewNodeID) == "" {
+	if !ok || payload.ReviewRoundID == nil || strings.TrimSpace(*payload.ReviewRoundID) == "" {
 		return nil
 	}
 
-	node, err := s.store.GetAiReviewNode(strings.TrimSpace(*payload.ReviewNodeID))
-	if err != nil || node == nil {
+	round, err := s.store.GetAiReviewRound(strings.TrimSpace(*payload.ReviewRoundID))
+	if err != nil || round == nil {
 		return err
 	}
-	if node.LastJobID == nil || strings.TrimSpace(*node.LastJobID) != job.ID {
+	if round.JobID == nil || strings.TrimSpace(*round.JobID) != job.ID {
 		return nil
 	}
 
-	if payload.NodeSnapshot != nil {
-		node.Status = firstNonEmpty(payload.NodeSnapshot.Status, "none")
-		node.RunCount = max(payload.NodeSnapshot.RunCount, 0)
-		node.ReviewNotes = strings.TrimSpace(payload.NodeSnapshot.ReviewNotes)
-		node.ParentReviewNotes = strings.TrimSpace(payload.NodeSnapshot.ParentReviewNotes)
-		node.NextPrompt = strings.TrimSpace(payload.NodeSnapshot.NextPrompt)
-		node.ProjectType = strings.TrimSpace(payload.NodeSnapshot.ProjectType)
-		node.ChangeScope = strings.TrimSpace(payload.NodeSnapshot.ChangeScope)
-		node.KeyLocations = strings.TrimSpace(payload.NodeSnapshot.KeyLocations)
-	} else {
-		node.Status = "none"
-		node.RunCount = 0
-		node.ReviewNotes = ""
-		node.NextPrompt = ""
-		node.ProjectType = ""
-		node.ChangeScope = ""
-		node.KeyLocations = ""
+	// 取消时恢复到 none 状态
+	previousStatus := "none"
+	if payload.RoundSnapshot != nil {
+		previousStatus = firstNonEmpty(payload.RoundSnapshot.Status, "none")
 	}
-	node.LastJobID = nil
-	node.IsCompleted = nil
-	node.IsSatisfied = nil
-	if err := s.store.SaveAiReviewNode(*node); err != nil {
+	if err := s.store.UpdateAiReviewRoundStatus(round.ID, previousStatus, nil); err != nil {
 		return err
 	}
 
-	if node.ModelRunID != nil && strings.TrimSpace(*node.ModelRunID) != "" {
-		return s.syncModelRunAiReviewSummary(strings.TrimSpace(*node.ModelRunID))
+	if round.ModelRunID != nil && strings.TrimSpace(*round.ModelRunID) != "" {
+		return s.syncModelRunAiReviewSummaryFromRounds(strings.TrimSpace(*round.ModelRunID))
 	}
 	return nil
 }
@@ -408,7 +393,7 @@ func (s *JobService) executeJob(id string, req SubmitJobRequest) {
 	case "ai_review":
 		execResult, execErr = s.executeAiReview(ctx, id, req)
 	default:
-		execErr = fmt.Errorf("未知的任务类型: %s", req.JobType)
+		execErr = fmt.Errorf(errs.FmtJobUnknownType, req.JobType)
 	}
 
 	if ctx.Err() == context.DeadlineExceeded {
@@ -489,7 +474,7 @@ func (s *JobService) executePromptGenerate(
 
 	var promptReq appprompt.GeneratePromptRequest
 	if err := json.Unmarshal([]byte(req.InputPayload), &promptReq); err != nil {
-		return jobExecutionResult{}, fmt.Errorf("解析提示词生成参数失败: %w", err)
+		return jobExecutionResult{}, fmt.Errorf(errs.FmtJobParsePromptGenParam, err)
 	}
 
 	// 获取项目名称用于日志标识
@@ -533,10 +518,10 @@ func (s *JobService) executeSessionSync(
 	req SubmitJobRequest,
 ) (jobExecutionResult, error) {
 	if strings.TrimSpace(req.TaskID) == "" {
-		return jobExecutionResult{}, fmt.Errorf("session_sync 缺少 taskId")
+		return jobExecutionResult{}, errors.New(errs.MsgJobSessionSyncNoTask)
 	}
 	if s.taskSvc == nil {
-		return jobExecutionResult{}, fmt.Errorf("session_sync 服务未初始化")
+		return jobExecutionResult{}, errors.New(errs.MsgJobSessionSyncNoService)
 	}
 
 	projectLabel := req.TaskID
@@ -660,7 +645,7 @@ func (s *JobService) executeGitClone(
 
 	var payload GitClonePayload
 	if err := json.Unmarshal([]byte(req.InputPayload), &payload); err != nil {
-		return jobExecutionResult{}, fmt.Errorf("解析 git_clone 参数失败: %w", err)
+		return jobExecutionResult{}, fmt.Errorf(errs.FmtJobParseGitCloneParam, err)
 	}
 
 	sourceModelID := payload.SourceModelID
@@ -707,7 +692,7 @@ func (s *JobService) executeGitClone(
 		)
 		s.emitProgress(jobID, req.JobType, req.TaskID, "running", 12, &retryMsg, nil)
 		if cleanupErr := cleanupGitCloneTargets(payload); cleanupErr != nil {
-			return jobExecutionResult{}, fmt.Errorf("清理重试目录失败: %w", cleanupErr)
+			return jobExecutionResult{}, fmt.Errorf(errs.FmtJobCleanRetryDirFail, cleanupErr)
 		}
 		select {
 		case <-ctx.Done():
@@ -717,12 +702,12 @@ func (s *JobService) executeGitClone(
 	}
 
 	if lastErr == nil {
-		lastErr = fmt.Errorf("git clone 失败")
+		lastErr = errors.New(errs.MsgGitCloneFailed)
 	}
 	if cleanupErr := cleanupGitCloneTargets(payload); cleanupErr != nil {
-		lastErr = errors.Join(lastErr, fmt.Errorf("失败后清理目录失败: %w", cleanupErr))
+		lastErr = errors.Join(lastErr, fmt.Errorf(errs.FmtJobCleanFailedDirFail, cleanupErr))
 	}
-	return jobExecutionResult{}, fmt.Errorf("git clone 连续失败 %d 次: %w", gitCloneRetryAttempts, lastErr)
+	return jobExecutionResult{}, fmt.Errorf(errs.FmtJobGitCloneRetriesFailed, gitCloneRetryAttempts, lastErr)
 }
 
 // PrSubmitPayload 描述一次 pr_submit 任务的参数，与 appsubmit.SubmitAllRequest 对应。
@@ -745,7 +730,7 @@ func (s *JobService) executePrSubmit(
 
 	var payload PrSubmitPayload
 	if err := json.Unmarshal([]byte(req.InputPayload), &payload); err != nil {
-		return jobExecutionResult{}, fmt.Errorf("解析 pr_submit 参数失败: %w", err)
+		return jobExecutionResult{}, fmt.Errorf(errs.FmtJobParsePrSubmitParam, err)
 	}
 
 	slog.Info("pr submit started",
@@ -787,7 +772,7 @@ func (s *JobService) executePrSubmit(
 			return jobExecutionResult{}, r.err
 		}
 		if r.res != nil && r.res.RepoError != "" {
-			err := fmt.Errorf("源码上传失败: %s", r.res.RepoError)
+			err := fmt.Errorf(errs.FmtJobSourceUploadFail, r.res.RepoError)
 			slog.Error("pr submit failed",
 				"task_id", payload.TaskID,
 				"target_repo", payload.TargetRepo,
@@ -817,50 +802,37 @@ func (s *JobService) executePrSubmit(
 
 // AiReviewPayload 描述一次 ai_review 任务的参数。
 type AiReviewPayload struct {
-	ReviewNodeID *string               `json:"reviewNodeId"`
-	ModelRunID   *string               `json:"modelRunId"`
-	ModelName    string                `json:"modelName"`
-	LocalPath    string                `json:"localPath"`
-	NodeSnapshot *AiReviewNodeSnapshot `json:"nodeSnapshot,omitempty"`
+	ReviewRoundID      *string              `json:"reviewRoundId,omitempty"`
+	ModelRunID         *string              `json:"modelRunId"`
+	ModelName          string               `json:"modelName"`
+	LocalPath          string               `json:"localPath"`
+	NextPromptOverride string               `json:"nextPromptOverride,omitempty"`
+	RoundSnapshot      *AiReviewRoundSnapshot `json:"roundSnapshot,omitempty"`
+
+	// Deprecated: 兼容旧版前端，映射到 ReviewRoundID
+	ReviewNodeID *string `json:"reviewNodeId,omitempty"`
 }
 
-type AiReviewNodeSnapshot struct {
-	Status            string `json:"status"`
-	RunCount          int    `json:"runCount"`
-	ReviewNotes       string `json:"reviewNotes"`
-	ParentReviewNotes string `json:"parentReviewNotes"`
-	NextPrompt        string `json:"nextPrompt"`
-	ProjectType       string `json:"projectType"`
-	ChangeScope       string `json:"changeScope"`
-	KeyLocations      string `json:"keyLocations"`
-}
-
-type AiReviewIssue struct {
-	Title        string `json:"title"`
-	IssueType    string `json:"issueType"`
-	ReviewNotes  string `json:"reviewNotes"`
-	NextPrompt   string `json:"nextPrompt"`
-	KeyLocations string `json:"keyLocations"`
+type AiReviewRoundSnapshot struct {
+	Status      string `json:"status"`
+	RoundNumber int    `json:"roundNumber"`
 }
 
 // AiReviewResult 记录一次 ai_review 任务的输出。
 type AiReviewResult struct {
-	ReviewNodeID string          `json:"reviewNodeId"`
-	ModelRunID   string          `json:"modelRunId"`
-	ModelName    string          `json:"modelName"`
-	ReviewStatus string          `json:"reviewStatus"`
-	ReviewRound  int             `json:"reviewRound"`
-	ReviewNotes  string          `json:"reviewNotes"`
-	NextPrompt   string          `json:"nextPrompt"`
-	IsCompleted  bool            `json:"isCompleted"`
-	IsSatisfied  bool            `json:"isSatisfied"`
-	ProjectType  string          `json:"projectType"`
-	ChangeScope  string          `json:"changeScope"`
-	KeyLocations string          `json:"keyLocations"`
-	Issues       []AiReviewIssue `json:"issues,omitempty"`
+	ReviewRoundID string `json:"reviewRoundId"`
+	ModelRunID    string `json:"modelRunId"`
+	ModelName     string `json:"modelName"`
+	ReviewStatus  string `json:"reviewStatus"`
+	ReviewRound   int    `json:"reviewRound"`
+	ReviewNotes   string `json:"reviewNotes"`
+	NextPrompt    string `json:"nextPrompt"`
+	IsCompleted   bool   `json:"isCompleted"`
+	IsSatisfied   bool   `json:"isSatisfied"`
+	ProjectType   string `json:"projectType"`
+	ChangeScope   string `json:"changeScope"`
+	KeyLocations  string `json:"keyLocations"`
 }
-
-const aiReviewMaxRounds = 1
 
 func (s *JobService) executeAiReview(
 	ctx context.Context,
@@ -868,212 +840,191 @@ func (s *JobService) executeAiReview(
 	req SubmitJobRequest,
 ) (jobExecutionResult, error) {
 	if s.cliSvc == nil {
-		return jobExecutionResult{}, fmt.Errorf("cli 服务未初始化")
+		return jobExecutionResult{}, errors.New(errs.MsgJobCliUninitialized)
 	}
 
 	var payload AiReviewPayload
 	if err := json.Unmarshal([]byte(req.InputPayload), &payload); err != nil {
-		return jobExecutionResult{}, fmt.Errorf("解析 ai_review 参数失败: %w", err)
+		return jobExecutionResult{}, fmt.Errorf("%s：%w", errs.MsgJobAiReviewParseFail, err)
 	}
 	payload, err := s.prepareAiReviewPayload(req.TaskID, payload)
 	if err != nil {
 		return jobExecutionResult{}, err
 	}
-	if payload.ReviewNodeID == nil || strings.TrimSpace(*payload.ReviewNodeID) == "" {
-		return jobExecutionResult{}, fmt.Errorf("ai_review 缺少 reviewNodeId")
+	if payload.ReviewRoundID == nil || strings.TrimSpace(*payload.ReviewRoundID) == "" {
+		return jobExecutionResult{}, errors.New(errs.MsgJobAiReviewNoRound)
 	}
 
-	node, err := s.store.GetAiReviewNode(strings.TrimSpace(*payload.ReviewNodeID))
+	round, err := s.store.GetAiReviewRound(strings.TrimSpace(*payload.ReviewRoundID))
 	if err != nil {
-		return jobExecutionResult{}, fmt.Errorf("读取复审节点失败: %w", err)
+		return jobExecutionResult{}, fmt.Errorf(errs.FmtJobReadReviewRound, err)
 	}
-	if node == nil {
-		return jobExecutionResult{}, fmt.Errorf("未找到复审节点: %s", strings.TrimSpace(*payload.ReviewNodeID))
-	}
-
-	if node.ParentID != nil && strings.TrimSpace(*node.ParentID) != "" {
-		parent, err := s.store.GetAiReviewNode(strings.TrimSpace(*node.ParentID))
-		if err != nil {
-			return jobExecutionResult{}, fmt.Errorf("读取父复审节点失败: %w", err)
-		}
-		if parent != nil {
-			node.ParentReviewNotes = strings.TrimSpace(parent.ReviewNotes)
-		}
+	if round == nil {
+		return jobExecutionResult{}, fmt.Errorf(errs.FmtJobReviewRoundNotFound, strings.TrimSpace(*payload.ReviewRoundID))
 	}
 
 	modelRunID := ""
-	if node.ModelRunID != nil {
-		modelRunID = strings.TrimSpace(*node.ModelRunID)
+	if round.ModelRunID != nil {
+		modelRunID = strings.TrimSpace(*round.ModelRunID)
 	}
 
-	label := normalizeAiReviewNodeLabel(*node)
-	reviewRound := node.RunCount + 1
-	node.Status = "running"
-	node.LastJobID = strPtr(jobID)
-	if err := s.store.SaveAiReviewNode(*node); err != nil {
-		return jobExecutionResult{}, fmt.Errorf("更新复审节点状态失败: %w", err)
+	label := normalizeAiReviewRoundLabel(*round)
+	roundNumber := round.RoundNumber
+
+	// 标记为 running
+	if err := s.store.UpdateAiReviewRoundStatus(round.ID, "running", strPtr(jobID)); err != nil {
+		return jobExecutionResult{}, fmt.Errorf(errs.FmtJobUpdateReviewRoundFail, err)
 	}
 	if modelRunID != "" {
-		if err := s.syncModelRunAiReviewSummary(modelRunID); err != nil {
+		if err := s.syncModelRunAiReviewSummaryFromRounds(modelRunID); err != nil {
 			slog.Error("failed to sync model run review summary", "model_run_id", modelRunID, "error", err)
 		}
 	}
 
-	var lastResult *appcli.CodexReviewResult
+	attemptLabel := fmt.Sprintf("第 %d 轮", roundNumber)
+	slog.Info("ai review round started",
+		"job_id", jobID,
+		"review_round_id", round.ID,
+		"review_label", label,
+		"round_number", roundNumber,
+	)
+	s.emitProgress(jobID, req.JobType, req.TaskID, "running", 10,
+		strPtr(fmt.Sprintf("[%s] 复核%s…", label, attemptLabel)),
+		nil,
+	)
 
-	for attempt := 1; attempt <= aiReviewMaxRounds; attempt++ {
-		attemptLabel := fmt.Sprintf("第 %d 次", reviewRound)
-		if aiReviewMaxRounds > 1 {
-			attemptLabel = fmt.Sprintf("第 %d 次（尝试 %d/%d）", reviewRound, attempt, aiReviewMaxRounds)
-		}
+	type reviewOut struct {
+		result *appcli.CodexReviewResult
+		err    error
+	}
+	ch := make(chan reviewOut, 1)
 
-		slog.Info("ai review round started",
-			"job_id", jobID,
-			"review_node_id", node.ID,
-			"review_label", label,
-			"review_round", reviewRound,
-			"attempt", attempt,
-		)
-		s.emitProgress(jobID, req.JobType, req.TaskID, "running",
-			(attempt-1)*45,
-			strPtr(fmt.Sprintf("[%s] 复核%s…", label, attemptLabel)),
-			nil,
-		)
-
-		var roundErr error
-		type reviewOut struct {
-			result *appcli.CodexReviewResult
-			err    error
-		}
-		ch := make(chan reviewOut, 1)
-
-		go func(currentAttempt int) {
-			res, err := s.cliSvc.RunCodexReview(ctx, appcli.CodexReviewRequest{
-				LocalPath:         payload.LocalPath,
-				OriginalPrompt:    strings.TrimSpace(node.OriginalPrompt),
-				CurrentPrompt:     strings.TrimSpace(node.PromptText),
-				ParentReviewNotes: strings.TrimSpace(node.ParentReviewNotes),
-				IssueType:         strings.TrimSpace(node.IssueType),
-				IssueTitle:        strings.TrimSpace(node.Title),
-				ModelName:         strings.TrimSpace(node.ModelName),
-			}, func(line string) {
-				if isStructuredAiReviewLine(line) {
-					return
-				}
-				s.emitProgress(jobID, req.JobType, req.TaskID, "running",
-					(currentAttempt-1)*45+10,
-					strPtr(fmt.Sprintf("[%s] %s", label, line)),
-					nil,
-				)
-			})
-			ch <- reviewOut{res, err}
-		}(attempt)
-
-		select {
-		case <-ctx.Done():
-			return jobExecutionResult{}, ctx.Err()
-		case out := <-ch:
-			roundErr = out.err
-			lastResult = out.result
-		}
-
-		if roundErr != nil {
-			slog.Error("ai review round failed",
-				"job_id", jobID,
-				"review_node_id", node.ID,
-				"review_label", label,
-				"review_round", reviewRound,
-				"attempt", attempt,
-				"error", roundErr,
-			)
-			if attempt == aiReviewMaxRounds {
-				node.Status = "warning"
-				node.LastJobID = strPtr(jobID)
-				if err := s.store.SaveAiReviewNode(*node); err != nil {
-					slog.Error("failed to persist ai review node error state", "review_node_id", node.ID, "error", err)
-				}
-				if modelRunID != "" {
-					if err := s.syncModelRunAiReviewSummary(modelRunID); err != nil {
-						slog.Error("failed to sync model run review summary", "model_run_id", modelRunID, "error", err)
-					}
-				}
-				return jobExecutionResult{}, roundErr
+	go func() {
+		res, err := s.cliSvc.RunCodexReview(ctx, appcli.CodexReviewRequest{
+			LocalPath:         payload.LocalPath,
+			OriginalPrompt:    strings.TrimSpace(round.OriginalPrompt),
+			CurrentPrompt:     strings.TrimSpace(round.PromptText),
+			ParentReviewNotes: "", // 线性模型不再有父节点
+			IssueType:         "",
+			IssueTitle:        "",
+			ModelName:         strings.TrimSpace(round.ModelName),
+		}, func(line string) {
+			if isStructuredAiReviewLine(line) {
+				return
 			}
-			continue
-		}
-
-		passed := lastResult.IsCompleted && lastResult.IsSatisfied
-		slog.Info("ai review round completed",
-			"job_id", jobID,
-			"review_node_id", node.ID,
-			"review_label", label,
-			"review_round", reviewRound,
-			"attempt", attempt,
-			"is_completed", lastResult.IsCompleted,
-			"is_satisfied", lastResult.IsSatisfied,
-			"passed", passed,
-		)
-		if attempt < aiReviewMaxRounds {
-			s.emitProgress(jobID, req.JobType, req.TaskID, "running",
-				attempt*45,
-				strPtr(fmt.Sprintf("[%s] 第 %d 次复核未通过，准备重试…", label, reviewRound)),
+			s.emitProgress(jobID, req.JobType, req.TaskID, "running", 30,
+				strPtr(fmt.Sprintf("[%s] %s", label, line)),
 				nil,
 			)
-		}
+		})
+		ch <- reviewOut{res, err}
+	}()
 
-		node.RunCount = reviewRound
-		if passed {
-			node.Status = "pass"
-		} else {
-			node.Status = "warning"
-		}
-		node.ReviewNotes = strings.TrimSpace(lastResult.ReviewNotes)
-		node.NextPrompt = strings.TrimSpace(lastResult.NextPrompt)
-		if nextPrompt := strings.TrimSpace(lastResult.NextPrompt); nextPrompt != "" && nextPrompt != "无" {
-			node.PromptText = nextPrompt
-		}
-		node.ProjectType = strings.TrimSpace(lastResult.ProjectType)
-		node.ChangeScope = strings.TrimSpace(lastResult.ChangeScope)
-		node.KeyLocations = strings.TrimSpace(lastResult.KeyLocations)
-		node.LastJobID = strPtr(jobID)
-		node.IsCompleted = boolPtr(lastResult.IsCompleted)
-		node.IsSatisfied = boolPtr(lastResult.IsSatisfied)
-		if err := s.store.SaveAiReviewNode(*node); err != nil {
-			return jobExecutionResult{}, fmt.Errorf("保存复审节点结果失败: %w", err)
-		}
-		if err := s.syncAiReviewNodeChildren(*node, lastResult); err != nil {
-			return jobExecutionResult{}, err
-		}
-		if modelRunID != "" {
-			if err := s.syncModelRunAiReviewSummary(modelRunID); err != nil {
-				slog.Error("failed to sync model run review summary", "model_run_id", modelRunID, "error", err)
+	var lastResult *appcli.CodexReviewResult
+	select {
+	case <-ctx.Done():
+		return jobExecutionResult{}, ctx.Err()
+	case out := <-ch:
+		if out.err != nil {
+			slog.Error("ai review round failed",
+				"job_id", jobID,
+				"review_round_id", round.ID,
+				"round_number", roundNumber,
+				"error", out.err,
+			)
+			if err := s.store.FinalizeAiReviewRound(round.ID, "warning", nil, nil, "", "", "", "", ""); err != nil {
+				slog.Error("failed to persist ai review round error state", "review_round_id", round.ID, "error", err)
 			}
+			if modelRunID != "" {
+				if err := s.syncModelRunAiReviewSummaryFromRounds(modelRunID); err != nil {
+					slog.Error("failed to sync model run review summary", "model_run_id", modelRunID, "error", err)
+				}
+			}
+			return jobExecutionResult{}, out.err
 		}
-
-		result := AiReviewResult{
-			ReviewNodeID: node.ID,
-			ModelRunID:   modelRunID,
-			ModelName:    payload.ModelName,
-			ReviewStatus: node.Status,
-			ReviewRound:  reviewRound,
-			ReviewNotes:  node.ReviewNotes,
-			NextPrompt:   node.NextPrompt,
-			IsCompleted:  lastResult.IsCompleted,
-			IsSatisfied:  lastResult.IsSatisfied,
-			ProjectType:  node.ProjectType,
-			ChangeScope:  node.ChangeScope,
-			KeyLocations: node.KeyLocations,
-			Issues:       mapAiReviewIssues(lastResult.Issues),
-		}
-		outputJSON, _ := json.Marshal(result)
-		outputStr := string(outputJSON)
-		return jobExecutionResult{
-			outputPayload: &outputStr,
-			finalMessage:  strPtr(fmt.Sprintf("[%s] 复核%s（第 %d 次）", label, ternaryAiReviewResultText(passed), reviewRound)),
-		}, nil
+		lastResult = out.result
 	}
 
-	return jobExecutionResult{}, fmt.Errorf("ai_review 未产出结果")
+	passed := lastResult.IsCompleted && lastResult.IsSatisfied
+	slog.Info("ai review round completed",
+		"job_id", jobID,
+		"review_round_id", round.ID,
+		"round_number", roundNumber,
+		"is_completed", lastResult.IsCompleted,
+		"is_satisfied", lastResult.IsSatisfied,
+		"passed", passed,
+	)
+
+	finalStatus := "warning"
+	if passed {
+		finalStatus = "pass"
+	}
+
+	if err := s.store.FinalizeAiReviewRound(
+		round.ID,
+		finalStatus,
+		boolPtr(lastResult.IsCompleted),
+		boolPtr(lastResult.IsSatisfied),
+		strings.TrimSpace(lastResult.ReviewNotes),
+		strings.TrimSpace(lastResult.NextPrompt),
+		strings.TrimSpace(lastResult.ProjectType),
+		strings.TrimSpace(lastResult.ChangeScope),
+		strings.TrimSpace(lastResult.KeyLocations),
+	); err != nil {
+		return jobExecutionResult{}, fmt.Errorf(errs.FmtJobSaveReviewResultFail, err)
+	}
+	if modelRunID != "" {
+		if err := s.syncModelRunAiReviewSummaryFromRounds(modelRunID); err != nil {
+			slog.Error("failed to sync model run review summary", "model_run_id", modelRunID, "error", err)
+		}
+	}
+
+	// Sync projectType/changeScope from AI review to task level when task fields are empty.
+	if req.TaskID != "" {
+		aiPT := strings.TrimSpace(lastResult.ProjectType)
+		aiCS := strings.TrimSpace(lastResult.ChangeScope)
+		if aiPT != "" || aiCS != "" {
+			if task, err := s.store.GetTask(req.TaskID); err == nil && task != nil {
+				needSync := false
+				pt := task.ProjectType
+				cs := task.ChangeScope
+				if pt == "" && aiPT != "" {
+					pt = aiPT
+					needSync = true
+				}
+				if cs == "" && aiCS != "" {
+					cs = aiCS
+					needSync = true
+				}
+				if needSync {
+					if err := s.store.UpdateTaskReportFields(req.TaskID, pt, cs); err != nil {
+						slog.Error("failed to sync ai review fields to task", "task_id", req.TaskID, "error", err)
+					}
+				}
+			}
+		}
+	}
+
+	result := AiReviewResult{
+		ReviewRoundID: round.ID,
+		ModelRunID:    modelRunID,
+		ModelName:     payload.ModelName,
+		ReviewStatus:  finalStatus,
+		ReviewRound:   roundNumber,
+		ReviewNotes:   strings.TrimSpace(lastResult.ReviewNotes),
+		NextPrompt:    strings.TrimSpace(lastResult.NextPrompt),
+		IsCompleted:   lastResult.IsCompleted,
+		IsSatisfied:   lastResult.IsSatisfied,
+		ProjectType:   strings.TrimSpace(lastResult.ProjectType),
+		ChangeScope:   strings.TrimSpace(lastResult.ChangeScope),
+		KeyLocations:  strings.TrimSpace(lastResult.KeyLocations),
+	}
+	outputJSON, _ := json.Marshal(result)
+	outputStr := string(outputJSON)
+	return jobExecutionResult{
+		outputPayload: &outputStr,
+		finalMessage:  strPtr(fmt.Sprintf("[%s] 复核%s（第 %d 轮）", label, ternaryAiReviewResultText(passed), roundNumber)),
+	}, nil
 }
 
 func (s *JobService) prepareAiReviewPayload(taskID string, payload AiReviewPayload) (AiReviewPayload, error) {
@@ -1087,31 +1038,38 @@ func (s *JobService) prepareAiReviewPayload(taskID string, payload AiReviewPaylo
 			payload.ModelRunID = &trimmed
 		}
 	}
-	if payload.ReviewNodeID != nil {
-		trimmed := strings.TrimSpace(*payload.ReviewNodeID)
+	// 兼容旧版前端: reviewNodeId → reviewRoundId
+	if payload.ReviewRoundID == nil && payload.ReviewNodeID != nil {
+		payload.ReviewRoundID = payload.ReviewNodeID
+	}
+	if payload.ReviewRoundID != nil {
+		trimmed := strings.TrimSpace(*payload.ReviewRoundID)
 		if trimmed == "" {
-			payload.ReviewNodeID = nil
+			payload.ReviewRoundID = nil
 		} else {
-			payload.ReviewNodeID = &trimmed
+			payload.ReviewRoundID = &trimmed
 		}
 	}
 
-	node, err := s.ensureAiReviewTargetNode(taskID, payload)
+	round, err := s.ensureAiReviewRound(taskID, payload)
 	if err != nil {
 		return AiReviewPayload{}, err
 	}
 
-	payload.ReviewNodeID = &node.ID
-	payload.ModelName = strings.TrimSpace(node.ModelName)
-	payload.LocalPath = normalizeAiReviewPath(node.LocalPath)
-	if node.ModelRunID != nil {
-		modelRunID := strings.TrimSpace(*node.ModelRunID)
+	payload.ReviewRoundID = &round.ID
+	payload.ModelName = strings.TrimSpace(round.ModelName)
+	payload.LocalPath = normalizeAiReviewPath(round.LocalPath)
+	if round.ModelRunID != nil {
+		modelRunID := strings.TrimSpace(*round.ModelRunID)
 		payload.ModelRunID = &modelRunID
 	} else {
 		payload.ModelRunID = nil
 	}
-	snapshot := buildAiReviewNodeSnapshot(*node)
-	payload.NodeSnapshot = &snapshot
+	snapshot := AiReviewRoundSnapshot{
+		Status:      round.Status,
+		RoundNumber: round.RoundNumber,
+	}
+	payload.RoundSnapshot = &snapshot
 	return payload, nil
 }
 
@@ -1123,12 +1081,16 @@ func parseAiReviewPayloadForDedup(raw string) (AiReviewPayload, bool) {
 
 	payload.ModelName = strings.TrimSpace(payload.ModelName)
 	payload.LocalPath = normalizeAiReviewPath(payload.LocalPath)
-	if payload.ReviewNodeID != nil {
-		trimmed := strings.TrimSpace(*payload.ReviewNodeID)
+	// 兼容旧版
+	if payload.ReviewRoundID == nil && payload.ReviewNodeID != nil {
+		payload.ReviewRoundID = payload.ReviewNodeID
+	}
+	if payload.ReviewRoundID != nil {
+		trimmed := strings.TrimSpace(*payload.ReviewRoundID)
 		if trimmed == "" {
-			payload.ReviewNodeID = nil
+			payload.ReviewRoundID = nil
 		} else {
-			payload.ReviewNodeID = &trimmed
+			payload.ReviewRoundID = &trimmed
 		}
 	}
 	if payload.ModelRunID != nil {
@@ -1143,10 +1105,10 @@ func parseAiReviewPayloadForDedup(raw string) (AiReviewPayload, bool) {
 	return payload, true
 }
 
-func buildAiReviewTargetKey(reviewNodeID, modelRunID *string, localPath string) string {
-	if reviewNodeID != nil {
-		if trimmed := strings.TrimSpace(*reviewNodeID); trimmed != "" {
-			return "node:" + trimmed
+func buildAiReviewTargetKey(reviewRoundID, modelRunID *string, localPath string) string {
+	if reviewRoundID != nil {
+		if trimmed := strings.TrimSpace(*reviewRoundID); trimmed != "" {
+			return "round:" + trimmed
 		}
 	}
 
@@ -1165,7 +1127,7 @@ func buildAiReviewTargetKey(reviewNodeID, modelRunID *string, localPath string) 
 
 func aiReviewTargetKeys(payload AiReviewPayload) []string {
 	keys := make([]string, 0, 3)
-	if key := buildAiReviewTargetKey(payload.ReviewNodeID, nil, ""); key != "" {
+	if key := buildAiReviewTargetKey(payload.ReviewRoundID, nil, ""); key != "" {
 		keys = append(keys, key)
 	}
 	if key := buildAiReviewTargetKey(nil, payload.ModelRunID, ""); key != "" {
@@ -1196,189 +1158,100 @@ func sameAiReviewTarget(left, right AiReviewPayload) bool {
 	return false
 }
 
-func (s *JobService) ensureAiReviewTargetNode(taskID string, payload AiReviewPayload) (*store.AiReviewNode, error) {
+func (s *JobService) ensureAiReviewRound(taskID string, payload AiReviewPayload) (*store.AiReviewRound, error) {
 	normalizedTaskID := strings.TrimSpace(taskID)
 	if normalizedTaskID == "" {
-		return nil, fmt.Errorf("ai_review 缺少 taskId")
+		return nil, errors.New(errs.MsgJobAiReviewNoTask)
 	}
 
-	if payload.ReviewNodeID != nil && strings.TrimSpace(*payload.ReviewNodeID) != "" {
-		node, err := s.store.GetAiReviewNode(strings.TrimSpace(*payload.ReviewNodeID))
+	// 如果指定了具体的 round ID，直接返回
+	if payload.ReviewRoundID != nil && strings.TrimSpace(*payload.ReviewRoundID) != "" {
+		round, err := s.store.GetAiReviewRound(strings.TrimSpace(*payload.ReviewRoundID))
 		if err != nil {
-			return nil, fmt.Errorf("读取复审节点失败: %w", err)
+			return nil, fmt.Errorf(errs.FmtJobReadReviewRound, err)
 		}
-		if node == nil {
-			return nil, fmt.Errorf("未找到复审节点: %s", strings.TrimSpace(*payload.ReviewNodeID))
+		if round == nil {
+			return nil, fmt.Errorf(errs.FmtJobReviewRoundNotFound, strings.TrimSpace(*payload.ReviewRoundID))
 		}
-		return node, nil
+		return round, nil
 	}
 
 	if payload.LocalPath == "" {
-		return nil, fmt.Errorf("ai_review 缺少 localPath")
+		return nil, errors.New(errs.MsgJobAiReviewNoLocalPath)
 	}
 
-	existing, err := s.store.FindActiveAiReviewRoot(normalizedTaskID, payload.ModelRunID, payload.LocalPath)
-	if err != nil {
-		return nil, fmt.Errorf("查询首轮复审节点失败: %w", err)
-	}
-	if existing != nil {
-		return existing, nil
-	}
-
+	// 获取任务的原始提示词
 	task, err := s.store.GetTask(normalizedTaskID)
 	if err != nil {
-		return nil, fmt.Errorf("读取任务失败: %w", err)
+		return nil, fmt.Errorf("读取任务失败：%w", err)
 	}
-
 	originalPrompt := ""
 	if task != nil && task.PromptText != nil {
 		originalPrompt = strings.TrimSpace(*task.PromptText)
 	}
-	initialStatus := "none"
-	initialRunCount := 0
-	initialReviewNotes := ""
-	if payload.ModelRunID != nil && strings.TrimSpace(*payload.ModelRunID) != "" {
-		run, err := s.store.GetModelRunByID(strings.TrimSpace(*payload.ModelRunID))
+
+	// 确定 round_number 和本轮使用的提示词
+	nextRound, err := s.store.GetNextRoundNumber(payload.ModelRunID, payload.LocalPath)
+	if err != nil {
+		return nil, fmt.Errorf(errs.FmtJobNextRoundFail, err)
+	}
+
+	promptText := originalPrompt
+	if strings.TrimSpace(payload.NextPromptOverride) != "" {
+		promptText = strings.TrimSpace(payload.NextPromptOverride)
+	} else if nextRound > 1 {
+		// 后续轮次：使用上一轮的 next_prompt，如果没有则用原始提示词
+		prev, err := s.store.GetLatestAiReviewRound(payload.ModelRunID, payload.LocalPath)
 		if err != nil {
-			return nil, fmt.Errorf("读取模型复审摘要失败: %w", err)
+			return nil, fmt.Errorf(errs.FmtJobReadPrevReviewFail, err)
 		}
-		if run != nil {
-			initialStatus = firstNonEmpty(strings.TrimSpace(run.ReviewStatus), "none")
-			initialRunCount = max(run.ReviewRound, 0)
-			if run.ReviewNotes != nil {
-				initialReviewNotes = strings.TrimSpace(*run.ReviewNotes)
+		if prev != nil {
+			suggested := strings.TrimSpace(prev.NextPrompt)
+			if suggested != "" && suggested != "无" {
+				promptText = suggested
 			}
 		}
 	}
-	rootID := uuid.New().String()
-	node := store.AiReviewNode{
-		ID:             rootID,
+
+	roundID := uuid.New().String()
+	now := time.Now().Unix()
+	round := store.AiReviewRound{
+		ID:             roundID,
 		TaskID:         normalizedTaskID,
 		ModelRunID:     payload.ModelRunID,
-		RootID:         rootID,
-		ModelName:      firstNonEmpty(strings.TrimSpace(payload.ModelName), filepath.Base(payload.LocalPath)),
 		LocalPath:      payload.LocalPath,
-		Title:          "首轮审核",
-		IssueType:      "Bug修复",
-		Level:          1,
-		Sequence:       1,
-		Status:         initialStatus,
-		RunCount:       initialRunCount,
+		ModelName:      firstNonEmpty(strings.TrimSpace(payload.ModelName), filepath.Base(payload.LocalPath)),
+		RoundNumber:    nextRound,
 		OriginalPrompt: originalPrompt,
-		PromptText:     originalPrompt,
-		ReviewNotes:    initialReviewNotes,
-		IsActive:       true,
+		PromptText:     promptText,
+		Status:         "none",
+		CreatedAt:      now,
+		UpdatedAt:      now,
 	}
-	if err := s.store.CreateAiReviewNode(node); err != nil {
-		return nil, fmt.Errorf("创建首轮复审节点失败: %w", err)
+	if err := s.store.CreateAiReviewRound(round); err != nil {
+		return nil, fmt.Errorf(errs.FmtJobCreateReviewRoundFail, err)
 	}
-	return s.store.GetAiReviewNode(rootID)
+	return s.store.GetAiReviewRound(roundID)
 }
 
-func (s *JobService) syncAiReviewNodeChildren(node store.AiReviewNode, result *appcli.CodexReviewResult) error {
-	if result == nil || len(result.Issues) == 0 || node.Status != "warning" {
-		// 复审通过或无新问题时，保留历史子节点，维持完整审核链路
-		return nil
-	}
-	// 有新问题需要写入时，先清理旧子节点再重建
-	if err := s.store.DeactivateAiReviewNodeChildren(node.ID); err != nil {
-		return fmt.Errorf("清理旧的子复审节点失败: %w", err)
-	}
-
-	for index, issue := range result.Issues {
-		childID := uuid.New().String()
-		child := store.AiReviewNode{
-			ID:                childID,
-			TaskID:            node.TaskID,
-			ModelRunID:        node.ModelRunID,
-			ParentID:          &node.ID,
-			RootID:            node.RootID,
-			ModelName:         node.ModelName,
-			LocalPath:         node.LocalPath,
-			Title:             firstNonEmpty(strings.TrimSpace(issue.Title), fmt.Sprintf("问题 %d", index+1)),
-			IssueType:         normalizeAiReviewIssueType(issue.IssueType),
-			Level:             node.Level + 1,
-			Sequence:          index + 1,
-			Status:            "warning",
-			RunCount:          0,
-			OriginalPrompt:    firstNonEmpty(strings.TrimSpace(node.OriginalPrompt), strings.TrimSpace(node.PromptText)),
-			PromptText:        firstNonEmpty(strings.TrimSpace(issue.NextPrompt), strings.TrimSpace(node.PromptText), strings.TrimSpace(node.OriginalPrompt)),
-			ReviewNotes:       strings.TrimSpace(issue.ReviewNotes),
-			ParentReviewNotes: strings.TrimSpace(node.ReviewNotes),
-			NextPrompt:        strings.TrimSpace(issue.NextPrompt),
-			ProjectType:       node.ProjectType,
-			ChangeScope:       node.ChangeScope,
-			KeyLocations:      strings.TrimSpace(issue.KeyLocations),
-			IsActive:          true,
-		}
-		if err := s.store.CreateAiReviewNode(child); err != nil {
-			return fmt.Errorf("创建子复审节点失败: %w", err)
-		}
-	}
-
-	return nil
-}
-
-func (s *JobService) syncModelRunAiReviewSummary(modelRunID string) error {
-	nodes, err := s.store.ListAiReviewNodesByModelRun(modelRunID)
+func (s *JobService) syncModelRunAiReviewSummaryFromRounds(modelRunID string) error {
+	rounds, err := s.store.ListAiReviewRoundsByModelRun(modelRunID)
 	if err != nil {
 		return err
 	}
-	status, round, notes := store.SummarizeAiReviewNodes(nodes)
+	status, round, notes := store.SummarizeAiReviewRounds(rounds)
 	return s.store.UpdateModelRunReview(modelRunID, status, round, notes)
 }
 
-func buildAiReviewNodeSnapshot(node store.AiReviewNode) AiReviewNodeSnapshot {
-	return AiReviewNodeSnapshot{
-		Status:            strings.TrimSpace(node.Status),
-		RunCount:          max(node.RunCount, 0),
-		ReviewNotes:       strings.TrimSpace(node.ReviewNotes),
-		ParentReviewNotes: strings.TrimSpace(node.ParentReviewNotes),
-		NextPrompt:        strings.TrimSpace(node.NextPrompt),
-		ProjectType:       strings.TrimSpace(node.ProjectType),
-		ChangeScope:       strings.TrimSpace(node.ChangeScope),
-		KeyLocations:      strings.TrimSpace(node.KeyLocations),
-	}
-}
-
-func mapAiReviewIssues(issues []appcli.CodexReviewIssue) []AiReviewIssue {
-	if len(issues) == 0 {
-		return nil
-	}
-	result := make([]AiReviewIssue, 0, len(issues))
-	for _, issue := range issues {
-		result = append(result, AiReviewIssue{
-			Title:        strings.TrimSpace(issue.Title),
-			IssueType:    normalizeAiReviewIssueType(issue.IssueType),
-			ReviewNotes:  strings.TrimSpace(issue.ReviewNotes),
-			NextPrompt:   strings.TrimSpace(issue.NextPrompt),
-			KeyLocations: strings.TrimSpace(issue.KeyLocations),
-		})
-	}
-	return result
-}
-
-func normalizeAiReviewIssueType(value string) string {
-	trimmed := strings.TrimSpace(value)
-	if trimmed == "" {
-		return "Bug修复"
-	}
-	return trimmed
-}
-
-func normalizeAiReviewNodeLabel(node store.AiReviewNode) string {
-	title := strings.TrimSpace(node.Title)
-	if title != "" {
-		return title
-	}
-	modelName := strings.TrimSpace(node.ModelName)
+func normalizeAiReviewRoundLabel(round store.AiReviewRound) string {
+	modelName := strings.TrimSpace(round.ModelName)
 	if modelName != "" {
 		return modelName
 	}
-	if pathBase := filepath.Base(strings.TrimSpace(node.LocalPath)); pathBase != "" && pathBase != "." {
+	if pathBase := filepath.Base(strings.TrimSpace(round.LocalPath)); pathBase != "" && pathBase != "." {
 		return pathBase
 	}
-	return node.ID
+	return round.ID
 }
 
 func firstNonEmpty(values ...string) string {
@@ -1572,7 +1445,7 @@ func newGitCloneProgressContext(
 func (s *JobService) ensureGitCloneTargetsAvailable(payload GitClonePayload) error {
 	paths := gitCloneTargetPaths(payload)
 	if len(paths) == 0 {
-		return fmt.Errorf("缺少拉取目标目录")
+		return errors.New(errs.MsgJobMissingCloneTarget)
 	}
 	existing := s.gitSvc.CheckPathsExist(paths)
 	if len(existing) == 0 {
@@ -1584,7 +1457,7 @@ func (s *JobService) ensureGitCloneTargetsAvailable(payload GitClonePayload) err
 		names = append(names, filepath.Base(util.NormalizePath(path)))
 	}
 	sort.Strings(names)
-	return fmt.Errorf("目录冲突：以下目录已存在: %s", strings.Join(names, ", "))
+	return fmt.Errorf(errs.FmtJobDirConflict, strings.Join(names, ", "))
 }
 
 func cleanupGitCloneTargets(payload GitClonePayload) error {
@@ -1595,7 +1468,7 @@ func cleanupGitCloneTargets(payload GitClonePayload) error {
 	for _, path := range paths {
 		normalized := util.NormalizePath(path)
 		if !isSafeGitCloneCleanupPath(normalized) {
-			return fmt.Errorf("拒绝清理不安全目录: %s", path)
+			return fmt.Errorf(errs.FmtJobRefuseUnsafeClean, path)
 		}
 		if err := os.RemoveAll(normalized); err != nil && !os.IsNotExist(err) {
 			return err
@@ -1610,7 +1483,7 @@ func cleanupGitCloneTargetsAfterAbort(payload GitClonePayload, abortErr error) e
 			"source_path", payload.SourcePath,
 			"error", err,
 		)
-		return errors.Join(abortErr, fmt.Errorf("清理中断残留目录失败: %w", err))
+		return errors.Join(abortErr, fmt.Errorf(errs.FmtJobCleanAbortResidualFail, err))
 	}
 	return abortErr
 }

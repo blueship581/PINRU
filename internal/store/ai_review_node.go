@@ -3,6 +3,8 @@ package store
 import (
 	"database/sql"
 	"strings"
+
+	"github.com/blueship581/pinru/internal/errs"
 )
 
 const defaultAiReviewIssueType = "Bug修复"
@@ -186,7 +188,7 @@ func (s *Store) SaveAiReviewNode(node AiReviewNode) error {
 		boolPtrToNullableInt(node.IsCompleted), boolPtrToNullableInt(node.IsSatisfied),
 		node.ProjectType, node.ChangeScope, node.KeyLocations, node.LastJobID, boolToInt(node.IsActive), node.ID,
 	)
-	return ensureRowsAffected(res, err, "ai review node %q not found", node.ID)
+	return ensureRowsAffected(res, err, errs.FmtStoreReviewNodeNotFound, node.ID)
 }
 
 func (s *Store) UpdateAiReviewNodeEditableFields(id, title, issueType, promptText, reviewNotes string) error {
@@ -199,27 +201,7 @@ func (s *Store) UpdateAiReviewNodeEditableFields(id, title, issueType, promptTex
 		  WHERE id = ?`,
 		title, issueType, promptText, reviewNotes, id,
 	)
-	return ensureRowsAffected(res, err, "ai review node %q not found", id)
-}
-
-func (s *Store) DeactivateAiReviewNodeChildren(parentID string) error {
-	_, err := s.DB.Exec(
-		`WITH RECURSIVE descendants(id) AS (
-			SELECT id
-			  FROM ai_review_nodes
-			 WHERE parent_id = ? AND is_active = 1
-			UNION ALL
-			SELECT child.id
-			  FROM ai_review_nodes child
-			  JOIN descendants parent ON child.parent_id = parent.id
-			 WHERE child.is_active = 1
-		)
-		UPDATE ai_review_nodes
-		   SET is_active = 0, updated_at = strftime('%s','now')
-		 WHERE id IN (SELECT id FROM descendants)`,
-		parentID,
-	)
-	return err
+	return ensureRowsAffected(res, err, errs.FmtStoreReviewNodeNotFound, id)
 }
 
 func scanAiReviewNode(scanner interface {

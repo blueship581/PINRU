@@ -1,12 +1,13 @@
 package analysis
 
 import (
-	"fmt"
+	"errors"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 
+	"github.com/blueship581/pinru/internal/errs"
 	"github.com/blueship581/pinru/internal/util"
 )
 
@@ -91,7 +92,7 @@ func resolveRepoRoot(base string) (string, error) {
 	}
 	info, err := os.Stat(base)
 	if err != nil || !info.IsDir() {
-		return "", fmt.Errorf("未找到可分析的代码目录")
+		return "", errors.New(errs.MsgNoAnalyzableCodeDir)
 	}
 	entries, _ := os.ReadDir(base)
 	var dirs []string
@@ -109,7 +110,7 @@ func resolveRepoRoot(base string) (string, error) {
 	if len(dirs) > 0 {
 		return dirs[0], nil
 	}
-	return "", fmt.Errorf("未找到可分析的代码目录")
+	return "", errors.New(errs.MsgNoAnalyzableCodeDir)
 }
 
 func collectFiles(root, current string, depth int, files *[]fileEntry) {

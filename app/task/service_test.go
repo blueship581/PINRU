@@ -20,6 +20,10 @@ func intPtr(value int) *int {
 	return &value
 }
 
+func boolTestPtr(value bool) *bool {
+	return &value
+}
+
 func TestCreateTaskUsesProjectScopedIdentity(t *testing.T) {
 	testStore := testutil.OpenTestStore(t)
 	defer testStore.Close()
@@ -187,6 +191,154 @@ func TestCreateTaskEnforcesPerProjectTaskTypeUpperLimit(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "已达上限 2") {
 		t.Fatalf("unexpected upper-limit error = %q", err.Error())
+	}
+}
+
+func TestUpdateTaskTypeEnforcesPerProjectTaskTypeUpperLimit(t *testing.T) {
+	testStore := testutil.OpenTestStore(t)
+	defer testStore.Close()
+
+	project := store.Project{
+		ID:             "project-update-limit",
+		Name:           "Demo",
+		GitLabURL:      "https://gitlab.example.com",
+		GitLabToken:    "glpat-demo",
+		CloneBasePath:  t.TempDir(),
+		Models:         "ORIGIN",
+		TaskTypes:      `["Bug修复","Feature迭代"]`,
+		TaskTypeQuotas: `{"Bug修复":1,"Feature迭代":2}`,
+		TaskTypeTotals: `{"Bug修复":10,"Feature迭代":10}`,
+	}
+	if err := testStore.CreateProject(project); err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+
+	s := &TaskService{store: testStore}
+
+	featureTask, err := s.CreateTask(CreateTaskRequest{
+		GitLabProjectID: 1849,
+		ProjectName:     "label-01849",
+		TaskType:        "Feature迭代",
+		ClaimSequence:   intPtr(1),
+		Models:          []string{"ORIGIN"},
+		ProjectConfigID: &project.ID,
+	})
+	if err != nil {
+		t.Fatalf("CreateTask(feature) error = %v", err)
+	}
+
+	if _, err := s.CreateTask(CreateTaskRequest{
+		GitLabProjectID: 1849,
+		ProjectName:     "label-01849",
+		TaskType:        "Bug修复",
+		ClaimSequence:   intPtr(2),
+		Models:          []string{"ORIGIN"},
+		ProjectConfigID: &project.ID,
+	}); err != nil {
+		t.Fatalf("CreateTask(bugfix) error = %v", err)
+	}
+
+	err = s.UpdateTaskType(featureTask.ID, "Bug修复")
+	if err == nil {
+		t.Fatalf("expected upper-limit error")
+	}
+	if !strings.Contains(err.Error(), "已达上限 1") {
+		t.Fatalf("unexpected upper-limit error = %q", err.Error())
+	}
+
+	savedTask, err := testStore.GetTask(featureTask.ID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if savedTask == nil {
+		t.Fatalf("expected saved task")
+	}
+	if savedTask.TaskType != "Feature迭代" {
+		t.Fatalf("TaskType = %q, want %q", savedTask.TaskType, "Feature迭代")
+	}
+}
+
+func TestUpdateTaskSessionListEnforcesPerProjectTaskTypeUpperLimit(t *testing.T) {
+	testStore := testutil.OpenTestStore(t)
+	defer testStore.Close()
+
+	project := store.Project{
+		ID:             "project-session-limit",
+		Name:           "Demo",
+		GitLabURL:      "https://gitlab.example.com",
+		GitLabToken:    "glpat-demo",
+		CloneBasePath:  t.TempDir(),
+		Models:         "ORIGIN\ncotv21-pro",
+		TaskTypes:      `["Bug修复","Feature迭代"]`,
+		TaskTypeQuotas: `{"Bug修复":1,"Feature迭代":2}`,
+		TaskTypeTotals: `{"Bug修复":10,"Feature迭代":10}`,
+	}
+	if err := testStore.CreateProject(project); err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+
+	s := &TaskService{store: testStore}
+
+	featureTask, err := s.CreateTask(CreateTaskRequest{
+		GitLabProjectID: 1849,
+		ProjectName:     "label-01849",
+		TaskType:        "Feature迭代",
+		ClaimSequence:   intPtr(1),
+		Models:          []string{"ORIGIN", "cotv21-pro"},
+		ProjectConfigID: &project.ID,
+	})
+	if err != nil {
+		t.Fatalf("CreateTask(feature) error = %v", err)
+	}
+
+	if _, err := s.CreateTask(CreateTaskRequest{
+		GitLabProjectID: 1849,
+		ProjectName:     "label-01849",
+		TaskType:        "Bug修复",
+		ClaimSequence:   intPtr(2),
+		Models:          []string{"ORIGIN"},
+		ProjectConfigID: &project.ID,
+	}); err != nil {
+		t.Fatalf("CreateTask(bugfix) error = %v", err)
+	}
+
+	modelRun, err := testStore.GetModelRun(featureTask.ID, "cotv21-pro")
+	if err != nil {
+		t.Fatalf("GetModelRun() error = %v", err)
+	}
+	if modelRun == nil {
+		t.Fatalf("expected model run")
+	}
+
+	err = s.UpdateTaskSessionList(UpdateTaskSessionListRequest{
+		ID:         featureTask.ID,
+		ModelRunID: &modelRun.ID,
+		SessionList: []store.TaskSession{
+			{
+				SessionID:    "sess-1",
+				TaskType:     "Bug修复",
+				ConsumeQuota: true,
+				IsCompleted:  boolTestPtr(true),
+				IsSatisfied:  boolTestPtr(true),
+			},
+		},
+	})
+	if err == nil {
+		t.Fatalf("expected upper-limit error")
+	}
+	if !strings.Contains(err.Error(), "已达上限 1") {
+		t.Fatalf("unexpected upper-limit error = %q", err.Error())
+	}
+
+	savedTask, err := testStore.GetTask(featureTask.ID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if savedTask == nil {
+		t.Fatalf("expected saved task")
+	}
+	if savedTask.TaskType != "Feature迭代" {
+		t.Fatalf("TaskType = %q, want %q", savedTask.TaskType, "Feature迭代")
 	}
 }
 

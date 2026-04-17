@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"compress/gzip"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -13,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/blueship581/pinru/internal/errs"
 	"github.com/blueship581/pinru/internal/util"
 	"github.com/google/uuid"
 )
@@ -34,7 +36,7 @@ func TestConnection(apiURL, token string) (bool, error) {
 		return false, err
 	}
 	if strings.TrimSpace(token) == "" {
-		return false, fmt.Errorf("GitLab 访问令牌不能为空")
+		return false, errors.New(errs.MsgGitLabTokenRequired)
 	}
 
 	req, err := http.NewRequest("GET", baseURL+"/api/v4/user", nil)
@@ -69,7 +71,7 @@ func FetchProject(projectRef, apiURL, token string) (*Project, error) {
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
 		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("GitLab API %d: %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf(errs.FmtGitLabAPIStatus, resp.StatusCode, string(body))
 	}
 	var p Project
 	if err := json.NewDecoder(resp.Body).Decode(&p); err != nil {
@@ -86,7 +88,7 @@ func DownloadArchive(projectID int64, apiURL, token, destination string, sha *st
 
 	dest := util.ExpandTilde(destination)
 	if _, err := os.Stat(dest); err == nil {
-		return fmt.Errorf("目标目录已存在: %s", filepath.Base(dest))
+		return fmt.Errorf(errs.FmtGitLabTargetExist, filepath.Base(dest))
 	}
 	parent := filepath.Dir(dest)
 	os.MkdirAll(parent, 0755)
@@ -107,7 +109,7 @@ func DownloadArchive(projectID int64, apiURL, token, destination string, sha *st
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
 		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("下载失败 %d: %s", resp.StatusCode, string(body))
+		return fmt.Errorf(errs.FmtGitLabDownloadFail, resp.StatusCode, string(body))
 	}
 
 	tempDir := filepath.Join(parent, ".pinru-archive-"+uuid.New().String())
@@ -189,16 +191,16 @@ func trimURL(u string) string {
 func normalizeAPIBaseURL(raw string) (string, error) {
 	baseURL := strings.TrimSpace(trimURL(raw))
 	if baseURL == "" {
-		return "", fmt.Errorf("GitLab 服务器地址不能为空")
+		return "", errors.New(errs.MsgGitLabURLRequired)
 	}
 
 	parsed, err := neturl.ParseRequestURI(baseURL)
 	if err != nil || parsed.Host == "" {
-		return "", fmt.Errorf("GitLab 服务器地址格式错误，请填写完整地址，例如 https://gitlab.example.com")
+		return "", errors.New(errs.MsgGitLabURLFormat)
 	}
 
 	if parsed.Scheme != "http" && parsed.Scheme != "https" {
-		return "", fmt.Errorf("GitLab 服务器地址必须以 http:// 或 https:// 开头")
+		return "", errors.New(errs.MsgGitLabURLScheme)
 	}
 
 	return baseURL, nil

@@ -2,6 +2,7 @@ package task
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"hash/fnv"
 	"os"
@@ -13,6 +14,8 @@ import (
 	"strings"
 
 	appgit "github.com/blueship581/pinru/app/git"
+	"github.com/blueship581/pinru/internal/errs"
+	internalprompt "github.com/blueship581/pinru/internal/prompt"
 	"github.com/blueship581/pinru/internal/store"
 	"github.com/blueship581/pinru/internal/util"
 	"github.com/google/uuid"
@@ -75,14 +78,6 @@ type AddModelRunRequest struct {
 	LocalPath *string `json:"localPath"`
 }
 
-type UpdateAiReviewNodeRequest struct {
-	ID          string `json:"id"`
-	Title       string `json:"title"`
-	IssueType   string `json:"issueType"`
-	PromptText  string `json:"promptText"`
-	ReviewNotes string `json:"reviewNotes"`
-}
-
 type TaskChildDirectory struct {
 	Name         string  `json:"name"`
 	Path         string  `json:"path"`
@@ -120,7 +115,7 @@ func (s *TaskService) CreateTask(req CreateTaskRequest) (*store.Task, error) {
 	if existing, err := s.findExistingTask(req); err != nil {
 		return nil, err
 	} else if existing != nil {
-		return nil, fmt.Errorf("当前项目下题卡已存在：%s", existing.ID)
+		return nil, fmt.Errorf(errs.FmtProjectTaskExists, existing.ID)
 	}
 
 	if err := s.enforceTaskTypeUpperLimit(req); err != nil {
@@ -140,10 +135,10 @@ func (s *TaskService) CreateTask(req CreateTaskRequest) (*store.Task, error) {
 	for _, model := range req.Models {
 		normalizedModel := strings.TrimSpace(model)
 		if normalizedModel == "" {
-			return nil, fmt.Errorf("模型名称不能为空")
+			return nil, errors.New(errs.MsgModelNameRequired)
 		}
 		if _, exists := seenModels[normalizedModel]; exists {
-			return nil, fmt.Errorf("模型 %q 重复", normalizedModel)
+			return nil, fmt.Errorf(errs.FmtModelDuplicate, normalizedModel)
 		}
 		seenModels[normalizedModel] = struct{}{}
 
@@ -167,6 +162,9 @@ func (s *TaskService) UpdateTaskStatus(id, status string) error {
 }
 
 func (s *TaskService) UpdateTaskType(id, taskType string) error {
+	if _, err := s.ensureTaskTypeChangeWithinUpperLimit(id, taskType); err != nil {
+		return err
+	}
 	if err := s.store.UpdateTaskType(id, taskType); err != nil {
 		return err
 	}
@@ -174,12 +172,34 @@ func (s *TaskService) UpdateTaskType(id, taskType string) error {
 		return nil
 	}
 	if _, err := s.gitSvc.NormalizeManagedSourceFolderByTaskID(id); err != nil {
-		return fmt.Errorf("任务类型已更新，但本地目录归一失败: %w", err)
+		return fmt.Errorf(errs.FmtTaskTypeNormFail, err)
 	}
 	return nil
 }
 
+type UpdateTaskReportFieldsRequest struct {
+	ID          string `json:"id"`
+	ProjectType string `json:"projectType"`
+	ChangeScope string `json:"changeScope"`
+}
+
+func (s *TaskService) UpdateTaskReportFields(req UpdateTaskReportFieldsRequest) error {
+	return s.store.UpdateTaskReportFields(req.ID, req.ProjectType, req.ChangeScope)
+}
+
 func (s *TaskService) UpdateTaskSessionList(req UpdateTaskSessionListRequest) error {
+	task, err := s.store.GetTask(req.ID)
+	if err != nil {
+		return err
+	}
+	if task == nil {
+		return fmt.Errorf(errs.FmtTaskNotFound, req.ID)
+	}
+
+	if _, err := s.ensureTaskTypeChangeWithinUpperLimit(task.ID, resolvedTaskTypeForSessionList(task.TaskType, req.SessionList)); err != nil {
+		return err
+	}
+
 	if req.ModelRunID != nil && strings.TrimSpace(*req.ModelRunID) != "" {
 		return s.store.UpdateModelRunSessionList(req.ID, strings.TrimSpace(*req.ModelRunID), req.SessionList)
 	}
@@ -214,28 +234,15 @@ func (s *TaskService) ListAiReviewNodes(taskID string) ([]store.AiReviewNode, er
 	return nodes, nil
 }
 
-func (s *TaskService) UpdateAiReviewNode(req UpdateAiReviewNodeRequest) error {
-	nodeID := strings.TrimSpace(req.ID)
-	if nodeID == "" {
-		return fmt.Errorf("复审节点不能为空")
+func (s *TaskService) ListAiReviewRounds(taskID string) ([]store.AiReviewRound, error) {
+	rounds, err := s.store.ListAiReviewRoundsByTask(strings.TrimSpace(taskID))
+	if err != nil {
+		return nil, err
 	}
-
-	if err := s.store.UpdateAiReviewNodeEditableFields(
-		nodeID,
-		strings.TrimSpace(req.Title),
-		strings.TrimSpace(req.IssueType),
-		strings.TrimSpace(req.PromptText),
-		strings.TrimSpace(req.ReviewNotes),
-	); err != nil {
-		return err
+	if rounds == nil {
+		return []store.AiReviewRound{}, nil
 	}
-
-	node, err := s.store.GetAiReviewNode(nodeID)
-	if err != nil || node == nil || node.ModelRunID == nil || strings.TrimSpace(*node.ModelRunID) == "" {
-		return err
-	}
-
-	return s.syncModelRunAiReviewSummary(strings.TrimSpace(*node.ModelRunID))
+	return rounds, nil
 }
 
 func (s *TaskService) UpdateModelRunSessionInfo(req UpdateModelRunSessionRequest) error {
@@ -244,7 +251,7 @@ func (s *TaskService) UpdateModelRunSessionInfo(req UpdateModelRunSessionRequest
 
 func (s *TaskService) AddModelRun(req AddModelRunRequest) error {
 	if req.TaskID == "" || req.ModelName == "" {
-		return fmt.Errorf("taskId 和 modelName 不能为空")
+		return errors.New(errs.MsgModelNameAndTaskIDReq)
 	}
 	if req.LocalPath != nil {
 		normalized := util.NormalizePath(*req.LocalPath)
@@ -255,7 +262,7 @@ func (s *TaskService) AddModelRun(req AddModelRunRequest) error {
 		return err
 	}
 	if existing != nil {
-		return fmt.Errorf("模型 %q 已存在", req.ModelName)
+		return fmt.Errorf(errs.FmtModelExists, req.ModelName)
 	}
 	run := store.ModelRun{
 		ID:        uuid.New().String(),
@@ -298,6 +305,16 @@ func normalizeTaskPath(task store.Task) store.Task {
 }
 
 func (s *TaskService) syncModelRunAiReviewSummary(modelRunID string) error {
+	// 优先使用线性轮次模型
+	rounds, err := s.store.ListAiReviewRoundsByModelRun(modelRunID)
+	if err != nil {
+		return err
+	}
+	if len(rounds) > 0 {
+		status, round, notes := store.SummarizeAiReviewRounds(rounds)
+		return s.store.UpdateModelRunReview(modelRunID, status, round, notes)
+	}
+	// 兼容旧数据
 	nodes, err := s.store.ListAiReviewNodesByModelRun(modelRunID)
 	if err != nil {
 		return err
@@ -363,7 +380,7 @@ func (s *TaskService) OpenTaskLocalFolder(id string) error {
 func (s *TaskService) ListTaskChildDirectories(taskID string) ([]TaskChildDirectory, error) {
 	taskID = strings.TrimSpace(taskID)
 	if taskID == "" {
-		return nil, fmt.Errorf("任务不能为空")
+		return nil, errors.New(errs.MsgTaskRequired)
 	}
 
 	task, err := s.store.GetTask(taskID)
@@ -371,7 +388,7 @@ func (s *TaskService) ListTaskChildDirectories(taskID string) ([]TaskChildDirect
 		return nil, err
 	}
 	if task == nil {
-		return nil, fmt.Errorf("未找到任务: %s", taskID)
+		return nil, fmt.Errorf(errs.FmtTaskNotFound, taskID)
 	}
 
 	modelRuns, err := s.store.ListModelRuns(taskID)
@@ -484,7 +501,7 @@ func (s *TaskService) removeManagedTaskDirectory(task *store.Task) error {
 		return nil
 	}
 	if !util.IsWithinBasePath(project.CloneBasePath, actualPath) || util.SamePath(project.CloneBasePath, actualPath) {
-		return fmt.Errorf("拒绝删除受管范围外的任务目录: %s", actualPath)
+		return fmt.Errorf(errs.FmtRefuseDeleteOutside, actualPath)
 	}
 
 	if err := os.RemoveAll(util.ExpandTilde(actualPath)); err != nil && !os.IsNotExist(err) {
@@ -495,7 +512,7 @@ func (s *TaskService) removeManagedTaskDirectory(task *store.Task) error {
 
 func (s *TaskService) resolveTaskLocalFolder(task *store.Task) (string, error) {
 	if task == nil {
-		return "", fmt.Errorf("任务不能为空")
+		return "", errors.New(errs.MsgTaskRequired)
 	}
 
 	if localPath, ok := normalizeExistingDirectory(task.LocalPath); ok {
@@ -515,7 +532,7 @@ func (s *TaskService) resolveTaskLocalFolder(task *store.Task) (string, error) {
 	}
 
 	if len(existingPaths) == 0 {
-		return "", fmt.Errorf("当前题目还没有可打开的本地目录")
+		return "", errors.New(errs.MsgTaskNoLocalDir)
 	}
 
 	if commonParent, ok := commonDirectoryParent(existingPaths); ok {
@@ -527,7 +544,7 @@ func (s *TaskService) resolveTaskLocalFolder(task *store.Task) (string, error) {
 
 func (s *TaskService) resolveTaskChildDirectoryRoot(task *store.Task, modelRuns []store.ModelRun) (string, error) {
 	if task == nil {
-		return "", fmt.Errorf("任务不能为空")
+		return "", errors.New(errs.MsgTaskRequired)
 	}
 
 	if localPath, ok := normalizeExistingDirectory(task.LocalPath); ok {
@@ -542,7 +559,7 @@ func (s *TaskService) resolveTaskChildDirectoryRoot(task *store.Task, modelRuns 
 	}
 
 	if len(existingPaths) == 0 {
-		return "", fmt.Errorf("当前题目还没有可供复审的子文件夹")
+		return "", errors.New(errs.MsgTaskNoReviewSubdir)
 	}
 
 	if commonParent, ok := commonDirectoryParent(existingPaths); ok {
@@ -556,7 +573,7 @@ func (s *TaskService) resolveTaskChildDirectoryRoot(task *store.Task, modelRuns 
 		}
 	}
 
-	return "", fmt.Errorf("当前题目还没有可供复审的子文件夹")
+	return "", errors.New(errs.MsgTaskNoReviewSubdir)
 }
 
 func (s *TaskService) resolveTaskSourceModelName(task *store.Task) (string, error) {
@@ -621,13 +638,13 @@ func commonDirectoryParent(paths []string) (string, bool) {
 func openPathInFileManager(pathValue string) error {
 	targetPath := filepath.Clean(util.ExpandTilde(strings.TrimSpace(pathValue)))
 	if targetPath == "" {
-		return fmt.Errorf("目录不能为空")
+		return errors.New(errs.MsgDirRequired)
 	}
 
 	info, err := os.Stat(targetPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return fmt.Errorf("本地目录不存在: %s", targetPath)
+			return fmt.Errorf(errs.FmtLocalDirNotExist, targetPath)
 		}
 		return err
 	}
@@ -647,7 +664,7 @@ func openPathInFileManager(pathValue string) error {
 	}
 
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("打开本地目录失败: %w", err)
+		return fmt.Errorf("%s：%w", errs.MsgOpenLocalDirFail, err)
 	}
 
 	return nil
@@ -675,7 +692,7 @@ func (s *TaskService) enforceTaskTypeUpperLimit(req CreateTaskRequest) error {
 	if req.ProjectConfigID == nil || strings.TrimSpace(*req.ProjectConfigID) == "" {
 		return nil
 	}
-	taskType := strings.TrimSpace(req.TaskType)
+	taskType := internalprompt.NormalizeTaskType(req.TaskType)
 	if taskType == "" {
 		return nil
 	}
@@ -712,9 +729,50 @@ func (s *TaskService) enforceTaskTypeUpperLimit(req CreateTaskRequest) error {
 	}
 
 	if count >= limit {
-		return fmt.Errorf("GitLab 项目 %d 的 %s 领题数已达上限 %d，无法继续领取", req.GitLabProjectID, taskType, limit)
+		return fmt.Errorf(errs.FmtGitLabQuotaReached, req.GitLabProjectID, taskType, limit)
 	}
 	return nil
+}
+
+func (s *TaskService) ensureTaskTypeChangeWithinUpperLimit(taskID, nextTaskType string) (*store.Task, error) {
+	task, err := s.store.GetTask(strings.TrimSpace(taskID))
+	if err != nil {
+		return nil, err
+	}
+	if task == nil {
+		return nil, fmt.Errorf(errs.FmtTaskNotFound, taskID)
+	}
+
+	currentTaskType := internalprompt.NormalizeTaskType(task.TaskType)
+	normalizedNextTaskType := internalprompt.NormalizeTaskType(nextTaskType)
+	if normalizedNextTaskType == "" || normalizedNextTaskType == currentTaskType {
+		return task, nil
+	}
+
+	req := CreateTaskRequest{
+		GitLabProjectID: task.GitLabProjectID,
+		ProjectName:     task.ProjectName,
+		TaskType:        normalizedNextTaskType,
+		ProjectConfigID: task.ProjectConfigID,
+	}
+	if err := s.enforceTaskTypeUpperLimit(req); err != nil {
+		return nil, err
+	}
+
+	return task, nil
+}
+
+func resolvedTaskTypeForSessionList(currentTaskType string, sessions []store.TaskSession) string {
+	if len(sessions) == 0 {
+		return currentTaskType
+	}
+
+	nextTaskType := internalprompt.NormalizeTaskType(sessions[0].TaskType)
+	if nextTaskType == "" {
+		return currentTaskType
+	}
+
+	return nextTaskType
 }
 
 func (s *TaskService) findExistingTask(req CreateTaskRequest) (*store.Task, error) {
@@ -905,7 +963,7 @@ func (s *TaskService) BatchUpdateTasks(req BatchUpdateTasksRequest) (*BatchUpdat
 		case "taskType":
 			err = s.UpdateTaskType(id, req.Value)
 		default:
-			err = fmt.Errorf("不支持的字段: %s", req.Field)
+			err = fmt.Errorf(errs.FmtUnsupportedField, req.Field)
 		}
 		if err != nil {
 			result.Failed = append(result.Failed, BatchUpdateFailure{TaskID: id, Error: err.Error()})
@@ -914,4 +972,12 @@ func (s *TaskService) BatchUpdateTasks(req BatchUpdateTasksRequest) (*BatchUpdat
 		}
 	}
 	return result, nil
+}
+
+// SaveAiReviewRoundNotes 保存复审轮次的结论和下一轮提示词。
+func (s *TaskService) SaveAiReviewRoundNotes(roundID, reviewNotes, nextPrompt string) error {
+	if strings.TrimSpace(roundID) == "" {
+		return errors.New(errs.MsgReviewRoundIDRequired)
+	}
+	return s.store.UpdateAiReviewRoundNotes(roundID, reviewNotes, nextPrompt)
 }

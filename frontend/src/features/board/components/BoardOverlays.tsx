@@ -1,7 +1,7 @@
 import { useState, type RefObject } from 'react';
 import { createPortal } from 'react-dom';
 import { AnimatePresence, motion } from 'motion/react';
-import { Check, ChevronRight, FolderOpen, PlayCircle, Wand2, X } from 'lucide-react';
+import { AlertCircle, Check, ChevronRight, FolderOpen, PlayCircle, Wand2, X } from 'lucide-react';
 import type { Task, TaskStatus } from '../../../store';
 import {
   getTaskTypePresentation,
@@ -266,6 +266,20 @@ export function TaskCardContextMenu({
             {task.id}
           </p>
         </div>
+
+        {actionError && (
+          <div className="mx-3.5 mt-3 rounded-xl border border-red-200/80 bg-red-50/90 px-3 py-2.5 text-red-700 shadow-sm dark:border-red-500/25 dark:bg-red-500/10 dark:text-red-200">
+            <div className="flex items-start gap-2">
+              <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+              <div className="min-w-0">
+                <p className="text-[11px] font-semibold leading-4">操作未完成</p>
+                <p className="mt-1 text-[11px] leading-5" aria-live="polite">
+                  {actionError}
+                </p>
+              </div>
+            </div>
+          </div>
+        )}
 
         <div className="py-1">
           <button
@@ -700,11 +714,6 @@ export function TaskCardContextMenu({
             </div>
           </button>
 
-          {actionError && (
-            <p className="px-3.5 pb-2 pt-1 text-[11px] leading-5 text-red-500">
-              {actionError}
-            </p>
-          )}
         </div>
       </motion.div>
     </div>

@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/blueship581/pinru/internal/errs"
 	"github.com/blueship581/pinru/internal/util"
 )
 
@@ -49,7 +50,7 @@ func CloneWithProgress(ctx context.Context, cloneURL, path, username, token stri
 	}
 	expanded := util.ExpandTilde(path)
 	if _, err := os.Stat(expanded); err == nil {
-		return fmt.Errorf("目标目录「%s」已存在", filepath.Base(expanded))
+		return fmt.Errorf(errs.FmtTargetDirExists, filepath.Base(expanded))
 	}
 	if parent := filepath.Dir(expanded); parent != "" {
 		os.MkdirAll(parent, 0755)
@@ -69,10 +70,10 @@ func CloneWithProgress(ctx context.Context, cloneURL, path, username, token stri
 	cmd.Env = append(os.Environ(), buildGitAuthEnv(cloneURL, username, token)...)
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
-		return fmt.Errorf("无法启动 git 命令: %w", err)
+		return fmt.Errorf(errs.FmtGitStartFail, err)
 	}
 	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("无法启动 git 命令: %w", err)
+		return fmt.Errorf(errs.FmtGitStartFail, err)
 	}
 
 	// Read stderr in a goroutine. When context is cancelled, close the read end
@@ -101,12 +102,12 @@ func CloneWithProgress(ctx context.Context, cloneURL, path, username, token stri
 		if ctxErr := contextErr(ctx); ctxErr != nil {
 			return ctxErr
 		}
-		return fmt.Errorf("git clone 失败: %w", err)
+		return fmt.Errorf(errs.FmtGitCloneFailCause, err)
 	}
 
 	// Atomically promote the staging directory to the final path.
 	if err := os.Rename(stagingPath, expanded); err != nil {
-		return fmt.Errorf("无法移动克隆目录到目标路径: %w", err)
+		return fmt.Errorf(errs.FmtMoveCloneDirFail, err)
 	}
 	onProgress("克隆完成")
 	return nil
@@ -119,10 +120,10 @@ func CopyProjectDirectory(ctx context.Context, src, dst string) error {
 	expandedSrc := util.ExpandTilde(src)
 	expandedDst := util.ExpandTilde(dst)
 	if _, err := os.Stat(expandedSrc); os.IsNotExist(err) {
-		return fmt.Errorf("源目录不存在: %s", expandedSrc)
+		return fmt.Errorf(errs.FmtSourceDirNotExist, expandedSrc)
 	}
 	if _, err := os.Stat(expandedDst); err == nil {
-		return fmt.Errorf("目标目录「%s」已存在", filepath.Base(expandedDst))
+		return fmt.Errorf(errs.FmtTargetDirExists, filepath.Base(expandedDst))
 	}
 	if err := os.MkdirAll(filepath.Dir(expandedDst), 0755); err != nil {
 		return err
@@ -149,7 +150,7 @@ func CopyProjectDirectory(ctx context.Context, src, dst string) error {
 
 	// Atomically promote the staging directory to the final path.
 	if err := os.Rename(stagingDst, expandedDst); err != nil {
-		return fmt.Errorf("无法移动复制目录到目标路径: %w", err)
+		return fmt.Errorf(errs.FmtCopyDirMoveFail, err)
 	}
 	return nil
 }
@@ -160,7 +161,7 @@ func EnsureSnapshotRepository(ctx context.Context, referencePath, path string) (
 	}
 	expandedPath := util.ExpandTilde(strings.TrimSpace(path))
 	if expandedPath == "" {
-		return false, fmt.Errorf("目标目录不能为空")
+		return false, errors.New(errs.MsgTargetDirRequired)
 	}
 
 	info, err := os.Stat(expandedPath)
@@ -168,7 +169,7 @@ func EnsureSnapshotRepository(ctx context.Context, referencePath, path string) (
 		return false, err
 	}
 	if !info.IsDir() {
-		return false, fmt.Errorf("目标路径不是目录: %s", expandedPath)
+		return false, fmt.Errorf(errs.FmtTargetPathNotDir, expandedPath)
 	}
 	if hasGitMetadata(expandedPath) {
 		return false, nil
@@ -208,7 +209,7 @@ func RecreateWorkspace(path, remoteURL, authorName, authorEmail string) error {
 
 func CopyProjectContents(src, dst string) error {
 	if _, err := os.Stat(src); os.IsNotExist(err) {
-		return fmt.Errorf("源目录不存在: %s", src)
+		return fmt.Errorf(errs.FmtSourceDirNotExist, src)
 	}
 	return copyDirRecursive(context.Background(), src, dst, true)
 }
@@ -257,7 +258,7 @@ func PushBranch(path, branch, username, token string) error {
 	cmd.Dir = path
 	out, err := cmd.Output()
 	if err != nil {
-		return fmt.Errorf("获取 remote URL 失败: %w", err)
+		return fmt.Errorf(errs.FmtRemoteURLFail, err)
 	}
 	originURL := strings.TrimSpace(string(out))
 
@@ -353,7 +354,7 @@ func ensureBranch(path, branch string) error {
 
 func clearWorkspaceContents(path string) error {
 	if !util.IsWithinBasePath(WorkspaceRoot(), path) || util.SamePath(WorkspaceRoot(), path) {
-		return fmt.Errorf("拒绝清理受管范围外的工作目录: %s", path)
+		return fmt.Errorf(errs.FmtRefuseCleanOutside, path)
 	}
 
 	entries, err := os.ReadDir(path)
@@ -376,7 +377,7 @@ func removeManagedWorkspace(path string) error {
 	expanded := filepath.Clean(util.ExpandTilde(path))
 	root := filepath.Clean(WorkspaceRoot())
 	if !util.IsWithinBasePath(root, expanded) || util.SamePath(root, expanded) {
-		return fmt.Errorf("拒绝删除受管范围外的工作目录: %s", path)
+		return fmt.Errorf(errs.FmtRefuseDeleteOutsideDir, path)
 	}
 	return os.RemoveAll(expanded)
 }

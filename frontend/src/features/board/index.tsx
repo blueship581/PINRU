@@ -20,7 +20,7 @@ import {
   deleteAiReviewJob,
   type JobProgressEvent,
 } from '../../api/job';
-import type { AiReviewNodeFromDB, ModelRunFromDB, TaskChildDirectory } from '../../api/task';
+import type { ModelRunFromDB, TaskChildDirectory } from '../../api/task';
 import {
   BatchActionBar,
 } from './components/BatchActionBar';
@@ -512,24 +512,28 @@ export default function Board() {
     }, 600);
   };
 
-  const handleAiReviewNode = (node: AiReviewNodeFromDB) => {
+  const handleSubmitNextAiReviewRound = (
+    modelRunId: string,
+    modelName: string,
+    localPath: string,
+    nextPromptOverride?: string,
+  ) => {
     const taskId = detail.selected?.id?.trim();
-    const localPath = node.localPath?.trim();
     if (!taskId || !localPath) return;
 
     void (async () => {
       try {
         await submitAiReviewJob(taskId, {
-          reviewNodeId: node.id,
-          modelRunId: node.modelRunId ?? null,
-          modelName: node.modelName,
+          modelRunId: modelRunId ?? null,
+          modelName,
           localPath,
+          nextPromptOverride,
         });
         useAppStore.getState().loadBackgroundJobs();
         detail.setActiveDrawerTab('ai-review');
         void detail.refreshModelRuns();
       } catch (error) {
-        console.error('提交节点 AI 复核失败', error);
+        console.error('提交下一轮 AI 复审失败', error);
       }
     })();
 
@@ -588,16 +592,6 @@ export default function Board() {
       detail.refreshModelRuns(),
       useAppStore.getState().loadBackgroundJobs(),
     ]);
-  };
-
-  const handleSaveAiReviewNode = async (request: {
-    id: string;
-    title: string;
-    issueType: string;
-    promptText: string;
-    reviewNotes: string;
-  }) => {
-    await detail.saveAiReviewNode(request);
   };
 
   const handleAfterBatchApply = async (
@@ -838,9 +832,8 @@ export default function Board() {
           setShowProjectPanel(false);
         }}
         onAiReview={aiReviewVisible ? handleAiReview : undefined}
-        onAiReviewNode={aiReviewVisible ? handleAiReviewNode : undefined}
-        onSaveAiReviewNode={aiReviewVisible ? handleSaveAiReviewNode : undefined}
         onDeleteAiReviewRecord={aiReviewVisible ? handleDeleteAiReviewRecord : undefined}
+        onSubmitNextAiReviewRound={aiReviewVisible ? handleSubmitNextAiReviewRound : undefined}
       />
 
       {selectionMode && selectedTaskIds.size > 0 && (

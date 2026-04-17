@@ -58,3 +58,18 @@ export async function generateTaskPrompt(
 export async function saveTaskPrompt(taskId: string, promptText: string): Promise<void> {
   return callService('PromptService', 'SaveTaskPrompt', taskId, promptText);
 }
+
+export interface PolishTextRequest {
+  text: string;
+  providerId?: string | null;
+}
+
+export interface PolishTextResult {
+  polishedText: string;
+  providerName: string;
+  model: string;
+}
+
+export async function polishText(request: PolishTextRequest): Promise<PolishTextResult> {
+  return callService('PromptService', 'PolishText', request);
+}

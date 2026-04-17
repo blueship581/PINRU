@@ -2,6 +2,7 @@ package git
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,6 +11,7 @@ import (
 	"sync"
 
 	appprompt "github.com/blueship581/pinru/app/prompt"
+	"github.com/blueship581/pinru/internal/errs"
 	gl "github.com/blueship581/pinru/internal/gitlab"
 	"github.com/blueship581/pinru/internal/gitops"
 	"github.com/blueship581/pinru/internal/store"
@@ -178,10 +180,30 @@ func (s *GitService) CheckPathsExist(paths []string) []string {
 	return gitops.CheckPathsExist(paths)
 }
 
+// sanitizeInspectPath 清洗用户/系统传入的目录路径：
+// - 去除前后空白字符（含零宽空格）
+// - 去除从 Windows 资源管理器"复制路径"或控制台粘贴时带的成对双引号/单引号
+// - 去除末尾多余的路径分隔符，避免 filepath.Base 在 Windows 上返回空串导致项目名为空
+func sanitizeInspectPath(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	// 去除前后可能存在的成对引号，例如 "C:\Users\Foo" 或 'C:\Users\Foo'
+	if len(trimmed) >= 2 {
+		first, last := trimmed[0], trimmed[len(trimmed)-1]
+		if (first == '"' && last == '"') || (first == '\'' && last == '\'') {
+			trimmed = strings.TrimSpace(trimmed[1 : len(trimmed)-1])
+		}
+	}
+	// 统一去掉末尾多余的 / 和 \ （保留 Windows 盘符根如 C:\ 由 filepath.Clean 处理）
+	for len(trimmed) > 3 && (strings.HasSuffix(trimmed, "/") || strings.HasSuffix(trimmed, "\\")) {
+		trimmed = trimmed[:len(trimmed)-1]
+	}
+	return trimmed
+}
+
 func (s *GitService) InspectDirectory(path string) (*DirectoryInspectionResult, error) {
-	trimmed := strings.TrimSpace(path)
+	trimmed := sanitizeInspectPath(path)
 	if trimmed == "" {
-		return nil, fmt.Errorf("目录不能为空")
+		return nil, errors.New(errs.MsgDirRequired)
 	}
 
 	expanded := filepath.Clean(util.ExpandTilde(trimmed))
@@ -222,10 +244,10 @@ func (s *GitService) PlanManagedClaimPaths(
 ) ([]ManagedClaimPathPlan, error) {
 	trimmedBasePath := strings.TrimSpace(basePath)
 	if trimmedBasePath == "" {
-		return nil, fmt.Errorf("根目录不能为空")
+		return nil, errors.New(errs.MsgRootDirRequired)
 	}
 	if count <= 0 {
-		return nil, fmt.Errorf("套数必须大于 0")
+		return nil, errors.New(errs.MsgSetCountInvalid)
 	}
 
 	normalizedBasePath := filepath.Clean(util.ExpandTilde(trimmedBasePath))
@@ -268,7 +290,7 @@ func (s *GitService) PlanManagedClaimPaths(
 func (s *GitService) NormalizeManagedSourceFolders(projectID string) (*NormalizeManagedSourceFoldersResult, error) {
 	projectID = strings.TrimSpace(projectID)
 	if projectID == "" {
-		return nil, fmt.Errorf("项目不能为空")
+		return nil, errors.New(errs.MsgProjectRequired)
 	}
 
 	project, err := s.store.GetProject(projectID)
@@ -276,7 +298,7 @@ func (s *GitService) NormalizeManagedSourceFolders(projectID string) (*Normalize
 		return nil, err
 	}
 	if project == nil {
-		return nil, fmt.Errorf("未找到项目: %s", projectID)
+		return nil, fmt.Errorf(errs.FmtStoreProjectNotFound, projectID)
 	}
 
 	tasks, err := s.store.ListTasks(&projectID)
@@ -330,7 +352,7 @@ func (s *GitService) NormalizeManagedSourceFolders(projectID string) (*Normalize
 func (s *GitService) NormalizeManagedSourceFolderByTaskID(taskID string) (*NormalizeManagedSourceFolderDetail, error) {
 	taskID = strings.TrimSpace(taskID)
 	if taskID == "" {
-		return nil, fmt.Errorf("任务不能为空")
+		return nil, errors.New(errs.MsgTaskRequired)
 	}
 
 	task, err := s.store.GetTask(taskID)
@@ -338,7 +360,7 @@ func (s *GitService) NormalizeManagedSourceFolderByTaskID(taskID string) (*Norma
 		return nil, err
 	}
 	if task == nil {
-		return nil, fmt.Errorf("未找到任务: %s", taskID)
+		return nil, fmt.Errorf(errs.FmtTaskNotFound, taskID)
 	}
 
 	sourceModelName := "ORIGIN"
@@ -503,7 +525,7 @@ func (s *GitService) ensureTaskModelRunGitRepositories(taskID, preferredSourceMo
 		if managedDirectoryExists(sourcePath) {
 			initialized, err := gitops.EnsureSnapshotRepository(context.Background(), sourcePath, sourcePath)
 			if err != nil {
-				return "", "", 0, fmt.Errorf("源码目录补 Git 基线失败: %w", err)
+				return "", "", 0, fmt.Errorf(errs.FmtSourceBaseFail, err)
 			}
 			if initialized {
 				initializedModels = append(initializedModels, sourceRun.ModelName)
@@ -525,7 +547,7 @@ func (s *GitService) ensureTaskModelRunGitRepositories(taskID, preferredSourceMo
 
 		initialized, err := gitops.EnsureSnapshotRepository(context.Background(), refPath, runPath)
 		if err != nil {
-			return "", "", len(initializedModels), fmt.Errorf("模型 %s 补 Git 基线失败: %w", run.ModelName, err)
+			return "", "", len(initializedModels), fmt.Errorf(errs.FmtModelBaseFail, run.ModelName, err)
 		}
 		if initialized {
 			initializedModels = append(initializedModels, run.ModelName)
@@ -579,7 +601,7 @@ func (s *GitService) loadConfiguredGitLabCredentials() (url, username, token str
 		username = "oauth2"
 	}
 	if url == "" || token == "" {
-		return "", "", "", fmt.Errorf("请先在设置页面配置 GitLab URL 和 Token")
+		return "", "", "", errors.New(errs.MsgGitLabSettingsMissing)
 	}
 
 	return url, username, token, nil
@@ -597,7 +619,7 @@ func (s *GitService) syncTaskPromptArtifact(task store.Task, taskBasePath string
 		if os.IsNotExist(err) {
 			return "", "", nil
 		}
-		return "", "", fmt.Errorf("读取任务提示词失败: %w", err)
+		return "", "", fmt.Errorf(errs.FmtReadTaskPromptFail, err)
 	}
 
 	promptText := strings.TrimSpace(string(content))
@@ -609,7 +631,7 @@ func (s *GitService) syncTaskPromptArtifact(task store.Task, taskBasePath string
 	}
 
 	if err := s.store.SyncTaskPromptFromArtifact(task.ID, promptText); err != nil {
-		return "", "", fmt.Errorf("同步任务提示词失败: %w", err)
+		return "", "", fmt.Errorf(errs.FmtSyncTaskPromptFail, err)
 	}
 	return "updated", "已同步任务提示词", nil
 }
@@ -807,7 +829,7 @@ func (s *GitService) collectManagedTaskSequenceSet(projectConfigID string, proje
 func normalizeManagedDirectoryOnDisk(currentPath, desiredPath, directoryLabel string) (string, string, error) {
 	desiredPath = strings.TrimSpace(desiredPath)
 	if desiredPath == "" {
-		return "", "", fmt.Errorf("目标目录不能为空")
+		return "", "", errors.New(errs.MsgTargetDirRequired)
 	}
 
 	currentPath = strings.TrimSpace(currentPath)
@@ -815,7 +837,7 @@ func normalizeManagedDirectoryOnDisk(currentPath, desiredPath, directoryLabel st
 		if managedDirectoryExists(desiredPath) {
 			return "skipped", "", nil
 		}
-		return "", "", fmt.Errorf("%s不存在: %s", directoryLabel, desiredPath)
+		return "", "", fmt.Errorf(errs.FmtDirLabelNotExist, directoryLabel, desiredPath)
 	}
 
 	currentExists := managedDirectoryExists(currentPath)
@@ -826,9 +848,9 @@ func normalizeManagedDirectoryOnDisk(currentPath, desiredPath, directoryLabel st
 		if desiredExists {
 			return "updated", "已按目标目录回写路径", nil
 		}
-		return "", "", fmt.Errorf("未找到可归一的%s", directoryLabel)
+		return "", "", fmt.Errorf(errs.FmtNormalizeNotFound, directoryLabel)
 	case currentExists && desiredExists:
-		return "", "", fmt.Errorf("目标目录已存在，无法归一: %s", desiredPath)
+		return "", "", fmt.Errorf(errs.FmtNormalizeTargetExists, desiredPath)
 	case currentExists && !desiredExists:
 		if err := os.MkdirAll(filepath.Dir(util.ExpandTilde(desiredPath)), 0o755); err != nil {
 			return "", "", err
@@ -840,7 +862,7 @@ func normalizeManagedDirectoryOnDisk(currentPath, desiredPath, directoryLabel st
 	case !currentExists && desiredExists:
 		return "updated", "目标目录已存在，已回写数据库路径", nil
 	default:
-		return "", "", fmt.Errorf("%s不存在: %s", directoryLabel, currentPath)
+		return "", "", fmt.Errorf(errs.FmtDirLabelNotExist, directoryLabel, currentPath)
 	}
 }
 

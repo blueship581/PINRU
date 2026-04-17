@@ -81,6 +81,13 @@ func (s *ConfigService) SaveTraeSettings(workspaceStoragePath, logsPath string) 
 
 返回用户自定义路径和平台默认路径，前端可据此做 pre-fill。
 
+Trae session 提取依赖 `workspaceStorage/state.vscdb` 与 `logs/`：
+
+- `workspaceStorage` 用于读取当前 workspace 的 `memento/icube-ai-agent-storage`、输入历史以及用户维度的 `sessionRelation:*` 键。
+- 当同一个 `state.vscdb` 因切换账号残留多个 Trae 用户前缀时，后端不再按任意命中的 `*_ai-chat:*` 键取第一个用户。
+- 当前实现会优先根据 `currentSessionId` / `rawSessionId` 在 `sessionRelation:modelMap`、`modeMap`、`planModeMap`、`specModeMap` 中的归属来推断实际用户，再回退到旧的前缀扫描逻辑。
+- 目的：避免把旧账号前缀错误拼入提取出的 Trae session 标识。
+
 ---
 
 ## 全局 KV 配置的已知 Key 列表

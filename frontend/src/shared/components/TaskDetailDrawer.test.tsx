@@ -2,12 +2,23 @@ import { act, fireEvent, render, screen } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import TaskDetailDrawer from './TaskDetailDrawer';
 import { useAppStore, type Task } from '../../store';
+import { polishText as polishTextApi } from '../../api/llm';
 import type {
-  AiReviewNodeFromDB,
+  AiReviewRoundFromDB,
   ModelRunFromDB,
   PromptGenerationStatus,
   TaskFromDB,
 } from '../../api/task';
+
+vi.mock('../../api/llm', async () => {
+  const actual = await vi.importActual<typeof import('../../api/llm')>('../../api/llm');
+  return {
+    ...actual,
+    polishText: vi.fn(),
+  };
+});
+
+const polishTextMock = vi.mocked(polishTextApi);
 import { createSessionDraft } from '../lib/sessionUtils';
 import type { BackgroundJob } from '../../api/job';
 
@@ -81,6 +92,8 @@ function createTaskDetail(overrides: Partial<TaskFromDB> = {}): TaskFromDB {
     updatedAt: overrides.updatedAt ?? 1,
     notes: overrides.notes ?? null,
     projectConfigId: overrides.projectConfigId ?? null,
+    projectType: overrides.projectType ?? '',
+    changeScope: overrides.changeScope ?? '',
   };
 }
 
@@ -222,36 +235,25 @@ function createBackgroundJob(overrides: Partial<BackgroundJob> = {}): Background
   };
 }
 
-function createAiReviewNode(overrides: Partial<AiReviewNodeFromDB> = {}): AiReviewNodeFromDB {
-  const id = overrides.id ?? 'node-1';
-  const rootId = overrides.rootId ?? id;
-
+function createAiReviewRound(overrides: Partial<AiReviewRoundFromDB> = {}): AiReviewRoundFromDB {
   return {
-    id,
+    id: overrides.id ?? 'round-1',
     taskId: overrides.taskId ?? 'task-1',
     modelRunId: overrides.modelRunId ?? 'run-1',
-    parentId: overrides.parentId ?? null,
-    rootId,
-    modelName: overrides.modelName ?? 'model-a',
     localPath: overrides.localPath ?? '/tmp/task-1/model-a',
-    title: overrides.title ?? '首轮审核',
-    issueType: overrides.issueType ?? 'Bug修复',
-    level: overrides.level ?? 1,
-    sequence: overrides.sequence ?? 1,
+    modelName: overrides.modelName ?? 'model-a',
+    roundNumber: overrides.roundNumber ?? 1,
+    originalPrompt: overrides.originalPrompt ?? '原始提示词',
+    promptText: overrides.promptText ?? '当前提示词',
     status: overrides.status ?? 'warning',
-    runCount: overrides.runCount ?? 1,
-    originalPrompt: overrides.originalPrompt ?? '请修复当前代码中的问题',
-    promptText: overrides.promptText ?? '请继续修复当前节点问题',
-    reviewNotes: overrides.reviewNotes ?? '当前节点还未满足要求',
-    parentReviewNotes: overrides.parentReviewNotes ?? '',
-    nextPrompt: overrides.nextPrompt ?? '补齐修复后重新复核',
     isCompleted: overrides.isCompleted ?? true,
     isSatisfied: overrides.isSatisfied ?? false,
-    projectType: overrides.projectType ?? 'Web前端',
-    changeScope: overrides.changeScope ?? '跨模块多文件',
-    keyLocations: overrides.keyLocations ?? 'frontend-user/src/App.jsx:212',
-    lastJobId: overrides.lastJobId ?? null,
-    isActive: overrides.isActive ?? true,
+    reviewNotes: overrides.reviewNotes ?? '导出逻辑还缺异常处理，需要补上错误提示。',
+    nextPrompt: overrides.nextPrompt ?? '把导出失败提示和空数据保护补齐，再复审一轮。',
+    projectType: overrides.projectType ?? '',
+    changeScope: overrides.changeScope ?? '',
+    keyLocations: overrides.keyLocations ?? '',
+    jobId: overrides.jobId ?? null,
     createdAt: overrides.createdAt ?? 1,
     updatedAt: overrides.updatedAt ?? 1,
   };
@@ -265,7 +267,6 @@ function renderTaskDetailDrawer(
       selected={createTask()}
       selectedTaskDetail={createTaskDetail()}
       selectedModelRuns={[]}
-      selectedAiReviewNodes={[]}
       drawerLoading={false}
       drawerError=""
       statusChanging={false}
@@ -336,6 +337,7 @@ beforeEach(() => {
   vi.restoreAllMocks();
   cliMock.reset();
   cliMock.startClaude.mockResolvedValue({ sessionId: 'mock-session' });
+  polishTextMock.mockReset();
 });
 
 describe('TaskDetailDrawer session copy affordance', () => {
@@ -610,56 +612,22 @@ describe('TaskDetailDrawer session copy affordance', () => {
     expect(screen.getByText('源码')).toBeInTheDocument();
   });
 
-  it('renders the ai review tab without leaking raw review payload json', () => {
+  it('renders the ai review tab with rounds instead of legacy nodes', () => {
     useAppStore.setState({ aiReviewVisible: true });
-    const rootNode = createAiReviewNode({
-      id: 'node-root',
-      rootId: 'node-root',
-      modelName: '01874-代码生成',
-      localPath: '/tmp/task-1/01874-代码生成',
-      title: '首轮审核',
-      promptText: '优先检查导出流程和异常提示',
-      reviewNotes: '导出逻辑还缺异常处理',
-      nextPrompt: '把导出失败提示和空数据保护补齐，再复审一轮。',
-      isCompleted: true,
-      isSatisfied: false,
-    });
-    const childNode = createAiReviewNode({
-      id: 'node-child',
-      parentId: 'node-root',
-      rootId: 'node-root',
-      modelRunId: null,
-      modelName: '01874-代码生成',
-      localPath: '/tmp/task-1/01874-代码生成',
-      title: '补齐空数据保护',
-      level: 2,
-      sequence: 1,
-      status: 'pass',
-      runCount: 2,
-      promptText: '确认空结果集和导出按钮禁用逻辑',
-      reviewNotes: '导出前未校验空结果集',
-      parentReviewNotes: '导出逻辑还缺异常处理',
-      nextPrompt: '增加空列表保护后再检查导出按钮状态。',
-      isCompleted: true,
-      isSatisfied: true,
-      changeScope: '单文件',
-      keyLocations: 'frontend-user/src/components/ControlPanel.jsx:276',
-    });
     useAppStore.setState({
       backgroundJobs: [createBackgroundJob({
         inputPayload: JSON.stringify({
-          reviewNodeId: 'node-child',
-          modelRunId: null,
+          reviewRoundId: 'round-1',
+          modelRunId: 'run-1',
           modelName: '01874-代码生成',
           localPath: '/tmp/task-1/01874-代码生成',
         }),
-        progressMessage: '[01874-代码生成] {"isCompleted":true,"isSatisfied":true,"projectType":"Web前端","changeScope":"跨模块多文件","reviewNotes":"无","nextPrompt":"无","keyLocations":"frontend-user/src/App.jsx:212；frontend-user/src/components/ControlPanel.jsx:276；frontend-user/src/utils/storage.js:57"}',
         outputPayload: JSON.stringify({
-          reviewNodeId: 'node-child',
-          modelRunId: '',
+          reviewRoundId: 'round-1',
+          modelRunId: 'run-1',
           modelName: '01874-代码生成',
           reviewStatus: 'warning',
-          reviewRound: 2,
+          reviewRound: 1,
           reviewNotes: '导出逻辑还缺异常处理',
           nextPrompt: '把导出失败提示和空数据保护补齐，再复审一轮。',
         }),
@@ -668,63 +636,38 @@ describe('TaskDetailDrawer session copy affordance', () => {
 
     renderTaskDetailDrawer({
       activeDrawerTab: 'ai-review',
-      selectedAiReviewNodes: [rootNode, childNode],
     });
 
     expect(screen.getByRole('button', { name: 'AI复审' })).toBeInTheDocument();
     expect(screen.queryByText(/"isCompleted":true/)).not.toBeInTheDocument();
   });
 
-  it('renders ai review node actions without firing callbacks on mount', async () => {
+  it('uses polishedText result for ai review notes', async () => {
     useAppStore.setState({ aiReviewVisible: true });
-    const onSaveAiReviewNode = vi.fn().mockResolvedValue(undefined);
-    const onAiReviewNode = vi.fn().mockResolvedValue(undefined);
+    polishTextMock.mockResolvedValue({
+      polishedText: '这是润色后的复审结论，表达更自然，也更适合直接给同事阅读，能够把问题背景、缺少的错误提示以及后续需要补齐的处理逻辑完整说清楚。',
+      providerName: 'Claude Code CLI',
+      model: 'claude-sonnet-4-6',
+    });
+
+    expect([...'这是润色后的复审结论，表达更自然，也更适合直接给同事阅读，能够把问题背景、缺少的错误提示以及后续需要补齐的处理逻辑完整说清楚。'].length).toBeGreaterThanOrEqual(50);
 
     renderTaskDetailDrawer({
       activeDrawerTab: 'ai-review',
-      selectedAiReviewNodes: [createAiReviewNode({
-        id: 'node-1',
-        title: '导出失败提示缺失',
-        promptText: '补齐导出失败 toast',
-        reviewNotes: '失败时没有明确提示',
-      })],
-      onSaveAiReviewNode,
-      onAiReviewNode,
+      selectedModelRuns: [createModelRun()],
+      selectedAiReviewRounds: [createAiReviewRound()],
+      onAiReview: () => {},
+      onSubmitNextAiReviewRound: () => {},
     });
 
-    expect(screen.getByRole('button', { name: 'AI复审' })).toBeInTheDocument();
-    expect(onSaveAiReviewNode).not.toHaveBeenCalled();
-    expect(onAiReviewNode).not.toHaveBeenCalled();
-  });
+    const reviewHeader = screen.getByText('结论').parentElement;
+    const polishButton = reviewHeader?.querySelector('button[title="润色"]');
+    expect(polishButton).not.toBeNull();
 
-  it('does not render a delete review record action in the current ai review workspace', async () => {
-    useAppStore.setState({ aiReviewVisible: true });
-    useAppStore.setState({
-      backgroundJobs: [createBackgroundJob()],
-    });
+    fireEvent.click(polishButton as HTMLButtonElement);
 
-    renderTaskDetailDrawer({
-      activeDrawerTab: 'ai-review',
-      selectedModelRuns: [createModelRun({ reviewStatus: 'warning', reviewRound: 2 })],
-    });
-
-    expect(screen.queryByRole('button', { name: '删除 model-a 复审记录' })).not.toBeInTheDocument();
-  });
-
-  it('renders ai review polishing workflow entry without auto-starting it', async () => {
-    useAppStore.setState({ aiReviewVisible: true });
-
-    renderTaskDetailDrawer({
-      activeDrawerTab: 'ai-review',
-      llmProviders: [{ type: 'claude-code-acp', model: 'claude-main', polishModel: 'claude-polish' } as never],
-      selectedAiReviewNodes: [createAiReviewNode({
-        id: 'node-1',
-        promptText: '原始提示词',
-        reviewNotes: '原始结论',
-      })],
-    });
-
-    expect(screen.getByRole('button', { name: 'AI复审' })).toBeInTheDocument();
-    expect(cliMock.startClaude).not.toHaveBeenCalled();
+    expect(polishTextMock).toHaveBeenCalledWith({ text: '导出逻辑还缺异常处理，需要补上错误提示。' });
+    expect(await screen.findByRole('button', { name: '恢复原文' })).toBeInTheDocument();
+    expect(screen.getByText((content) => content.includes('这是润色后的复审结论，表达更自然'))).toBeInTheDocument();
   });
 });

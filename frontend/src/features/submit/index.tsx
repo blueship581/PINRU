@@ -11,6 +11,7 @@ import { submitJob, type JobProgressEvent } from '../../api/job';
 import { Events } from '@wailsio/runtime';
 import { useAppStore } from '../../store';
 import { getPathBase } from '../../shared/lib/sourceFolders';
+import { toErrorMessage } from '../../shared/lib/errorMessage';
 import { CopyIconButton } from '../../shared/components/CopyIconButton';
 
 const selectCls =
@@ -172,7 +173,7 @@ export default function Submit() {
       pendingJobId.current = job.id;
       // busy 保持 true，等待 job:progress 事件将其复位
     } catch (e) {
-      setError(errStr(e));
+      setError(toErrorMessage(e));
       setBusy(false);
     }
   };
@@ -451,13 +452,3 @@ function slugify(name: string) {
     || 'project';
 }
 
-function errStr(e: unknown): string {
-  if (typeof e === 'string') return e;
-  if (e instanceof Error && e.message.trim()) return e.message;
-  if (e && typeof e === 'object') {
-    const m = (e as Record<string, unknown>).message;
-    if (typeof m === 'string' && m.trim()) return m;
-    try { return JSON.stringify(e); } catch { /* ignore */ }
-  }
-  return '未知错误';
-}

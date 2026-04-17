@@ -189,10 +189,12 @@ func BuildSystemPrompt() string {
 		"   - 正文部分总长度不得超过 80 个字（不含后续约束标签，空白字符不计入）",
 		"   - 去掉所有铺垫语、客套语和废话",
 		"",
-		"4. 约束标签格式（若有）",
-		"   - 每个约束标签另起一行，格式为：<标签名称>：<具体要求>",
-		"   - 约束要求也必须用业务语言表达，不能出现技术标识符",
-		"   - 若无约束，则结尾不加任何约束行",
+		"4. 约束要求（若有）",
+		"   - 将约束自然融入正文叙述，或写成口语化的追加说明，像真实开发者随口补充的一句话",
+		"   - 严禁使用 \"技术栈约束：\"、\"架构约束：\"、\"代码规范约束：\"、\"业务逻辑约束：\"、\"非代码回复约束：\" 这种\"标签名称：内容\"的模板前缀",
+		"   - 严禁出现\"xx约束：\"或\"xx约束:\"形式的小标题、分类标头或列表项",
+		"   - 约束内容也必须用业务/场景语言表达，不能出现技术标识符",
+		"   - 若无约束，则不要为了凑字数而添加约束相关的句子",
 		"",
 		"5. 口语化、自然",
 		"   - 读起来要像真实开发者或产品经理发出的任务描述",
@@ -234,21 +236,24 @@ func BuildUserPrompt(task TaskInfo, req PromptRequest, summary analysis.Summary,
 		sb.WriteString("\n\n")
 	}
 
-	// ── 3. 约束标签要求 ──
+	// ── 3. 约束要求 ──
+	// 注意：约束必须自然融入正文，严禁使用"xx约束：xxx"的模板前缀。
 	constraintLabels := buildConstraintLabels(req.Constraints)
 	if len(constraintLabels) > 0 {
-		sb.WriteString("本题需要添加的约束标签（")
+		sb.WriteString("本题需要体现的约束方向（")
 		sb.WriteString(fmt.Sprintf("%d", len(constraintLabels)))
-		sb.WriteString(" 个）：\n")
+		sb.WriteString(" 项，仅供你把握方向，不得作为输出中的标题或分类标签）：\n")
 		for _, label := range constraintLabels {
 			sb.WriteString("- ")
 			sb.WriteString(label)
-			sb.WriteString("\n")
+			sb.WriteString("（把对应要求自然说出来即可，不要写这六个字）\n")
 		}
-		sb.WriteString("请在提示词正文之后，逐行添加上述约束（格式：<标签名称>：<具体约束内容>）。\n")
-		sb.WriteString("约束内容必须结合以下仓库信息生成，用业务语言表达，不写技术标识符。\n\n")
+		sb.WriteString("请把上述每条约束要求，用自然口吻融入提示词正文，或在正文之后用一两句口语化的追加说明写出来。\n")
+		sb.WriteString("严禁使用\"技术栈约束：xxx\"、\"架构约束：xxx\"等\"标签名称：内容\"形式的模板前缀，也不要出现任何\"xx约束\"字样的小标题。\n")
+		sb.WriteString("示例（仅示意表达风格，不可照抄）：\"后端是 C++17，回答中的代码示例请保持 C++17 风格，保持现有的命名风格(snake_case)，不要改函数名或变量名。\"\n")
+		sb.WriteString("约束内容必须结合以下仓库信息生成，用业务/场景语言表达，不写技术标识符。\n\n")
 	} else {
-		sb.WriteString("本题不添加任何约束标签（0 个标签）。\n\n")
+		sb.WriteString("本题没有额外约束，正文写完即止，不要追加任何约束相关的句子。\n\n")
 	}
 
 	// ── 4. 额外说明 ──
@@ -304,9 +309,9 @@ func BuildUserPrompt(task TaskInfo, req PromptRequest, summary analysis.Summary,
 	// ── 6. 最终输出要求 ──
 	sb.WriteString("现在请生成一道符合上述要求的评测提示词。")
 	if len(constraintLabels) > 0 {
-		sb.WriteString("正文后面追加约束标签，每个标签一行。")
+		sb.WriteString("把约束要求自然融入正文，或在正文后面用口语化的一两句话补充说出来；严禁使用\"xx约束：xxx\"格式的模板前缀。")
 	}
-	sb.WriteString(fmt.Sprintf("输出前请自检：正文部分（不含约束标签）必须不超过 %d 个字。", MaxPromptBodyRunes))
+	sb.WriteString(fmt.Sprintf("输出前请自检：正文部分（不含单独成段的追加说明）必须不超过 %d 个字。", MaxPromptBodyRunes))
 	sb.WriteString("直接输出提示词内容，不加任何前言或说明。")
 
 	return sb.String()

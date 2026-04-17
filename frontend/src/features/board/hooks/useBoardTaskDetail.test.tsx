@@ -12,6 +12,8 @@ const {
   mockGetTask,
   mockListModelRuns,
   mockListAiReviewNodes,
+  mockListAiReviewRounds,
+  mockUpdateTaskType,
 } = vi.hoisted(() => ({
   mockGetLlmProviders: vi.fn(),
   mockSubmitJob: vi.fn(),
@@ -19,6 +21,8 @@ const {
   mockGetTask: vi.fn(),
   mockListModelRuns: vi.fn(),
   mockListAiReviewNodes: vi.fn(),
+  mockListAiReviewRounds: vi.fn(),
+  mockUpdateTaskType: vi.fn(),
 }));
 
 vi.mock('../../../api/config', async () => {
@@ -51,6 +55,8 @@ vi.mock('../../../api/task', async () => {
     getTask: mockGetTask,
     listModelRuns: mockListModelRuns,
     listAiReviewNodes: mockListAiReviewNodes,
+    listAiReviewRounds: mockListAiReviewRounds,
+    updateTaskType: mockUpdateTaskType,
   };
 });
 
@@ -92,6 +98,8 @@ function createTaskDetail(overrides: Partial<TaskFromDB> = {}): TaskFromDB {
     updatedAt: overrides.updatedAt ?? 1,
     notes: overrides.notes ?? null,
     projectConfigId: overrides.projectConfigId ?? null,
+    projectType: overrides.projectType ?? '',
+    changeScope: overrides.changeScope ?? '',
   };
 }
 
@@ -102,6 +110,7 @@ describe('useBoardTaskDetail prompt generation', () => {
     mockListJobs.mockResolvedValue([]);
     mockListModelRuns.mockResolvedValue([]);
     mockListAiReviewNodes.mockResolvedValue([]);
+    mockListAiReviewRounds.mockResolvedValue([]);
     useAppStore.setState({ tasks: [] });
   });
 
@@ -338,5 +347,93 @@ describe('useBoardTaskDetail prompt generation', () => {
     expect(result.current.selectedModelRuns).toEqual([]);
     expect(result.current.sessionModelOptions).toEqual([]);
     expect(result.current.drawerError).toBe('');
+  });
+
+  it('blocks task type migration before optimistic update and shows a friendly limit message', async () => {
+    const featureTask = createTask({
+      id: 'task-1',
+      projectId: '1849',
+      projectName: 'alpha',
+      taskType: 'Feature迭代',
+    });
+    const bugTask = createTask({
+      id: 'task-2',
+      projectId: '1849',
+      projectName: 'alpha',
+      taskType: 'Bug修复',
+    });
+    const activeProject: ProjectConfig = {
+      id: 'project-1',
+      name: 'PINRU',
+      gitlabUrl: '',
+      gitlabToken: '',
+      hasGitLabToken: false,
+      cloneBasePath: '',
+      models: 'ORIGIN',
+      sourceModelFolder: 'ORIGIN',
+      defaultSubmitRepo: '',
+      taskTypes: 'Bug修复\nFeature迭代',
+      taskTypeQuotas: '{"Bug修复":1,"Feature迭代":2}',
+      taskTypeTotals: '',
+      overviewMarkdown: '',
+      createdAt: 1,
+      updatedAt: 1,
+    };
+
+    mockGetTask.mockResolvedValue(
+      createTaskDetail({
+        id: 'task-1',
+        gitlabProjectId: 1849,
+        projectName: 'alpha',
+        taskType: 'Feature迭代',
+      }),
+    );
+
+    const loadTasks = vi.fn().mockResolvedValue(undefined);
+    const loadActiveProject = vi.fn().mockResolvedValue(undefined);
+    const updateTaskStatusInStore = vi.fn();
+    const updateTaskTypeInStore = vi.fn();
+
+    const { result } = renderHook(() =>
+      useBoardTaskDetail({
+        activeProject,
+        availableTaskTypes: ['Bug修复', 'Feature迭代'],
+        sourceModelName: 'ORIGIN',
+        tasks: [featureTask, bugTask],
+        loadTasks,
+        loadActiveProject,
+        updateTaskStatusInStore,
+        updateTaskTypeInStore,
+      }),
+    );
+
+    act(() => {
+      result.current.setSelected(featureTask);
+    });
+
+    await waitFor(() => {
+      expect(result.current.selectedTaskDetail?.id).toBe('task-1');
+    });
+
+    let changeResult:
+      | Awaited<ReturnType<typeof result.current.handleTaskTypeChange>>
+      | undefined;
+    await act(async () => {
+      changeResult = await result.current.handleTaskTypeChange(
+        'task-1',
+        'Bug修复',
+        {
+          skipConfirm: true,
+        },
+      );
+    });
+
+    expect(changeResult?.ok).toBe(false);
+    expect(changeResult?.error).toContain('不能切换到「');
+    expect(changeResult?.error).toContain('Bug');
+    expect(changeResult?.error).toContain('单题上限 1');
+    expect(result.current.drawerError).toBe(changeResult?.error);
+    expect(updateTaskTypeInStore).not.toHaveBeenCalled();
+    expect(mockUpdateTaskType).not.toHaveBeenCalled();
   });
 });

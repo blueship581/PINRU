@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/blueship581/pinru/internal/errs"
 	"github.com/blueship581/pinru/internal/store"
 	"github.com/blueship581/pinru/internal/util"
 	_ "modernc.org/sqlite"
@@ -145,7 +146,7 @@ func (s *TaskService) ExtractTaskSessions(taskID string) (*ExtractTaskSessionsRe
 		return nil, err
 	}
 	if task == nil {
-		return nil, fmt.Errorf("题卡 %q 不存在", taskID)
+		return nil, fmt.Errorf(errs.FmtCardNotFound, taskID)
 	}
 
 	modelRuns, err := s.store.ListModelRuns(taskID)
@@ -337,7 +338,7 @@ func traeWorkspaceStorageBase(override string) (string, error) {
 	}
 	p := util.DefaultTraeWorkspaceStoragePath()
 	if p == "" {
-		return "", fmt.Errorf("无法获取用户目录")
+		return "", fmt.Errorf(errs.FmtUserDirShort)
 	}
 	return p, nil
 }
@@ -348,7 +349,7 @@ func traeLogsBase(override string) (string, error) {
 	}
 	p := util.DefaultTraeLogsPath()
 	if p == "" {
-		return "", fmt.Errorf("无法获取用户目录")
+		return "", fmt.Errorf(errs.FmtUserDirShort)
 	}
 	return p, nil
 }
@@ -368,7 +369,7 @@ func readTraeWorkspaceFolderWithSeen(workspaceJSONPath string, seen map[string]s
 		return "", nil
 	}
 	if _, exists := seen[normalizedJSONPath]; exists {
-		return "", fmt.Errorf("detected cyclic Trae workspace reference: %s", normalizedJSONPath)
+		return "", fmt.Errorf(errs.FmtDetectedCyclicTrae, normalizedJSONPath)
 	}
 	seen[normalizedJSONPath] = struct{}{}
 
@@ -663,21 +664,6 @@ func loadTraeWorkspaceState(stateDBPath string) (traeWorkspaceState, error) {
 
 	db.SetMaxOpenConns(1)
 
-	userKey, err := queryOptionalSQLiteString(db, "SELECT key FROM ItemTable WHERE key LIKE '%_ai-chat:%' LIMIT 1")
-	if err != nil {
-		return state, err
-	}
-	if matches := traeWorkspaceUserIDPattern.FindStringSubmatch(userKey); len(matches) == 2 {
-		state.UserID = matches[1]
-	}
-	if state.UserID != "" {
-		username, usernameErr := inferTraeWorkspaceUsername(db, state.UserID)
-		if usernameErr != nil {
-			return state, usernameErr
-		}
-		state.Username = username
-	}
-
 	rawMemento, err := queryOptionalSQLiteString(db, "SELECT value FROM ItemTable WHERE key='memento/icube-ai-agent-storage'")
 	if err != nil {
 		return state, err
@@ -712,6 +698,19 @@ func loadTraeWorkspaceState(stateDBPath string) (traeWorkspaceState, error) {
 		}
 	}
 
+	userID, err := inferTraeWorkspaceUserID(db, state.RawSessions, state.CurrentRawSessionID)
+	if err != nil {
+		return state, err
+	}
+	state.UserID = userID
+	if state.UserID != "" {
+		username, usernameErr := inferTraeWorkspaceUsername(db, state.UserID)
+		if usernameErr != nil {
+			return state, usernameErr
+		}
+		state.Username = username
+	}
+
 	rawInputHistory, err := queryOptionalSQLiteString(db, "SELECT value FROM ItemTable WHERE key='icube-ai-agent-storage-input-history'")
 	if err != nil {
 		return state, err
@@ -726,6 +725,213 @@ func loadTraeWorkspaceState(stateDBPath string) (traeWorkspaceState, error) {
 	}
 
 	return state, nil
+}
+
+func inferTraeWorkspaceUserID(
+	db *sql.DB,
+	rawSessions []traeWorkspaceConversation,
+	currentRawSessionID string,
+) (string, error) {
+	userIDs, err := listTraeWorkspaceUserIDs(db)
+	if err != nil {
+		return "", err
+	}
+	if len(userIDs) == 0 {
+		return "", nil
+	}
+	if len(userIDs) == 1 {
+		return userIDs[0], nil
+	}
+
+	rawSessionIDs := uniqueTraeRawSessionIDs(rawSessions, currentRawSessionID)
+	if len(rawSessionIDs) > 0 {
+		bestUserID, bestScore, scoreErr := resolveTraeWorkspaceUserBySessionOwnership(
+			db,
+			userIDs,
+			rawSessionIDs,
+			strings.TrimSpace(currentRawSessionID),
+		)
+		if scoreErr != nil {
+			return "", scoreErr
+		}
+		if bestScore > 0 {
+			return bestUserID, nil
+		}
+	}
+
+	userKey, err := queryOptionalSQLiteString(db, "SELECT key FROM ItemTable WHERE key LIKE '%_ai-chat:%' LIMIT 1")
+	if err != nil {
+		return "", err
+	}
+	if matches := traeWorkspaceUserIDPattern.FindStringSubmatch(userKey); len(matches) == 2 {
+		return matches[1], nil
+	}
+
+	return userIDs[0], nil
+}
+
+func listTraeWorkspaceUserIDs(db *sql.DB) ([]string, error) {
+	rows, err := db.Query(
+		"SELECT key FROM ItemTable WHERE key LIKE '%_ai-chat:%' OR key LIKE '%_AI.agent.%'",
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	seen := make(map[string]struct{})
+	userIDs := make([]string, 0)
+	for rows.Next() {
+		var key sql.NullString
+		if scanErr := rows.Scan(&key); scanErr != nil {
+			return nil, scanErr
+		}
+		if !key.Valid {
+			continue
+		}
+		userID := extractTraeUserIDFromKey(key.String)
+		if userID == "" {
+			continue
+		}
+		if _, exists := seen[userID]; exists {
+			continue
+		}
+		seen[userID] = struct{}{}
+		userIDs = append(userIDs, userID)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	sort.Strings(userIDs)
+	return userIDs, nil
+}
+
+func uniqueTraeRawSessionIDs(rawSessions []traeWorkspaceConversation, currentRawSessionID string) []string {
+	seen := make(map[string]struct{})
+	result := make([]string, 0, len(rawSessions)+1)
+
+	appendUnique := func(rawSessionID string) {
+		trimmed := strings.TrimSpace(rawSessionID)
+		if trimmed == "" {
+			return
+		}
+		if _, exists := seen[trimmed]; exists {
+			return
+		}
+		seen[trimmed] = struct{}{}
+		result = append(result, trimmed)
+	}
+
+	appendUnique(currentRawSessionID)
+	for _, rawSession := range rawSessions {
+		appendUnique(rawSession.RawSessionID)
+	}
+
+	return result
+}
+
+func resolveTraeWorkspaceUserBySessionOwnership(
+	db *sql.DB,
+	userIDs []string,
+	rawSessionIDs []string,
+	currentRawSessionID string,
+) (string, int, error) {
+	if len(userIDs) == 0 || len(rawSessionIDs) == 0 {
+		return "", 0, nil
+	}
+
+	allowedUserIDs := make(map[string]struct{}, len(userIDs))
+	for _, userID := range userIDs {
+		allowedUserIDs[strings.TrimSpace(userID)] = struct{}{}
+	}
+
+	rows, err := db.Query(
+		"SELECT key, value FROM ItemTable WHERE key LIKE '%_ai-chat:%' OR key LIKE '%_AI.agent.%'",
+	)
+	if err != nil {
+		return "", 0, err
+	}
+	defer rows.Close()
+
+	scores := make(map[string]int, len(userIDs))
+	for rows.Next() {
+		var (
+			key   sql.NullString
+			value sql.NullString
+		)
+		if scanErr := rows.Scan(&key, &value); scanErr != nil {
+			return "", 0, scanErr
+		}
+		if !key.Valid {
+			continue
+		}
+
+		userID := extractTraeUserIDFromKey(key.String)
+		if userID == "" {
+			continue
+		}
+		if _, allowed := allowedUserIDs[userID]; !allowed {
+			continue
+		}
+
+		weight := traeSessionOwnershipKeyWeight(key.String)
+		if weight <= 0 || !value.Valid {
+			continue
+		}
+
+		score := 0
+		for _, rawSessionID := range rawSessionIDs {
+			if !strings.Contains(value.String, `"`+rawSessionID+`"`) {
+				continue
+			}
+			score += weight
+			if rawSessionID == currentRawSessionID {
+				score += 6
+			}
+		}
+		if score > 0 {
+			scores[userID] += score
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return "", 0, err
+	}
+
+	bestUserID := ""
+	bestScore := 0
+	for _, userID := range userIDs {
+		score := scores[userID]
+		if score > bestScore || (score == bestScore && score > 0 && userID < bestUserID) {
+			bestUserID = userID
+			bestScore = score
+		}
+	}
+	return bestUserID, bestScore, nil
+}
+
+func extractTraeUserIDFromKey(key string) string {
+	if matches := traeWorkspaceUserIDPattern.FindStringSubmatch(strings.TrimSpace(key)); len(matches) == 2 {
+		return matches[1]
+	}
+	return ""
+}
+
+func traeSessionOwnershipKeyWeight(key string) int {
+	lowerKey := strings.ToLower(strings.TrimSpace(key))
+	switch {
+	case strings.Contains(lowerKey, "_ai-chat:sessionrelation:modelmap"),
+		strings.Contains(lowerKey, "_ai-chat:sessionrelation:modemap"):
+		return 10
+	case strings.Contains(lowerKey, "_ai-chat:sessionrelation:planmodemap"),
+		strings.Contains(lowerKey, "_ai-chat:sessionrelation:specmodemap"):
+		return 8
+	case strings.Contains(lowerKey, "_ai.agent.plan.mode.map"),
+		strings.Contains(lowerKey, "_ai.agent.spec.mode.map"):
+		return 4
+	default:
+		return 0
+	}
 }
 
 func inferTraeWorkspaceUsername(db *sql.DB, userID string) (string, error) {

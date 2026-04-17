@@ -60,8 +60,18 @@ import {
   parseProjectIds,
   partitionClaimsByProjectLimit,
   pickSourceModel,
-  toErrorMessage,
 } from './utils/claimUtils';
+import { toErrorMessage } from '../../shared/lib/errorMessage';
+import {
+  MsgClaimWaitTimeout,
+  MsgClaimCanceled,
+  MsgClaimProjectNoCloneURL,
+  MsgClaimGitLabSettingsMissing,
+  fmtClaimDirConflict,
+  fmtClaimSourceFail,
+  fmtClaimParsePayloadFail,
+  fmtClaimSearchFail,
+} from '../../shared/constants/messages';
 import { runWithConcurrency } from './utils/asyncPool';
 
 /* ─── Component ─── */
@@ -195,7 +205,7 @@ export default function Claim() {
       await new Promise((resolve) => window.setTimeout(resolve, 800));
     }
 
-    throw new Error('等待拉取任务完成超时');
+    throw new Error(MsgClaimWaitTimeout);
   };
 
   const runClonePlan = async (
@@ -217,11 +227,11 @@ export default function Claim() {
     const existingPaths = (await checkPathsExist(allTargetPaths)) ?? [];
     if (existingPaths.length > 0) {
       const names = existingPaths.map((p) => p.split('/').pop() || p).join(', ');
-      throw new Error(`目录冲突：以下目录已存在: ${names}，请先删除或更换路径`);
+      throw new Error(fmtClaimDirConflict(names));
     }
 
     const cloneUrl = currentProject.http_url_to_repo;
-    if (!cloneUrl) throw new Error('该项目缺少 clone 地址 (http_url_to_repo)');
+    if (!cloneUrl) throw new Error(MsgClaimProjectNoCloneURL);
 
     setCloneProgressMsg('');
     onStatusChange?.(sourceModel.id, 'cloning');
@@ -266,11 +276,11 @@ export default function Claim() {
 
     if (finalJob.status === 'error') {
       onStatusChange?.(sourceModel.id, 'error');
-      throw new Error(finalJob.errorMessage || `${sourceModel.id}: 拉取失败`);
+      throw new Error(finalJob.errorMessage || fmtClaimSourceFail(sourceModel.id));
     }
     if (finalJob.status === 'cancelled') {
       onStatusChange?.(sourceModel.id, 'error');
-      throw new Error('拉取任务已取消');
+      throw new Error(MsgClaimCanceled);
     }
 
     let result: GitCloneResult = {
@@ -283,7 +293,7 @@ export default function Claim() {
       try {
         result = JSON.parse(finalJob.outputPayload) as GitCloneResult;
       } catch (error) {
-        throw new Error(`解析拉取结果失败: ${toErrorMessage(error)}`);
+        throw new Error(fmtClaimParsePayloadFail(toErrorMessage(error)));
       }
     }
 
@@ -340,7 +350,7 @@ export default function Claim() {
       setLookups(mapped);
       setPhase('review');
     } catch (error) {
-      setSearchError(`查询失败: ${toErrorMessage(error)}`);
+      setSearchError(fmtClaimSearchFail(toErrorMessage(error)));
     } finally {
       setIsSearching(false);
     }
@@ -417,7 +427,7 @@ export default function Claim() {
     try {
       const gitLabSettings = await getGitLabSettings();
       if (!gitLabSettings.url || !gitLabSettings.hasToken) {
-        throw new Error('请先在设置页面配置 GitLab URL 和 Token');
+        throw new Error(MsgClaimGitLabSettingsMissing);
       }
 
       const allPlannedClaims = await buildPlannedClaims();

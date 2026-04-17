@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/blueship581/pinru/internal/errs"
 	_ "modernc.org/sqlite"
 )
 
@@ -69,7 +70,7 @@ func (s *Store) ensureMetaSchema() error {
 
 	for _, stmt := range metaTables {
 		if _, err := s.DB.Exec(stmt); err != nil {
-			return fmt.Errorf("ensure meta schema: %w", err)
+			return fmt.Errorf(errs.FmtStoreEnsureMetaSchema, err)
 		}
 	}
 	return nil
@@ -92,7 +93,7 @@ func (s *Store) migrate(migrationSQL ...string) error {
 		}
 		if applied {
 			if appliedChecksum != checksum {
-				return fmt.Errorf("migration checksum mismatch: %s", migrationID)
+				return fmt.Errorf(errs.FmtStoreMigrationMismatch, migrationID)
 			}
 			continue
 		}
@@ -124,7 +125,7 @@ func (s *Store) migrate(migrationSQL ...string) error {
 				if isIgnorableCreateIndexError(stmt, err) {
 					continue
 				}
-				return fmt.Errorf("migration exec: %w\nMigration: %s\nSQL: %s", err, migrationID, stmt)
+				return fmt.Errorf(errs.FmtStoreMigrationExec, err, migrationID, stmt)
 			}
 		}
 
@@ -132,7 +133,7 @@ func (s *Store) migrate(migrationSQL ...string) error {
 			`INSERT INTO schema_migrations (id, checksum, statement_count) VALUES (?, ?, ?)`,
 			migrationID, checksum, len(statements),
 		); err != nil {
-			return fmt.Errorf("record migration %s: %w", migrationID, err)
+			return fmt.Errorf(errs.FmtStoreRecordMigration, migrationID, err)
 		}
 		if err := tx.Commit(); err != nil {
 			return err
@@ -161,7 +162,7 @@ func (s *Store) runMigrationWithoutTransaction(migrationID, checksum string, sta
 			if isIgnorableCreateIndexError(stmt, err) {
 				continue
 			}
-			return fmt.Errorf("migration exec: %w\nMigration: %s\nSQL: %s", err, migrationID, stmt)
+			return fmt.Errorf(errs.FmtStoreMigrationExec, err, migrationID, stmt)
 		}
 	}
 
@@ -169,7 +170,7 @@ func (s *Store) runMigrationWithoutTransaction(migrationID, checksum string, sta
 		`INSERT INTO schema_migrations (id, checksum, statement_count) VALUES (?, ?, ?)`,
 		migrationID, checksum, len(statements),
 	); err != nil {
-		return fmt.Errorf("record migration %s: %w", migrationID, err)
+		return fmt.Errorf(errs.FmtStoreRecordMigration, migrationID, err)
 	}
 
 	return nil
@@ -276,7 +277,7 @@ func (s *Store) repairLegacySchemaBeforeMigrate() error {
 	}
 
 	if _, err := s.DB.Exec(`PRAGMA foreign_keys = OFF`); err != nil {
-		return fmt.Errorf("disable foreign keys for legacy tasks repair: %w", err)
+		return fmt.Errorf(errs.FmtStoreDisableFKLegacy, err)
 	}
 	defer s.DB.Exec(`PRAGMA foreign_keys = ON`)
 
@@ -305,7 +306,7 @@ CREATE TABLE tasks_legacy_repair (
     prompt_generation_started_at INTEGER,
     prompt_generation_finished_at INTEGER
 )`); err != nil {
-		return fmt.Errorf("create legacy tasks repair table: %w", err)
+		return fmt.Errorf(errs.FmtStoreCreateLegacyRepair, err)
 	}
 
 	if _, err := tx.Exec(`
@@ -320,14 +321,14 @@ SELECT
     'idle', NULL, NULL, NULL
 FROM tasks
 `, defaultTaskType); err != nil {
-		return fmt.Errorf("copy legacy tasks into repair table: %w", err)
+		return fmt.Errorf(errs.FmtStoreCopyLegacyTasks, err)
 	}
 
 	if _, err := tx.Exec(`DROP TABLE tasks`); err != nil {
-		return fmt.Errorf("drop legacy tasks table: %w", err)
+		return fmt.Errorf(errs.FmtStoreDropLegacyTasks, err)
 	}
 	if _, err := tx.Exec(`ALTER TABLE tasks_legacy_repair RENAME TO tasks`); err != nil {
-		return fmt.Errorf("rename repaired tasks table: %w", err)
+		return fmt.Errorf(errs.FmtStoreRenameRepaired, err)
 	}
 	if err := tx.Commit(); err != nil {
 		return err
@@ -358,6 +359,8 @@ func (s *Store) ensureSchema() error {
 		{table: "projects", column: "default_submit_repo", definition: "TEXT NOT NULL DEFAULT ''"},
 		{table: "projects", column: "task_types", definition: "TEXT NOT NULL DEFAULT '[]'"},
 		{table: "projects", column: "overview_markdown", definition: "TEXT NOT NULL DEFAULT ''"},
+		{table: "tasks", column: "project_type", definition: "TEXT NOT NULL DEFAULT ''"},
+		{table: "tasks", column: "change_scope", definition: "TEXT NOT NULL DEFAULT ''"},
 	}
 
 	for _, column := range requiredColumns {
@@ -383,7 +386,7 @@ func (s *Store) tableExists(name string) (bool, error) {
 		return false, nil
 	}
 	if err != nil {
-		return false, fmt.Errorf("check table %s: %w", name, err)
+		return false, fmt.Errorf(errs.FmtStoreCheckTable, name, err)
 	}
 	return true, nil
 }
@@ -414,7 +417,7 @@ func (s *Store) ensureIndexes() error {
 			continue
 		}
 		if _, err := s.DB.Exec(index.stmt); err != nil {
-			return fmt.Errorf("ensure index: %w\nSQL: %s", err, index.stmt)
+			return fmt.Errorf(errs.FmtStoreEnsureIndex, err, index.stmt)
 		}
 		if err := s.recordSchemaRepair("index", index.name, index.stmt); err != nil {
 			return err
@@ -433,7 +436,7 @@ WHERE rowid NOT IN (
 	GROUP BY task_id, model_name
 )`)
 	if err != nil {
-		return fmt.Errorf("normalize duplicate model runs: %w", err)
+		return fmt.Errorf(errs.FmtStoreNormalizeRuns, err)
 	}
 	return nil
 }
@@ -452,7 +455,7 @@ func (s *Store) ensureColumn(table, column, definition string) error {
 		if strings.Contains(err.Error(), "duplicate column name") {
 			return nil
 		}
-		return fmt.Errorf("ensure column %s.%s: %w", table, column, err)
+		return fmt.Errorf(errs.FmtStoreEnsureColumn, table, column, err)
 	}
 	return s.recordSchemaRepair("column", table+"."+column, stmt)
 }
@@ -507,7 +510,7 @@ func (s *Store) lookupAppliedMigration(id string) (checksum string, applied bool
 		return "", false, nil
 	}
 	if err != nil {
-		return "", false, fmt.Errorf("lookup migration %s: %w", id, err)
+		return "", false, fmt.Errorf(errs.FmtStoreLookupMigration, id, err)
 	}
 	return checksum, true, nil
 }
@@ -522,7 +525,7 @@ func (s *Store) indexExists(name string) (bool, error) {
 		return false, nil
 	}
 	if err != nil {
-		return false, fmt.Errorf("check index %s: %w", name, err)
+		return false, fmt.Errorf(errs.FmtStoreCheckIndex, name, err)
 	}
 	return true, nil
 }
@@ -538,7 +541,7 @@ func (s *Store) recordSchemaRepair(repairType, target, definition string) error 
 		definition,
 	)
 	if err != nil {
-		return fmt.Errorf("record schema repair %s: %w", repairKey, err)
+		return fmt.Errorf(errs.FmtStoreRecordRepair, repairKey, err)
 	}
 	return nil
 }

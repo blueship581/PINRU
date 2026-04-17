@@ -63,9 +63,8 @@ export function BoardLayerStack({
   onCloseProjectPanel,
   onProjectSaved,
   onAiReview,
-  onAiReviewNode,
-  onSaveAiReviewNode,
   onDeleteAiReviewRecord,
+  onSubmitNextAiReviewRound,
 }: {
   taskCardContextMenu: TaskCardContextMenuState | null;
   taskCardContextMenuRef: RefObject<HTMLDivElement | null>;
@@ -104,15 +103,8 @@ export function BoardLayerStack({
   onCloseProjectPanel: () => void;
   onProjectSaved: (updated: ProjectConfig) => void;
   onAiReview?: (run: import('../../../api/task').ModelRunFromDB) => void;
-  onAiReviewNode?: (node: import('../../../api/task').AiReviewNodeFromDB) => void;
-  onSaveAiReviewNode?: (request: {
-    id: string;
-    title: string;
-    issueType: string;
-    promptText: string;
-    reviewNotes: string;
-  }) => void | Promise<void>;
   onDeleteAiReviewRecord?: (jobId: string) => void | Promise<void>;
+  onSubmitNextAiReviewRound?: (modelRunId: string, modelName: string, localPath: string, nextPromptOverride?: string) => void | Promise<void>;
 }) {
   return (
     <AnimatePresence>
@@ -191,7 +183,7 @@ export function BoardLayerStack({
           selected={detail.selected}
           selectedTaskDetail={detail.selectedTaskDetail}
           selectedModelRuns={detail.selectedModelRuns}
-          selectedAiReviewNodes={detail.selectedAiReviewNodes}
+          selectedAiReviewRounds={detail.selectedAiReviewRounds}
           drawerLoading={detail.drawerLoading}
           drawerError={detail.drawerError}
           statusChanging={detail.statusChanging}
@@ -243,9 +235,8 @@ export function BoardLayerStack({
           promptGenerating={detail.promptGenerating}
           onGeneratePrompt={(config) => void detail.handleGeneratePrompt(config)}
           onAiReview={onAiReview}
-          onAiReviewNode={onAiReviewNode}
-          onSaveAiReviewNode={onSaveAiReviewNode}
           onDeleteAiReviewRecord={onDeleteAiReviewRecord}
+          onSubmitNextAiReviewRound={onSubmitNextAiReviewRound}
         />
       )}
 

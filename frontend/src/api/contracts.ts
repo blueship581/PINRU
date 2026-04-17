@@ -27,6 +27,8 @@ import type {
 import type {
   GeneratePromptRequest,
   LlmProviderConfig,
+  PolishTextRequest,
+  PolishTextResult,
   PromptGenerationResult,
 } from './llm';
 import type {
@@ -39,6 +41,7 @@ import type {
 } from './submit';
 import type {
   AiReviewNodeFromDB,
+  AiReviewRoundFromDB,
   AddModelRunRequest,
   BatchUpdateResult,
   BatchUpdateTasksRequest,
@@ -48,8 +51,8 @@ import type {
   TaskChildDirectory,
   TaskFromDB,
   UpdateModelRunRequest,
-  UpdateAiReviewNodeRequest,
   UpdateModelRunSessionRequest,
+  UpdateTaskReportFieldsRequest,
   UpdateTaskSessionListRequest,
 } from './task';
 
@@ -145,6 +148,7 @@ export type WailsServiceContract = {
     TestLLMProvider: ServiceMethod<[provider: LlmProviderConfig], boolean>;
     GenerateTaskPrompt: ServiceMethod<[request: GeneratePromptRequest], PromptGenerationResult>;
     SaveTaskPrompt: ServiceMethod<[taskId: string, promptText: string], void>;
+    PolishText: ServiceMethod<[request: PolishTextRequest], PolishTextResult>;
   };
   SubmitService: {
     PublishSourceRepo: ServiceMethod<[request: PublishSourceRepoRequest], PublishSourceRepoResult>;
@@ -164,6 +168,7 @@ export type WailsServiceContract = {
     GetTask: ServiceMethod<[id: string], TaskFromDB | null>;
     ListModelRuns: ServiceMethod<[taskId: string], ModelRunFromDB[]>;
     ListAiReviewNodes: ServiceMethod<[taskId: string], AiReviewNodeFromDB[]>;
+    ListAiReviewRounds: ServiceMethod<[taskId: string], AiReviewRoundFromDB[]>;
     ListTaskChildDirectories: ServiceMethod<[taskId: string], TaskChildDirectory[]>;
     CreateTask: ServiceMethod<[task: CreateTaskRequest], TaskFromDB>;
     UpdateTaskStatus: ServiceMethod<[id: string, status: string], void>;
@@ -171,13 +176,14 @@ export type WailsServiceContract = {
     UpdateTaskSessionList: ServiceMethod<[request: UpdateTaskSessionListRequest], void>;
     ExtractTaskSessions: ServiceMethod<[taskId: string], ExtractTaskSessionsResult>;
     UpdateModelRun: ServiceMethod<[request: UpdateModelRunRequest], void>;
-    UpdateAiReviewNode: ServiceMethod<[request: UpdateAiReviewNodeRequest], void>;
     DeleteTask: ServiceMethod<[id: string], void>;
     OpenTaskLocalFolder: ServiceMethod<[id: string], void>;
     UpdateModelRunSessionInfo: ServiceMethod<[request: UpdateModelRunSessionRequest], void>;
     AddModelRun: ServiceMethod<[request: AddModelRunRequest], void>;
     DeleteModelRun: ServiceMethod<[taskId: string, modelName: string], void>;
+    UpdateTaskReportFields: ServiceMethod<[request: UpdateTaskReportFieldsRequest], void>;
     BatchUpdateTasks: ServiceMethod<[request: BatchUpdateTasksRequest], BatchUpdateResult>;
     BatchDeleteTasks: ServiceMethod<[taskIds: string[]], BatchUpdateResult>;
+    SaveAiReviewRoundNotes: ServiceMethod<[roundID: string, reviewNotes: string, nextPrompt: string], void>;
   };
 };

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/blueship581/pinru/internal/errs"
 	"github.com/blueship581/pinru/internal/store"
 	"github.com/blueship581/pinru/internal/util"
 )
@@ -25,7 +26,7 @@ func PromptArtifactPath(workDir string) string {
 func WritePromptArtifact(workDir, promptText string) error {
 	path := PromptArtifactPath(workDir)
 	if err := os.WriteFile(path, []byte(strings.TrimSpace(promptText)+"\n"), 0o644); err != nil {
-		return fmt.Errorf("写入提示词文件失败: %w", err)
+		return fmt.Errorf(errs.FmtPromptWriteFile, err)
 	}
 	return nil
 }
@@ -37,7 +38,7 @@ func LoadTaskForPromptSync(taskStore promptTaskGetter, taskID string) (*store.Ta
 		return nil, err
 	}
 	if task == nil {
-		return nil, fmt.Errorf("未找到任务: %s", taskID)
+		return nil, fmt.Errorf(errs.FmtTaskNotFound, taskID)
 	}
 	return task, nil
 }
@@ -57,12 +58,12 @@ func SyncPromptArtifact(localPath *string, promptText string) error {
 	info, err := os.Stat(workDir)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return fmt.Errorf("任务目录不存在: %s", workDir)
+			return fmt.Errorf(errs.FmtTaskDirNotExist, workDir)
 		}
-		return fmt.Errorf("读取任务目录信息失败: %w", err)
+		return fmt.Errorf(errs.FmtReadTaskDirInfoFail, err)
 	}
 	if !info.IsDir() {
-		return fmt.Errorf("任务目录不是文件夹: %s", workDir)
+		return fmt.Errorf(errs.FmtTaskDirNotFolder, workDir)
 	}
 
 	return WritePromptArtifact(workDir, promptText)

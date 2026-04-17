@@ -5,6 +5,8 @@ import {
   DEFAULT_TASK_TYPE,
   getLlmProviders,
   getProjectTaskSettings,
+  getTaskTypeDisplayLabel,
+  getTaskTypeQuotaRawValue,
   normalizeTaskTypeName,
   type ProjectConfig,
 } from '../../../api/config';
@@ -22,13 +24,12 @@ import {
 import {
   extractTaskSessions,
   getTask,
-  listAiReviewNodes,
+  listAiReviewRounds,
   listModelRuns,
-  updateAiReviewNode,
   updateTaskSessionList,
   updateTaskStatus,
   updateTaskType,
-  type AiReviewNodeFromDB,
+  type AiReviewRoundFromDB,
   type ExtractTaskSessionCandidate,
   type ModelRunFromDB,
   type PromptGenerationStatus,
@@ -62,10 +63,10 @@ function normalizeModelRunList(
   return Array.isArray(modelRuns) ? modelRuns : [];
 }
 
-function normalizeAiReviewNodeList(
-  nodes: AiReviewNodeFromDB[] | null | undefined,
-): AiReviewNodeFromDB[] {
-  return Array.isArray(nodes) ? nodes : [];
+function normalizeAiReviewRoundList(
+  rounds: AiReviewRoundFromDB[] | null | undefined,
+): AiReviewRoundFromDB[] {
+  return Array.isArray(rounds) ? rounds : [];
 }
 
 function normalizeLlmProviderList(
@@ -85,6 +86,50 @@ function resolvePromptWritebackStatus(
     return currentStatus;
   }
   return 'PromptReady';
+}
+
+function buildTaskTypeLimitReachedMessage(
+  taskType: string,
+  limit: number,
+  existingCount: number,
+) {
+  const taskTypeLabel = getTaskTypeDisplayLabel(taskType || DEFAULT_TASK_TYPE);
+  return [
+    `不能切换到「${taskTypeLabel}」。`,
+    `当前 GitLab 项目在该类型下已达到单题上限 ${limit}（已存在 ${existingCount} 张同类型题卡）。`,
+    '请先调整已有同类型题卡，或切换到其他任务类型。',
+  ].join('');
+}
+
+function humanizeTaskTypeChangeError(
+  error: unknown,
+  nextTaskType: string,
+  fallbackExistingCount?: number,
+  fallbackLimit?: number | null,
+) {
+  const rawMessage =
+    error instanceof Error ? error.message : '任务类型更新失败';
+
+  if (!rawMessage.includes('领题数已达上限')) {
+    return rawMessage;
+  }
+
+  const matchedLimit = rawMessage.match(/已达上限\s*(\d+)/);
+  const resolvedLimit = matchedLimit
+    ? Number(matchedLimit[1])
+    : fallbackLimit ?? null;
+
+  if (resolvedLimit !== null && resolvedLimit > 0) {
+    return buildTaskTypeLimitReachedMessage(
+      nextTaskType,
+      resolvedLimit,
+      fallbackExistingCount ?? resolvedLimit,
+    );
+  }
+
+  return `不能切换到「${getTaskTypeDisplayLabel(
+    nextTaskType || DEFAULT_TASK_TYPE,
+  )}」，该任务类型的单题上限已满。请先调整已有同类型题卡，或切换到其他任务类型。`;
 }
 
 type UseBoardTaskDetailArgs = {
@@ -111,7 +156,7 @@ export function useBoardTaskDetail({
   const [selected, setSelected] = useState<Task | null>(null);
   const [selectedTaskDetail, setSelectedTaskDetail] = useState<TaskFromDB | null>(null);
   const [selectedModelRuns, setSelectedModelRuns] = useState<ModelRunFromDB[]>([]);
-  const [selectedAiReviewNodes, setSelectedAiReviewNodes] = useState<AiReviewNodeFromDB[]>([]);
+  const [selectedAiReviewRounds, setSelectedAiReviewRounds] = useState<AiReviewRoundFromDB[]>([]);
   const [selectedSessionModelName, setSelectedSessionModelName] = useState('');
   const [drawerLoading, setDrawerLoading] = useState(false);
   const [drawerError, setDrawerError] = useState('');
@@ -148,6 +193,14 @@ export function useBoardTaskDetail({
         ...sessionListDraft.map((session) => session.taskType),
       ]).taskTypes,
     [activeProject, sessionListDraft, tasks],
+  );
+  const projectTaskTypeQuotas = useMemo(
+    () =>
+      getProjectTaskSettings(
+        activeProject,
+        tasks.map((task) => task.taskType),
+      ).quotas,
+    [activeProject, tasks],
   );
 
   const selectedPromptGenerationStatus = normalizePromptGenerationStatus(
@@ -260,13 +313,13 @@ export function useBoardTaskDetail({
   };
 
   const refreshTaskSessionSyncState = async (taskId: string) => {
-    const [taskDetail, modelRuns, aiReviewNodes] = await Promise.all([
+    const [taskDetail, modelRuns, aiReviewRounds] = await Promise.all([
       getTask(taskId),
       listModelRuns(taskId),
-      listAiReviewNodes(taskId),
+      listAiReviewRounds(taskId),
     ]);
     const normalizedModelRuns = normalizeModelRunList(modelRuns);
-    const normalizedAiReviewNodes = normalizeAiReviewNodeList(aiReviewNodes);
+    const normalizedAiReviewRounds = normalizeAiReviewRoundList(aiReviewRounds);
 
     if (selectedTaskIdRef.current !== taskId) {
       return;
@@ -283,7 +336,7 @@ export function useBoardTaskDetail({
 
     setSelectedTaskDetail(taskDetail);
     setSelectedModelRuns(normalizedModelRuns);
-    setSelectedAiReviewNodes(normalizedAiReviewNodes);
+    setSelectedAiReviewRounds(normalizedAiReviewRounds);
     const nextSessionModelName =
       normalizedModelRuns.some((run) => run.modelName === selectedSessionModelName)
         ? selectedSessionModelName
@@ -321,7 +374,7 @@ export function useBoardTaskDetail({
       sessionDraftVersionRef.current = 0;
       setSelectedTaskDetail(null);
       setSelectedModelRuns([]);
-      setSelectedAiReviewNodes([]);
+      setSelectedAiReviewRounds([]);
       setSelectedSessionModelName('');
       setDrawerError('');
       setSessionExtracting(false);
@@ -342,13 +395,13 @@ export function useBoardTaskDetail({
     setSessionExtracting(false);
 
     (async () => {
-      const [taskDetail, modelRuns, aiReviewNodes] = await Promise.all([
+      const [taskDetail, modelRuns, aiReviewRounds] = await Promise.all([
         getTask(selected.id),
         listModelRuns(selected.id),
-        listAiReviewNodes(selected.id),
+        listAiReviewRounds(selected.id),
       ]);
       const normalizedModelRuns = normalizeModelRunList(modelRuns);
-      const normalizedAiReviewNodes = normalizeAiReviewNodeList(aiReviewNodes);
+      const normalizedAiReviewRounds = normalizeAiReviewRoundList(aiReviewRounds);
       if (cancelled) {
         return;
       }
@@ -357,7 +410,7 @@ export function useBoardTaskDetail({
       setPromptDraft(taskDetail?.promptText ?? '');
       setPromptCopied(false);
       setSelectedModelRuns(normalizedModelRuns);
-      setSelectedAiReviewNodes(normalizedAiReviewNodes);
+      setSelectedAiReviewRounds(normalizedAiReviewRounds);
       const initialSessionModelName =
         buildSessionModelOptions(normalizedModelRuns, sourceModelName)[0]?.modelName ?? '';
       setSelectedSessionModelName(initialSessionModelName);
@@ -468,15 +521,15 @@ export function useBoardTaskDetail({
       return;
     }
 
-    const [_, __, taskDetail, modelRuns, aiReviewNodes] = await Promise.all([
+    const [_, __, taskDetail, modelRuns, aiReviewRounds] = await Promise.all([
       loadActiveProject(),
       loadTasks(),
       getTask(taskId),
       listModelRuns(taskId),
-      listAiReviewNodes(taskId),
+      listAiReviewRounds(taskId),
     ]);
     const normalizedModelRuns = normalizeModelRunList(modelRuns);
-    const normalizedAiReviewNodes = normalizeAiReviewNodeList(aiReviewNodes);
+    const normalizedAiReviewRounds = normalizeAiReviewRoundList(aiReviewRounds);
 
     const latestTask =
       useAppStore.getState().tasks.find((task) => task.id === taskId) ?? null;
@@ -486,7 +539,7 @@ export function useBoardTaskDetail({
 
     setSelectedTaskDetail(taskDetail);
     setSelectedModelRuns(normalizedModelRuns);
-    setSelectedAiReviewNodes(normalizedAiReviewNodes);
+    setSelectedAiReviewRounds(normalizedAiReviewRounds);
     const nextSessionModelName =
       normalizedModelRuns.some((run) => run.modelName === selectedSessionModelName)
         ? selectedSessionModelName
@@ -509,6 +562,8 @@ export function useBoardTaskDetail({
   ) => {
     const normalizedTaskType = normalizeTaskTypeName(nextTaskType);
     const taskFromStore = tasks.find((task) => task.id === taskId);
+    const targetTask =
+      taskFromStore ?? (selected?.id === taskId ? selected : null);
     const isSelectedTask = selected?.id === taskId;
     const currentTaskType =
       normalizeTaskTypeName(
@@ -523,6 +578,38 @@ export function useBoardTaskDetail({
       return {
         ok: false,
         error: '',
+      };
+    }
+
+    const taskTypeLimit = getTaskTypeQuotaRawValue(
+      projectTaskTypeQuotas,
+      normalizedTaskType,
+    );
+    const existingTaskCount =
+      targetTask === null
+        ? 0
+        : tasks.filter(
+            (task) =>
+              task.id !== taskId &&
+              task.projectId === targetTask.projectId &&
+              normalizeTaskTypeName(task.taskType) === normalizedTaskType,
+          ).length;
+    if (
+      taskTypeLimit !== null &&
+      taskTypeLimit > 0 &&
+      existingTaskCount >= taskTypeLimit
+    ) {
+      const message = buildTaskTypeLimitReachedMessage(
+        normalizedTaskType,
+        taskTypeLimit,
+        existingTaskCount,
+      );
+      if (isSelectedTask) {
+        setDrawerError(message);
+      }
+      return {
+        ok: false,
+        error: message,
       };
     }
 
@@ -545,6 +632,9 @@ export function useBoardTaskDetail({
     const previousSelected = selected;
     const previousTaskDetail = selectedTaskDetail;
     const previousSessionListDraft = sessionListDraft;
+    if (isSelectedTask) {
+      setDrawerError('');
+    }
 
     updateTaskTypeInStore(taskId, normalizedTaskType);
 
@@ -613,8 +703,12 @@ export function useBoardTaskDetail({
         }
       }
 
-      const message =
-        updateError instanceof Error ? updateError.message : '任务类型更新失败';
+      const message = humanizeTaskTypeChangeError(
+        updateError,
+        normalizedTaskType,
+        existingTaskCount,
+        taskTypeLimit,
+      );
       if (isSelectedTask) {
         setDrawerError(message);
       } else {
@@ -1167,7 +1261,7 @@ export function useBoardTaskDetail({
     setSelected,
     selectedTaskDetail,
     selectedModelRuns,
-    selectedAiReviewNodes,
+    selectedAiReviewRounds,
     drawerLoading,
     drawerError,
     statusChanging,
@@ -1214,29 +1308,14 @@ export function useBoardTaskDetail({
     handleGeneratePrompt,
     applyExtractedSessionCandidate,
     closeSessionExtractCandidates,
-    saveAiReviewNode: async (request: {
-      id: string;
-      title: string;
-      issueType: string;
-      promptText: string;
-      reviewNotes: string;
-    }) => {
-      await updateAiReviewNode(request);
-      if (!selectedTaskIdRef.current) {
-        return;
-      }
-      const nodes = await listAiReviewNodes(selectedTaskIdRef.current);
-      setSelectedAiReviewNodes(normalizeAiReviewNodeList(nodes));
-      await loadTasks();
-    },
     refreshModelRuns: async () => {
       if (!selected) return;
-      const [runs, nodes] = await Promise.all([
+      const [runs, rounds] = await Promise.all([
         listModelRuns(selected.id),
-        listAiReviewNodes(selected.id),
+        listAiReviewRounds(selected.id),
       ]);
       setSelectedModelRuns(normalizeModelRunList(runs));
-      setSelectedAiReviewNodes(normalizeAiReviewNodeList(nodes));
+      setSelectedAiReviewRounds(normalizeAiReviewRoundList(rounds));
     },
   };
 }

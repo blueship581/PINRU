@@ -20,6 +20,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/blueship581/pinru/internal/errs"
 	"github.com/blueship581/pinru/internal/util"
 	"github.com/google/uuid"
 	"github.com/wailsapp/wails/v3/pkg/application"
@@ -186,7 +187,7 @@ type SkillItem struct {
 func (s *CliService) CheckCLI() (string, error) {
 	path, err := s.lookupCLI("claude")
 	if err != nil {
-		return "", fmt.Errorf("claude CLI 未找到，请先安装 Claude Code: npm install -g @anthropic-ai/claude-code")
+		return "", fmt.Errorf(errs.MsgClaudeCliMissing)
 	}
 	return path, nil
 }
@@ -194,15 +195,15 @@ func (s *CliService) CheckCLI() (string, error) {
 // StartClaude launches a claude CLI session and returns a session ID for polling.
 func (s *CliService) StartClaude(req StartClaudeRequest) (*StartClaudeResponse, error) {
 	if strings.TrimSpace(req.WorkDir) == "" {
-		return nil, fmt.Errorf("工作目录不能为空")
+		return nil, fmt.Errorf(errs.MsgWorkDirRequired)
 	}
 	if strings.TrimSpace(req.Prompt) == "" {
-		return nil, fmt.Errorf("提示词不能为空")
+		return nil, fmt.Errorf(errs.MsgPromptRequired)
 	}
 
 	claudePath, err := s.lookupCLI("claude")
 	if err != nil {
-		return nil, fmt.Errorf("claude CLI 未找到，请先安装: npm install -g @anthropic-ai/claude-code")
+		return nil, fmt.Errorf(errs.MsgClaudeCliMissing)
 	}
 
 	args, err := buildClaudeArgs(req)
@@ -221,17 +222,17 @@ func (s *CliService) StartClaude(req StartClaudeRequest) (*StartClaudeResponse, 
 	stdoutPipe, err := cmd.StdoutPipe()
 	if err != nil {
 		cancel()
-		return nil, fmt.Errorf("无法创建输出管道: %v", err)
+		return nil, fmt.Errorf(errs.FmtStdoutPipeFail, err)
 	}
 	stderrPipe, err := cmd.StderrPipe()
 	if err != nil {
 		cancel()
-		return nil, fmt.Errorf("无法创建错误管道: %v", err)
+		return nil, fmt.Errorf(errs.FmtStderrPipeFail, err)
 	}
 
 	if err := cmd.Start(); err != nil {
 		cancel()
-		return nil, fmt.Errorf("启动 claude 失败: %v", err)
+		return nil, fmt.Errorf(errs.FmtClaudeStartClassicFail, err)
 	}
 
 	sessionID := uuid.New().String()
@@ -296,7 +297,7 @@ func (s *CliService) PollOutput(req PollOutputRequest) (*PollOutputResponse, err
 	sess, ok := s.sessions[req.SessionID]
 	s.mu.Unlock()
 	if !ok {
-		return nil, fmt.Errorf("会话不存在: %s", req.SessionID)
+		return nil, fmt.Errorf(errs.FmtSessionNotFound, req.SessionID)
 	}
 
 	lines, done, errMsg := sess.poll(req.Offset)
@@ -327,7 +328,7 @@ func (s *CliService) CancelSession(sessionID string) error {
 func (s *CliService) ListSkills() ([]SkillItem, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return nil, fmt.Errorf("无法获取用户目录: %v", err)
+		return nil, fmt.Errorf(errs.FmtUserDirFail, err)
 	}
 	skillsDir := filepath.Join(home, ".claude", "skills")
 
@@ -336,7 +337,7 @@ func (s *CliService) ListSkills() ([]SkillItem, error) {
 		if os.IsNotExist(err) {
 			return []SkillItem{}, nil
 		}
-		return nil, fmt.Errorf("读取技能目录失败: %v", err)
+		return nil, fmt.Errorf(errs.FmtReadSkillDirFail, err)
 	}
 
 	var skills []SkillItem
@@ -450,7 +451,7 @@ func validatePermissionMode(mode string) error {
 	case "yolo", "bypassPermissions":
 		return nil
 	}
-	return fmt.Errorf("不支持的权限模式: %s", trimmed)
+	return fmt.Errorf(errs.FmtUnsupportedPermission, trimmed)
 }
 
 func buildClaudeArgs(req StartClaudeRequest) ([]string, error) {
@@ -629,11 +630,11 @@ type pgCodeProjectSummary struct {
 func (s *CliService) RunCodexReview(ctx context.Context, req CodexReviewRequest, onLine func(string)) (*CodexReviewResult, error) {
 	codexPath, err := s.lookupCLI("codex")
 	if err != nil {
-		return nil, fmt.Errorf("codex CLI 未找到，请先安装: npm install -g @openai/codex")
+		return nil, fmt.Errorf(errs.MsgCodexCliMissing)
 	}
 	localPath := strings.TrimSpace(req.LocalPath)
 	if localPath == "" {
-		return nil, fmt.Errorf("localPath 不能为空")
+		return nil, fmt.Errorf(errs.MsgLocalPathRequired)
 	}
 
 	reviewContext, ctxErr := s.collectPgCodeReviewContext(ctx, localPath)
@@ -649,20 +650,20 @@ func (s *CliService) RunCodexReview(ctx context.Context, req CodexReviewRequest,
 	// Write bundled schema to a temp file.
 	schemaFile, err := os.CreateTemp("", "pinru-review-schema-*.json")
 	if err != nil {
-		return nil, fmt.Errorf("创建 schema 临时文件失败: %w", err)
+		return nil, fmt.Errorf(errs.FmtSchemaTempFileFail, err)
 	}
 	schemaPath := schemaFile.Name()
 	defer os.Remove(schemaPath)
 	if _, err := schemaFile.Write(pgCodeReviewSchema); err != nil {
 		schemaFile.Close()
-		return nil, fmt.Errorf("写入 schema 失败: %w", err)
+		return nil, fmt.Errorf(errs.FmtWriteSchemaFail, err)
 	}
 	schemaFile.Close()
 
 	// Temp file for the last-message output.
 	outFile, err := os.CreateTemp("", "pinru-review-out-*.json")
 	if err != nil {
-		return nil, fmt.Errorf("创建输出临时文件失败: %w", err)
+		return nil, fmt.Errorf(errs.FmtOutputTempFileFail, err)
 	}
 	outPath := outFile.Name()
 	outFile.Close()
@@ -685,15 +686,15 @@ func (s *CliService) RunCodexReview(ctx context.Context, req CodexReviewRequest,
 
 	stdoutPipe, err := cmd.StdoutPipe()
 	if err != nil {
-		return nil, fmt.Errorf("创建 stdout 管道失败: %w", err)
+		return nil, fmt.Errorf(errs.FmtStdoutPipeWrap, err)
 	}
 	stderrPipe, err := cmd.StderrPipe()
 	if err != nil {
-		return nil, fmt.Errorf("创建 stderr 管道失败: %w", err)
+		return nil, fmt.Errorf(errs.FmtStderrPipeWrap, err)
 	}
 
 	if err := cmd.Start(); err != nil {
-		return nil, fmt.Errorf("启动 codex 失败: %w", err)
+		return nil, fmt.Errorf(errs.FmtCodexStartFail, err)
 	}
 
 	// Stream stdout and stderr, forwarding each line to the caller.
@@ -721,23 +722,24 @@ func (s *CliService) RunCodexReview(ctx context.Context, req CodexReviewRequest,
 			return nil, ctx.Err()
 		}
 		if summary := formatRecentCodexOutput(recentOutput); summary != "" {
-			return nil, fmt.Errorf("codex 执行失败: %w: %s", err, summary)
+			return nil, fmt.Errorf(errs.FmtCodexRunFailWithSummary, err, summary)
 		}
-		return nil, fmt.Errorf("codex 执行失败: %w", err)
+		return nil, fmt.Errorf(errs.FmtCodexRunFail, err)
 	}
 
 	// Parse the structured output file.
 	data, err := os.ReadFile(outPath)
 	if err != nil {
-		return nil, fmt.Errorf("读取 codex 输出失败: %w", err)
+		return nil, fmt.Errorf(errs.FmtCodexReadOutputFail, err)
 	}
 	if len(bytes.TrimSpace(data)) == 0 {
-		return nil, fmt.Errorf("codex 未生成结构化输出")
+		return nil, fmt.Errorf(errs.MsgCodexNoStructuredOutput)
 	}
 
 	var result CodexReviewResult
 	if err := json.Unmarshal(data, &result); err != nil {
-		return nil, fmt.Errorf("解析 codex 输出 JSON 失败: %w (raw: %s)", err, string(data))
+		slog.Error("codex 输出 JSON 解析失败", "err", err, "raw", string(data))
+		return nil, fmt.Errorf(errs.FmtCodexParseJSONFail, err)
 	}
 	applyCodexReviewEvidenceGuards(localPath, reviewContext, &result)
 	return &result, nil

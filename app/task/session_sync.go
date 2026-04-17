@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/blueship581/pinru/internal/errs"
 	"github.com/blueship581/pinru/internal/store"
 )
 
@@ -34,7 +35,7 @@ func (s *TaskService) SyncLatestTaskSessions(taskID string) (*SyncTaskSessionsRe
 		return nil, err
 	}
 	if task == nil {
-		return nil, fmt.Errorf("题卡 %q 不存在", taskID)
+		return nil, fmt.Errorf(errs.FmtCardNotFound, taskID)
 	}
 
 	modelRuns, err := s.store.ListModelRuns(taskID)
@@ -71,6 +72,9 @@ func (s *TaskService) SyncLatestTaskSessions(taskID string) (*SyncTaskSessionsRe
 		if len(nextSessions) == 0 {
 			return result, nil
 		}
+		if _, err := s.ensureTaskTypeChangeWithinUpperLimit(taskID, resolvedTaskTypeForSessionList(task.TaskType, nextSessions)); err != nil {
+			return nil, err
+		}
 		if err := s.store.UpdateTaskSessionList(taskID, nextSessions); err != nil {
 			return nil, err
 		}
@@ -89,6 +93,9 @@ func (s *TaskService) SyncLatestTaskSessions(taskID string) (*SyncTaskSessionsRe
 		nextSessions := buildTaskSessionsFromCandidate(*bestCandidate, run.SessionList, task.TaskType)
 		if len(nextSessions) == 0 {
 			continue
+		}
+		if _, err := s.ensureTaskTypeChangeWithinUpperLimit(taskID, resolvedTaskTypeForSessionList(task.TaskType, nextSessions)); err != nil {
+			return nil, err
 		}
 		if err := s.store.UpdateModelRunSessionList(taskID, run.ID, nextSessions); err != nil {
 			return nil, err

@@ -3,6 +3,8 @@ package store
 import (
 	"database/sql"
 	"fmt"
+
+	"github.com/blueship581/pinru/internal/errs"
 )
 
 type ModelRun struct {
@@ -76,7 +78,7 @@ func (s *Store) UpdateModelRun(taskID, modelName, status string, branchName, prU
 	res, err := s.DB.Exec(
 		"UPDATE model_runs SET status=?, branch_name=?, pr_url=?, started_at=?, finished_at=? WHERE task_id=? AND model_name=?",
 		status, branchName, prURL, startedAt, finishedAt, taskID, modelName)
-	return ensureRowsAffected(res, err, "model run %q/%q not found", taskID, modelName)
+	return ensureRowsAffected(res, err, errs.FmtStoreModelRunNotFoundByPair, taskID, modelName)
 }
 
 func (s *Store) GetModelRunByID(id string) (*ModelRun, error) {
@@ -151,24 +153,24 @@ func (s *Store) UpdateModelRunReview(modelRunID, status string, round int, notes
 		return err
 	}
 	if n == 0 {
-		return fmt.Errorf("model run %q not found", modelRunID)
+		return fmt.Errorf(errs.FmtStoreModelRunNotFoundByID, modelRunID)
 	}
 	return nil
 }
 
 func (s *Store) DeleteModelRun(taskID, modelName string) error {
 	res, err := s.DB.Exec("DELETE FROM model_runs WHERE task_id=? AND model_name=?", taskID, modelName)
-	return ensureRowsAffected(res, err, "model run %q/%q not found", taskID, modelName)
+	return ensureRowsAffected(res, err, errs.FmtStoreModelRunNotFoundByPair, taskID, modelName)
 }
 
 func (s *Store) SetModelRunOriginURL(taskID, modelName, url string) error {
 	res, err := s.DB.Exec("UPDATE model_runs SET origin_url=? WHERE task_id=? AND model_name=?", url, taskID, modelName)
-	return ensureRowsAffected(res, err, "model run %q/%q not found", taskID, modelName)
+	return ensureRowsAffected(res, err, errs.FmtStoreModelRunNotFoundByPair, taskID, modelName)
 }
 
 func (s *Store) SetModelRunError(taskID, modelName, errMsg string) error {
 	res, err := s.DB.Exec("UPDATE model_runs SET submit_error=? WHERE task_id=? AND model_name=?", errMsg, taskID, modelName)
-	return ensureRowsAffected(res, err, "model run %q/%q not found", taskID, modelName)
+	return ensureRowsAffected(res, err, errs.FmtStoreModelRunNotFoundByPair, taskID, modelName)
 }
 
 func (s *Store) UpdateModelRunLocalPath(taskID, modelName string, localPath *string) error {
@@ -181,7 +183,7 @@ func (s *Store) UpdateModelRunLocalPath(taskID, modelName string, localPath *str
 		return err
 	}
 	if n == 0 {
-		return fmt.Errorf("model run %q/%q not found", taskID, modelName)
+		return fmt.Errorf(errs.FmtStoreModelRunNotFoundByPair, taskID, modelName)
 	}
 	return nil
 }
@@ -198,7 +200,7 @@ func (s *Store) UpdateModelRunSession(id string, sessionID *string, rounds int, 
 		return err
 	}
 	if n == 0 {
-		return fmt.Errorf("model run %q not found", id)
+		return fmt.Errorf(errs.FmtStoreModelRunNotFoundByID, id)
 	}
 	return nil
 }

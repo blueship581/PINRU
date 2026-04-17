@@ -170,6 +170,33 @@ describe('TaskCardContextMenu', () => {
     expect(onTaskTypeChange).toHaveBeenCalledWith('Feature迭代');
   });
 
+  it('shows action errors near the menu header', () => {
+    render(
+      <TaskCardContextMenu
+        menuRef={createRef<HTMLDivElement>()}
+        task={createTask()}
+        position={{ x: 32, y: 32 }}
+        statusOptions={['Claimed', 'Downloading', 'Downloaded', 'PromptReady', 'Submitted', 'Error']}
+        availableTaskTypes={['Bug修复', 'Feature迭代']}
+        statusChanging={false}
+        taskTypeChanging={false}
+        localFolderOpening={false}
+        childDirectories={[]}
+        childDirectoriesLoading={false}
+        quickActionLoadingPath={null}
+        actionError="不能切换到目标任务类型"
+        onOpenLocalFolder={() => {}}
+        onStatusChange={() => {}}
+        onTaskTypeChange={() => {}}
+        onGeneratePrompt={() => {}}
+        onQuickAiReview={() => {}}
+      />,
+    );
+
+    expect(screen.getByText('操作未完成')).toBeInTheDocument();
+    expect(screen.getByText('不能切换到目标任务类型')).toBeInTheDocument();
+  });
+
   it('triggers quick AI review from the quick execute panel', () => {
     const onQuickAiReview = vi.fn();
 

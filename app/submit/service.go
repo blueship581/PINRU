@@ -1,12 +1,14 @@
 package submit
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/blueship581/pinru/internal/errs"
 	"github.com/blueship581/pinru/internal/github"
 	"github.com/blueship581/pinru/internal/gitops"
 	"github.com/blueship581/pinru/internal/store"
@@ -89,15 +91,15 @@ func (s *SubmitService) PublishSourceRepo(req PublishSourceRepoRequest) (*Publis
 
 	task, err := s.store.GetTask(req.TaskID)
 	if err != nil || task == nil {
-		return nil, fmt.Errorf("未找到任务: %s", req.TaskID)
+		return nil, fmt.Errorf(errs.FmtTaskNotFound, req.TaskID)
 	}
 
 	sourceRun, err := s.store.GetModelRun(req.TaskID, req.ModelName)
 	if err != nil || sourceRun == nil {
-		return nil, fmt.Errorf("未找到模型记录: %s / %s", req.TaskID, req.ModelName)
+		return nil, fmt.Errorf(errs.FmtModelRunNotFound, req.TaskID, req.ModelName)
 	}
 	if sourceRun.LocalPath == nil {
-		return nil, fmt.Errorf("源码文件夹缺少本地仓库路径，无法上传源码")
+		return nil, errors.New(errs.MsgSourceMissingLocalRepo)
 	}
 	sourcePath := util.ExpandTilde(*sourceRun.LocalPath)
 
@@ -108,7 +110,7 @@ func (s *SubmitService) PublishSourceRepo(req PublishSourceRepoRequest) (*Publis
 
 	ghUser, err := github.GetAuthenticatedUser(authToken)
 	if err != nil {
-		return nil, fmt.Errorf("GitHub 认证失败: %w", err)
+		return nil, fmt.Errorf(errs.FmtGitHubAuthWrap, err)
 	}
 	authorEmail := fmt.Sprintf("%s@users.noreply.github.com", ghUser.Login)
 	if ghUser.Email != nil {
@@ -117,34 +119,34 @@ func (s *SubmitService) PublishSourceRepo(req PublishSourceRepoRequest) (*Publis
 
 	repo, err := github.EnsureRepository(strings.TrimSpace(req.TargetRepo), authToken, &task.ProjectName)
 	if err != nil {
-		return nil, fmt.Errorf("确保 GitHub 仓库可用失败: %w", err)
+		return nil, fmt.Errorf(errs.FmtEnsureGitHubRepoFail, err)
 	}
 
 	workspacePath := gitops.WorkspacePath(strings.TrimSpace(req.TargetRepo))
 	remoteURL := fmt.Sprintf("https://github.com/%s.git", strings.TrimSpace(req.TargetRepo))
 
 	if err := gitops.RecreateWorkspace(workspacePath, remoteURL, ghUser.Login, authorEmail); err != nil {
-		return nil, fmt.Errorf("Git 操作失败: %w", err)
+		return nil, fmt.Errorf("%s：%w", errs.MsgGitOpFailed, err)
 	}
 	if err := gitops.CopyProjectContents(sourcePath, workspacePath); err != nil {
-		return nil, fmt.Errorf("Git 操作失败: %w", err)
+		return nil, fmt.Errorf("%s：%w", errs.MsgGitOpFailed, err)
 	}
 	committed, err := gitops.CommitAll(workspacePath, mainBranch, ghUser.Login, authorEmail, "init: 原始项目初始化")
 	if err != nil {
-		return nil, fmt.Errorf("Git 操作失败: %w", err)
+		return nil, fmt.Errorf("%s：%w", errs.MsgGitOpFailed, err)
 	}
 	if !committed {
-		return nil, fmt.Errorf("源码目录没有可提交的文件")
+		return nil, errors.New(errs.MsgSourceDirNoCommit)
 	}
 	if err := gitops.EnsureBranch(workspacePath, mainBranch); err != nil {
-		return nil, fmt.Errorf("Git 操作失败: %w", err)
+		return nil, fmt.Errorf("%s：%w", errs.MsgGitOpFailed, err)
 	}
 	if err := gitops.PushBranch(workspacePath, mainBranch, authUsername, authToken); err != nil {
-		return nil, fmt.Errorf("Git 推送失败: %w", err)
+		return nil, fmt.Errorf("%s：%w", errs.MsgGitPushFailed, err)
 	}
 
 	if err := github.SetDefaultBranch(strings.TrimSpace(req.TargetRepo), mainBranch, authToken); err != nil {
-		return nil, fmt.Errorf("设置默认分支失败: %w", err)
+		return nil, fmt.Errorf("%s：%w", errs.MsgDefaultBranchFail, err)
 	}
 
 	return &PublishSourceRepoResult{
@@ -160,21 +162,21 @@ func (s *SubmitService) SubmitModelRun(req SubmitModelRunRequest) (*SubmitModelR
 
 	_, err := s.store.GetTask(req.TaskID)
 	if err != nil {
-		return nil, fmt.Errorf("未找到任务: %s", req.TaskID)
+		return nil, fmt.Errorf(errs.FmtTaskNotFound, req.TaskID)
 	}
 
 	modelRun, err := s.store.GetModelRun(req.TaskID, req.ModelName)
 	if err != nil || modelRun == nil {
-		return nil, fmt.Errorf("未找到模型记录: %s / %s", req.TaskID, req.ModelName)
+		return nil, fmt.Errorf(errs.FmtModelRunNotFound, req.TaskID, req.ModelName)
 	}
 	if modelRun.LocalPath == nil {
-		return nil, fmt.Errorf("模型副本缺少本地目录，无法创建 PR")
+		return nil, errors.New(errs.MsgModelMissingLocalDir)
 	}
 	modelPath := util.ExpandTilde(*modelRun.LocalPath)
 
 	workspacePath := gitops.WorkspacePath(strings.TrimSpace(req.TargetRepo))
 	if _, err := os.Stat(workspacePath); os.IsNotExist(err) {
-		return nil, fmt.Errorf("源码尚未上传，请先执行源码上传步骤后再创建模型 PR")
+		return nil, errors.New(errs.MsgSourceNotUploaded)
 	}
 
 	authUsername, authToken, err := s.resolveGitHubCredentials(req.GitHubAccountID, req.GitHubUsername, req.GitHubToken)
@@ -184,7 +186,7 @@ func (s *SubmitService) SubmitModelRun(req SubmitModelRunRequest) (*SubmitModelR
 
 	ghUser, err := github.GetAuthenticatedUser(authToken)
 	if err != nil {
-		return nil, fmt.Errorf("GitHub 认证失败: %w", err)
+		return nil, fmt.Errorf(errs.FmtGitHubAuthWrap, err)
 	}
 	authorEmail := fmt.Sprintf("%s@users.noreply.github.com", ghUser.Login)
 	if ghUser.Email != nil {
@@ -194,26 +196,26 @@ func (s *SubmitService) SubmitModelRun(req SubmitModelRunRequest) (*SubmitModelR
 	branchName := strings.TrimSpace(req.ModelName)
 	now := time.Now().Unix()
 	if err := s.store.UpdateModelRun(req.TaskID, req.ModelName, "running", &branchName, nil, &now, nil); err != nil {
-		return nil, fmt.Errorf("模型状态写回失败: %w", err)
+		return nil, fmt.Errorf(errs.FmtModelStateBackFail, err)
 	}
 
 	if err := gitops.CreateOrResetBranch(workspacePath, branchName, mainBranch); err != nil {
-		return nil, s.failModelRun(req.TaskID, req.ModelName, &branchName, now, fmt.Errorf("Git 操作失败: %w", err))
+		return nil, s.failModelRun(req.TaskID, req.ModelName, &branchName, now, fmt.Errorf("%s：%w", errs.MsgGitOpFailed, err))
 	}
 	if err := gitops.CopyProjectContents(modelPath, workspacePath); err != nil {
-		return nil, s.failModelRun(req.TaskID, req.ModelName, &branchName, now, fmt.Errorf("Git 操作失败: %w", err))
+		return nil, s.failModelRun(req.TaskID, req.ModelName, &branchName, now, fmt.Errorf("%s：%w", errs.MsgGitOpFailed, err))
 	}
 	commitMsg := fmt.Sprintf("feat: %s 模型实现", branchName)
 	committed, err := gitops.CommitAll(workspacePath, branchName, ghUser.Login, authorEmail, commitMsg)
 	if err != nil {
-		return nil, s.failModelRun(req.TaskID, req.ModelName, &branchName, now, fmt.Errorf("Git 操作失败: %w", err))
+		return nil, s.failModelRun(req.TaskID, req.ModelName, &branchName, now, fmt.Errorf("%s：%w", errs.MsgGitOpFailed, err))
 	}
 	if !committed {
-		return nil, s.failModelRun(req.TaskID, req.ModelName, &branchName, now, fmt.Errorf("模型 %s 与源码 main 无差异，无法创建 PR", branchName))
+		return nil, s.failModelRun(req.TaskID, req.ModelName, &branchName, now, fmt.Errorf(errs.FmtModelNoDiff, branchName))
 	}
 
 	if err := gitops.PushBranch(workspacePath, branchName, authUsername, authToken); err != nil {
-		return nil, s.failModelRun(req.TaskID, req.ModelName, &branchName, now, fmt.Errorf("Git 推送失败: %w", err))
+		return nil, s.failModelRun(req.TaskID, req.ModelName, &branchName, now, fmt.Errorf("%s：%w", errs.MsgGitPushFailed, err))
 	}
 
 	repoOwner := strings.SplitN(strings.TrimSpace(req.TargetRepo), "/", 2)[0]
@@ -221,12 +223,12 @@ func (s *SubmitService) SubmitModelRun(req SubmitModelRunRequest) (*SubmitModelR
 		strings.TrimSpace(req.TargetRepo), repoOwner, branchName, branchName, branchName,
 		authToken)
 	if err != nil {
-		return nil, s.failModelRun(req.TaskID, req.ModelName, &branchName, now, fmt.Errorf("GitHub PR 创建失败: %w", err))
+		return nil, s.failModelRun(req.TaskID, req.ModelName, &branchName, now, fmt.Errorf(errs.FmtGitHubPRCreateWrap, err))
 	}
 
 	finishedAt := time.Now().Unix()
 	if err := s.persistModelRunState(req.TaskID, req.ModelName, "done", &branchName, &prURL, &now, &finishedAt, stringPtr(""), nil); err != nil {
-		return nil, fmt.Errorf("PR 已创建，但模型状态写回失败: %w", err)
+		return nil, fmt.Errorf(errs.FmtPRCreatedButStateFail, err)
 	}
 
 	return &SubmitModelRunResult{BranchName: branchName, PrURL: prURL}, nil
@@ -240,7 +242,7 @@ func (s *SubmitService) markErrorMsg(taskID, modelName string, branchName *strin
 func (s *SubmitService) failModelRun(taskID, modelName string, branchName *string, startedAt int64, cause error) error {
 	errMsg := cause.Error()
 	if markErr := s.markErrorMsg(taskID, modelName, branchName, errMsg, startedAt); markErr != nil {
-		return fmt.Errorf("%w；模型状态写回失败: %v", cause, markErr)
+		return fmt.Errorf(errs.FmtModelStateBackInline, cause, markErr)
 	}
 	return cause
 }
@@ -250,12 +252,12 @@ func (s *SubmitService) SubmitAll(req SubmitAllRequest) (*SubmitAllResult, error
 		return nil, err
 	}
 	if strings.TrimSpace(req.TaskID) == "" {
-		return nil, fmt.Errorf("任务不能为空")
+		return nil, errors.New(errs.MsgTaskRequired)
 	}
 
 	task, err := s.store.GetTask(req.TaskID)
 	if err != nil || task == nil {
-		return nil, fmt.Errorf("未找到任务: %s", req.TaskID)
+		return nil, fmt.Errorf(errs.FmtTaskNotFound, req.TaskID)
 	}
 
 	sourceModelName := strings.TrimSpace(req.SourceModelName)
@@ -265,10 +267,10 @@ func (s *SubmitService) SubmitAll(req SubmitAllRequest) (*SubmitAllResult, error
 
 	sourceRun, err := s.store.GetModelRun(req.TaskID, sourceModelName)
 	if err != nil || sourceRun == nil {
-		return nil, fmt.Errorf("未找到源码记录 %s，请先在领题页下载项目", sourceModelName)
+		return nil, fmt.Errorf(errs.FmtSourceModelMissing, sourceModelName)
 	}
 	if sourceRun.LocalPath == nil {
-		return nil, fmt.Errorf("源码记录 %s 缺少本地路径，无法推送源码", sourceModelName)
+		return nil, fmt.Errorf(errs.FmtSourceModelNoPath, sourceModelName)
 	}
 
 	authUsername, token, err := s.resolveGitHubCredentials(req.GitHubAccountID, req.GitHubUsername, req.GitHubToken)
@@ -280,7 +282,7 @@ func (s *SubmitService) SubmitAll(req SubmitAllRequest) (*SubmitAllResult, error
 
 	ghUser, err := github.GetAuthenticatedUser(token)
 	if err != nil {
-		return nil, fmt.Errorf("GitHub 认证失败: %w", err)
+		return nil, fmt.Errorf(errs.FmtGitHubAuthWrap, err)
 	}
 	authorEmail := fmt.Sprintf("%s@users.noreply.github.com", ghUser.Login)
 	if ghUser.Email != nil {
@@ -292,7 +294,7 @@ func (s *SubmitService) SubmitAll(req SubmitAllRequest) (*SubmitAllResult, error
 
 	// ── Step 1: push configured source folder to main ──
 	if err := s.persistModelRunState(req.TaskID, sourceModelName, "running", nil, nil, &now, nil, stringPtr(""), nil); err != nil {
-		return nil, fmt.Errorf("源码记录状态写回失败: %w", err)
+		return nil, fmt.Errorf(errs.FmtSourceStateBackFail, err)
 	}
 
 	sourcePath := util.ExpandTilde(*sourceRun.LocalPath)
@@ -302,23 +304,23 @@ func (s *SubmitService) SubmitAll(req SubmitAllRequest) (*SubmitAllResult, error
 		remoteURL := fmt.Sprintf("https://github.com/%s.git", targetRepo)
 
 		if err := gitops.RecreateWorkspace(workspacePath, remoteURL, ghUser.Login, authorEmail); err != nil {
-			repoErr = fmt.Errorf("Git 操作失败: %w", err)
+			repoErr = fmt.Errorf("%s：%w", errs.MsgGitOpFailed, err)
 		} else if err := gitops.CopyProjectContents(sourcePath, workspacePath); err != nil {
-			repoErr = fmt.Errorf("Git 操作失败: %w", err)
+			repoErr = fmt.Errorf("%s：%w", errs.MsgGitOpFailed, err)
 		} else {
 			committed, err := gitops.CommitAll(workspacePath, mainBranch, ghUser.Login, authorEmail, "init: 原始项目初始化")
 			if err != nil {
-				repoErr = fmt.Errorf("Git 操作失败: %w", err)
+				repoErr = fmt.Errorf("%s：%w", errs.MsgGitOpFailed, err)
 			} else if !committed {
-				repoErr = fmt.Errorf("源码目录没有可提交的文件")
+				repoErr = errors.New(errs.MsgSourceDirNoCommit)
 			} else if err := gitops.EnsureBranch(workspacePath, mainBranch); err != nil {
-				repoErr = fmt.Errorf("Git 操作失败: %w", err)
+				repoErr = fmt.Errorf("%s：%w", errs.MsgGitOpFailed, err)
 			} else if err := gitops.PushBranch(workspacePath, mainBranch, authUsername, token); err != nil {
-				repoErr = fmt.Errorf("Git 推送失败: %w", err)
+				repoErr = fmt.Errorf("%s：%w", errs.MsgGitPushFailed, err)
 			}
 			if repoErr == nil {
 				if err := github.SetDefaultBranch(targetRepo, mainBranch, token); err != nil {
-					repoErr = fmt.Errorf("设置默认分支失败: %w", err)
+					repoErr = fmt.Errorf("%s：%w", errs.MsgDefaultBranchFail, err)
 				}
 			}
 		}
@@ -335,7 +337,7 @@ func (s *SubmitService) SubmitAll(req SubmitAllRequest) (*SubmitAllResult, error
 	finishedAt := time.Now().Unix()
 	repoURL := repo.HTMLURL
 	if err := s.persistModelRunState(req.TaskID, sourceModelName, "done", nil, nil, &now, &finishedAt, stringPtr(""), &repoURL); err != nil {
-		return nil, fmt.Errorf("源码记录状态写回失败: %w", err)
+		return nil, fmt.Errorf(errs.FmtSourceStateBackFail, err)
 	}
 	result.RepoURL = repoURL
 
@@ -358,7 +360,7 @@ func (s *SubmitService) SubmitAll(req SubmitAllRequest) (*SubmitAllResult, error
 		// Ensure model_run exists
 		run, err := s.store.GetModelRun(req.TaskID, modelName)
 		if err != nil {
-			return nil, fmt.Errorf("读取模型记录失败 %s: %w", modelName, err)
+			return nil, fmt.Errorf(errs.FmtReadModelRunFail, modelName, err)
 		}
 		if run == nil {
 			// Derive path from ORIGIN sibling
@@ -408,22 +410,22 @@ func (s *SubmitService) SubmitAll(req SubmitAllRequest) (*SubmitAllResult, error
 
 		var mErr error
 		if err := gitops.CreateOrResetBranch(workspacePath, branchName, mainBranch); err != nil {
-			mErr = fmt.Errorf("Git 操作失败: %w", err)
+			mErr = fmt.Errorf("%s：%w", errs.MsgGitOpFailed, err)
 		} else if err := gitops.CopyProjectContents(modelPath, workspacePath); err != nil {
-			mErr = fmt.Errorf("Git 操作失败: %w", err)
+			mErr = fmt.Errorf("%s：%w", errs.MsgGitOpFailed, err)
 		} else {
 			commitMsg := fmt.Sprintf("feat: %s 模型实现", branchName)
 			committed, err := gitops.CommitAll(workspacePath, branchName, ghUser.Login, authorEmail, commitMsg)
 			if err != nil {
-				mErr = fmt.Errorf("Git 操作失败: %w", err)
+				mErr = fmt.Errorf("%s：%w", errs.MsgGitOpFailed, err)
 			} else if !committed {
-				mErr = fmt.Errorf("与 main 无差异，无法创建 PR")
+				mErr = errors.New(errs.MsgNoDiffToMain)
 			} else if err := gitops.PushBranch(workspacePath, branchName, authUsername, token); err != nil {
-				mErr = fmt.Errorf("Git 推送失败: %w", err)
+				mErr = fmt.Errorf("%s：%w", errs.MsgGitPushFailed, err)
 			} else {
 				prURL, err := github.EnsurePullRequest(targetRepo, repoOwner, branchName, branchName, branchName, token)
 				if err != nil {
-					mErr = fmt.Errorf("PR 创建失败: %w", err)
+					mErr = fmt.Errorf(errs.FmtPRCreateFail, err)
 				} else {
 					mResult.PrURL = prURL
 				}
@@ -449,11 +451,11 @@ func (s *SubmitService) SubmitAll(req SubmitAllRequest) (*SubmitAllResult, error
 
 	if allOK {
 		if err := s.store.UpdateTaskStatus(req.TaskID, "Submitted"); err != nil {
-			return nil, fmt.Errorf("任务状态写回失败: %w", err)
+			return nil, fmt.Errorf(errs.FmtTaskStateBackFail, err)
 		}
 	} else {
 		if err := s.store.UpdateTaskStatus(req.TaskID, "Error"); err != nil {
-			return nil, fmt.Errorf("任务状态写回失败: %w", err)
+			return nil, fmt.Errorf(errs.FmtTaskStateBackFail, err)
 		}
 	}
 	return result, nil
@@ -484,10 +486,10 @@ func (s *SubmitService) persistModelRunState(
 
 func (s *SubmitService) failTaskAndModelRun(taskID, taskStatus, modelName string, branchName *string, startedAt int64, cause error) error {
 	if err := s.markErrorMsg(taskID, modelName, branchName, cause.Error(), startedAt); err != nil {
-		return fmt.Errorf("%w；模型状态写回失败: %v", cause, err)
+		return fmt.Errorf(errs.FmtModelStateBackInline, cause, err)
 	}
 	if err := s.store.UpdateTaskStatus(taskID, taskStatus); err != nil {
-		return fmt.Errorf("%w；任务状态写回失败: %v", cause, err)
+		return fmt.Errorf(errs.FmtTaskStateBackInline, cause, err)
 	}
 	return nil
 }
@@ -498,37 +500,37 @@ func stringPtr(value string) *string {
 
 func validatePublishRequest(req PublishSourceRepoRequest) error {
 	if strings.TrimSpace(req.TaskID) == "" {
-		return fmt.Errorf("任务不能为空")
+		return errors.New(errs.MsgTaskRequired)
 	}
 	if strings.TrimSpace(req.ModelName) == "" {
-		return fmt.Errorf("源码文件夹不能为空")
+		return errors.New(errs.MsgSourceDirRequired)
 	}
 	return validateRepoAndAccount(req.TargetRepo, req.GitHubUsername, req.GitHubToken, req.GitHubAccountID)
 }
 
 func validateSubmitRequest(req SubmitModelRunRequest) error {
 	if strings.TrimSpace(req.TaskID) == "" {
-		return fmt.Errorf("任务不能为空")
+		return errors.New(errs.MsgTaskRequired)
 	}
 	if strings.TrimSpace(req.ModelName) == "" {
-		return fmt.Errorf("模型名称不能为空")
+		return errors.New(errs.MsgModelNameRequired)
 	}
 	return validateRepoAndAccount(req.TargetRepo, req.GitHubUsername, req.GitHubToken, req.GitHubAccountID)
 }
 
 func validateRepoAndAccount(targetRepo, username, token, accountID string) error {
 	if strings.TrimSpace(targetRepo) == "" {
-		return fmt.Errorf("源码仓库不能为空")
+		return errors.New(errs.MsgSourceRepoRequired)
 	}
 	parts := strings.SplitN(strings.TrimSpace(targetRepo), "/", 3)
 	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
-		return fmt.Errorf("源码仓库格式应为 owner/repo")
+		return errors.New(errs.MsgSourceRepoFormat)
 	}
 	if strings.TrimSpace(accountID) != "" {
 		return nil
 	}
 	if strings.TrimSpace(username) == "" || strings.TrimSpace(token) == "" {
-		return fmt.Errorf("GitHub 账号信息不完整")
+		return errors.New(errs.MsgGitHubAccountInfoIncomplete)
 	}
 	return nil
 }
@@ -544,7 +546,7 @@ func (s *SubmitService) resolveGitHubCredentials(accountID, username, token stri
 			return "", "", err
 		}
 		if account == nil {
-			return "", "", fmt.Errorf("未找到 GitHub 账号: %s", accountID)
+			return "", "", fmt.Errorf(errs.FmtGitHubAccountNotFound, accountID)
 		}
 		if username == "" {
 			username = strings.TrimSpace(account.Username)
@@ -555,7 +557,7 @@ func (s *SubmitService) resolveGitHubCredentials(accountID, username, token stri
 	}
 
 	if username == "" || token == "" {
-		return "", "", fmt.Errorf("GitHub 账号信息不完整")
+		return "", "", errors.New(errs.MsgGitHubAccountInfoIncomplete)
 	}
 
 	return username, token, nil

@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/blueship581/pinru/internal/errs"
 )
 
 const defaultTaskType = "未归类"
@@ -25,6 +27,8 @@ type Task struct {
 	PromptGenerationFinishedAt *int64        `json:"promptGenerationFinishedAt"`
 	Notes                      *string       `json:"notes"`
 	ProjectConfigID            *string       `json:"projectConfigId"`
+	ProjectType                string        `json:"projectType"`
+	ChangeScope                string        `json:"changeScope"`
 	CreatedAt                  int64         `json:"createdAt"`
 	UpdatedAt                  int64         `json:"updatedAt"`
 }
@@ -121,7 +125,7 @@ func normalizeTaskSessionList(taskType string, sessions []TaskSession) ([]TaskSe
 			if index == 0 {
 				nextTaskType = normalizedTaskType
 			} else {
-				return nil, fmt.Errorf("第 %d 个 session 的任务类型不能为空", index+1)
+				return nil, fmt.Errorf(errs.FmtSessionTypeRequired, index+1)
 			}
 		}
 
@@ -152,7 +156,7 @@ func parseTaskSessionListWithMode(rawSessionList, taskType string, emptyAsDefaul
 
 	var sessions []TaskSession
 	if err := json.Unmarshal([]byte(trimmed), &sessions); err != nil {
-		return nil, fmt.Errorf("invalid session_list JSON: %w", err)
+		return nil, fmt.Errorf(errs.FmtStoreInvalidSessionListJSON, err)
 	}
 
 	return normalizeTaskSessionList(taskType, sessions)
@@ -183,10 +187,10 @@ func marshalTaskSessionList(taskType string, sessions []TaskSession) (string, []
 func validateTaskSessionReviewFields(sessions []TaskSession) error {
 	for index, session := range sessions {
 		if session.IsCompleted == nil {
-			return fmt.Errorf("第 %d 个 session 的是否完成不能为空", index+1)
+			return fmt.Errorf(errs.FmtSessionDoneRequired, index+1)
 		}
 		if session.IsSatisfied == nil {
-			return fmt.Errorf("第 %d 个 session 的是否满意不能为空", index+1)
+			return fmt.Errorf(errs.FmtSessionLikedReq, index+1)
 		}
 	}
 
@@ -229,7 +233,7 @@ func applyTaskSessionQuotaDelta(quotas map[string]int, previousSessions, nextSes
 
 		if delta > 0 {
 			if enforceLimit && currentQuota < delta {
-				return fmt.Errorf("任务类型 %q 的配额已用尽", taskType)
+				return fmt.Errorf(errs.FmtTaskTypeQuotaUsedUp, taskType)
 			}
 			quotas[taskType] = currentQuota - delta
 			continue
@@ -245,7 +249,7 @@ func (s *Store) ListTasks(projectConfigID *string) ([]Task, error) {
 	selectSQL := fmt.Sprintf(
 		`SELECT id, gitlab_project_id, project_name, status, task_type, session_list, local_path, prompt_text,
 		        prompt_generation_status, prompt_generation_error, %s, %s,
-		        notes, project_config_id, %s, %s FROM tasks`,
+		        notes, project_config_id, project_type, change_scope, %s, %s FROM tasks`,
 		nullableUnixTimestampExpr("prompt_generation_started_at"),
 		nullableUnixTimestampExpr("prompt_generation_finished_at"),
 		unixTimestampExpr("created_at"),
@@ -273,7 +277,7 @@ func (s *Store) ListTasks(projectConfigID *string) ([]Task, error) {
 		if err := rows.Scan(
 			&t.ID, &t.GitLabProjectID, &t.ProjectName, &t.Status, &t.TaskType, &rawSessionList, &t.LocalPath, &t.PromptText,
 			&t.PromptGenerationStatus, &t.PromptGenerationError, &t.PromptGenerationStartedAt, &t.PromptGenerationFinishedAt,
-			&t.Notes, &t.ProjectConfigID, &t.CreatedAt, &t.UpdatedAt,
+			&t.Notes, &t.ProjectConfigID, &t.ProjectType, &t.ChangeScope, &t.CreatedAt, &t.UpdatedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -291,7 +295,7 @@ func (s *Store) GetTask(id string) (*Task, error) {
 	query := fmt.Sprintf(
 		`SELECT id, gitlab_project_id, project_name, status, task_type, session_list, local_path, prompt_text,
 		        prompt_generation_status, prompt_generation_error, %s, %s,
-		        notes, project_config_id, %s, %s FROM tasks WHERE id = ?`,
+		        notes, project_config_id, project_type, change_scope, %s, %s FROM tasks WHERE id = ?`,
 		nullableUnixTimestampExpr("prompt_generation_started_at"),
 		nullableUnixTimestampExpr("prompt_generation_finished_at"),
 		unixTimestampExpr("created_at"),
@@ -302,7 +306,7 @@ func (s *Store) GetTask(id string) (*Task, error) {
 		Scan(
 			&t.ID, &t.GitLabProjectID, &t.ProjectName, &t.Status, &t.TaskType, &rawSessionList, &t.LocalPath, &t.PromptText,
 			&t.PromptGenerationStatus, &t.PromptGenerationError, &t.PromptGenerationStartedAt, &t.PromptGenerationFinishedAt,
-			&t.Notes, &t.ProjectConfigID, &t.CreatedAt, &t.UpdatedAt,
+			&t.Notes, &t.ProjectConfigID, &t.ProjectType, &t.ChangeScope, &t.CreatedAt, &t.UpdatedAt,
 		)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -320,14 +324,14 @@ func (s *Store) GetTask(id string) (*Task, error) {
 func (s *Store) FindTaskByProjectConfigAndGitLabProjectID(projectConfigID string, gitLabProjectID int64) (*Task, error) {
 	projectConfigID = strings.TrimSpace(projectConfigID)
 	if projectConfigID == "" {
-		return nil, fmt.Errorf("projectConfigID 不能为空")
+		return nil, fmt.Errorf(errs.MsgProjectConfigIDReq)
 	}
 
 	var t Task
 	query := fmt.Sprintf(
 		`SELECT id, gitlab_project_id, project_name, status, task_type, session_list, local_path, prompt_text,
 		        prompt_generation_status, prompt_generation_error, %s, %s,
-		        notes, project_config_id, %s, %s
+		        notes, project_config_id, project_type, change_scope, %s, %s
 		   FROM tasks
 		  WHERE project_config_id = ? AND gitlab_project_id = ?
 		  ORDER BY created_at DESC
@@ -343,7 +347,7 @@ func (s *Store) FindTaskByProjectConfigAndGitLabProjectID(projectConfigID string
 		Scan(
 			&t.ID, &t.GitLabProjectID, &t.ProjectName, &t.Status, &t.TaskType, &rawSessionList, &t.LocalPath, &t.PromptText,
 			&t.PromptGenerationStatus, &t.PromptGenerationError, &t.PromptGenerationStartedAt, &t.PromptGenerationFinishedAt,
-			&t.Notes, &t.ProjectConfigID, &t.CreatedAt, &t.UpdatedAt,
+			&t.Notes, &t.ProjectConfigID, &t.ProjectType, &t.ChangeScope, &t.CreatedAt, &t.UpdatedAt,
 		)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -426,7 +430,7 @@ func (s *Store) UpdateTaskStatus(id, status string) error {
 	}
 	n, _ := res.RowsAffected()
 	if n == 0 {
-		return fmt.Errorf("task not found: %s", id)
+		return fmt.Errorf(errs.FmtStoreTaskNotFound, id)
 	}
 	return nil
 }
@@ -434,7 +438,7 @@ func (s *Store) UpdateTaskStatus(id, status string) error {
 func (s *Store) UpdateTaskType(id, nextTaskType string) error {
 	nextTaskType = strings.TrimSpace(nextTaskType)
 	if nextTaskType == "" {
-		return fmt.Errorf("task type 不能为空")
+		return fmt.Errorf(errs.MsgStoreTaskTypeRequired)
 	}
 
 	tx, err := s.DB.Begin()
@@ -456,7 +460,7 @@ func (s *Store) UpdateTaskType(id, nextTaskType string) error {
 	if err = tx.QueryRow("SELECT task_type, project_config_id, session_list FROM tasks WHERE id = ?", id).
 		Scan(&currentTaskType, &projectConfigID, &rawSessionList); err != nil {
 		if err == sql.ErrNoRows {
-			return fmt.Errorf("task not found: %s", id)
+			return fmt.Errorf(errs.FmtStoreTaskNotFound, id)
 		}
 		return err
 	}
@@ -531,7 +535,7 @@ func (s *Store) UpdateTaskType(id, nextTaskType string) error {
 		return err
 	}
 	if rowsAffected == 0 {
-		err = fmt.Errorf("task not found: %s", id)
+		err = fmt.Errorf(errs.FmtStoreTaskNotFound, id)
 		return err
 	}
 
@@ -539,6 +543,22 @@ func (s *Store) UpdateTaskType(id, nextTaskType string) error {
 		return err
 	}
 	committed = true
+	return nil
+}
+
+func (s *Store) UpdateTaskReportFields(id, projectType, changeScope string) error {
+	now := time.Now().Unix()
+	res, err := s.DB.Exec(
+		"UPDATE tasks SET project_type=?, change_scope=?, updated_at=? WHERE id=?",
+		strings.TrimSpace(projectType), strings.TrimSpace(changeScope), now, id,
+	)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf(errs.FmtStoreTaskNotFound, id)
+	}
 	return nil
 }
 
@@ -562,7 +582,7 @@ func (s *Store) UpdateTaskSessionList(id string, sessionList []TaskSession) erro
 	if err = tx.QueryRow("SELECT task_type, project_config_id, session_list FROM tasks WHERE id = ?", id).
 		Scan(&currentTaskType, &projectConfigID, &rawSessionList); err != nil {
 		if err == sql.ErrNoRows {
-			return fmt.Errorf("task not found: %s", id)
+			return fmt.Errorf(errs.FmtStoreTaskNotFound, id)
 		}
 		return err
 	}
@@ -626,7 +646,7 @@ func (s *Store) UpdateTaskSessionList(id string, sessionList []TaskSession) erro
 		return rowsErr
 	}
 	if rowsAffected == 0 {
-		return fmt.Errorf("task not found: %s", id)
+		return fmt.Errorf(errs.FmtStoreTaskNotFound, id)
 	}
 
 	if err = tx.Commit(); err != nil {
@@ -678,7 +698,7 @@ func (s *Store) UpdateModelRunSessionList(taskID, modelRunID string, sessionList
 	if err = tx.QueryRow("SELECT task_type, project_config_id FROM tasks WHERE id = ?", taskID).
 		Scan(&currentTaskType, &projectConfigID); err != nil {
 		if err == sql.ErrNoRows {
-			return fmt.Errorf("task not found: %s", taskID)
+			return fmt.Errorf(errs.FmtStoreTaskNotFound, taskID)
 		}
 		return err
 	}
@@ -687,7 +707,7 @@ func (s *Store) UpdateModelRunSessionList(taskID, modelRunID string, sessionList
 	if err = tx.QueryRow("SELECT session_list FROM model_runs WHERE id = ? AND task_id = ?", modelRunID, taskID).
 		Scan(&rawSessionList); err != nil {
 		if err == sql.ErrNoRows {
-			return fmt.Errorf("model run not found: %s", modelRunID)
+			return fmt.Errorf(errs.FmtStoreModelRunNotFound, modelRunID)
 		}
 		return err
 	}
@@ -754,7 +774,7 @@ func (s *Store) UpdateModelRunSessionList(taskID, modelRunID string, sessionList
 		return runRowsErr
 	}
 	if runRowsAffected == 0 {
-		return fmt.Errorf("model run not found: %s", modelRunID)
+		return fmt.Errorf(errs.FmtStoreModelRunNotFound, modelRunID)
 	}
 
 	taskRes, taskExecErr := tx.Exec(
@@ -769,7 +789,7 @@ func (s *Store) UpdateModelRunSessionList(taskID, modelRunID string, sessionList
 		return taskRowsErr
 	}
 	if taskRowsAffected == 0 {
-		return fmt.Errorf("task not found: %s", taskID)
+		return fmt.Errorf(errs.FmtStoreTaskNotFound, taskID)
 	}
 
 	if err = tx.Commit(); err != nil {
@@ -787,7 +807,7 @@ func (s *Store) UpdateTaskPrompt(id, promptText string) error {
 func (s *Store) SyncTaskPromptFromArtifact(id, promptText string) error {
 	promptText = strings.TrimSpace(promptText)
 	if promptText == "" {
-		return fmt.Errorf("promptText 不能为空")
+		return fmt.Errorf(errs.MsgStorePromptTextRequired)
 	}
 
 	now := time.Now().Unix()
@@ -811,7 +831,7 @@ func (s *Store) SyncTaskPromptFromArtifact(id, promptText string) error {
 		return rowsErr
 	}
 	if rowsAffected == 0 {
-		return fmt.Errorf("task not found: %s", id)
+		return fmt.Errorf(errs.FmtStoreTaskNotFound, id)
 	}
 	return nil
 }
@@ -836,7 +856,7 @@ func (s *Store) StartTaskPromptGeneration(id string, startedAt int64) error {
 		return rowsErr
 	}
 	if rowsAffected == 0 {
-		return fmt.Errorf("task not found: %s", id)
+		return fmt.Errorf(errs.FmtStoreTaskNotFound, id)
 	}
 	return nil
 }
@@ -863,7 +883,7 @@ func (s *Store) CompleteTaskPromptGeneration(id, promptText string, startedAt in
 		return rowsErr
 	}
 	if rowsAffected == 0 {
-		return fmt.Errorf("task not found: %s", id)
+		return fmt.Errorf(errs.FmtStoreTaskNotFound, id)
 	}
 	return nil
 }
@@ -888,7 +908,7 @@ func (s *Store) FailTaskPromptGeneration(id, errMsg string, startedAt int64) err
 		return rowsErr
 	}
 	if rowsAffected == 0 {
-		return fmt.Errorf("task not found: %s", id)
+		return fmt.Errorf(errs.FmtStoreTaskNotFound, id)
 	}
 	return nil
 }
@@ -901,7 +921,7 @@ func (s *Store) UpdateTaskLocalPath(id string, localPath *string) error {
 	}
 	n, _ := res.RowsAffected()
 	if n == 0 {
-		return fmt.Errorf("task not found: %s", id)
+		return fmt.Errorf(errs.FmtStoreTaskNotFound, id)
 	}
 	return nil
 }
@@ -910,7 +930,7 @@ func (s *Store) CountTasksByProjectConfigGitLabProjectAndTaskType(projectConfigI
 	projectConfigID = strings.TrimSpace(projectConfigID)
 	taskType = strings.TrimSpace(taskType)
 	if projectConfigID == "" {
-		return 0, fmt.Errorf("projectConfigID 不能为空")
+		return 0, fmt.Errorf(errs.MsgProjectConfigIDReq)
 	}
 
 	var count int

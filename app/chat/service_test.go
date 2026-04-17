@@ -86,6 +86,22 @@ func TestExtractPromptFromCLIOutputStripsLegacyStatusLines(t *testing.T) {
 	}
 }
 
+func TestExtractHumanizedTextFromCLIOutputDoesNotAffectPromptParsing(t *testing.T) {
+	output := strings.Join([]string{
+		"以下是润色后的文本：",
+		"",
+		"这是一段更自然的表达。",
+	}, "\n")
+
+	got, err := appprompt.ExtractHumanizedTextFromCLIOutput(output)
+	if err != nil {
+		t.Fatalf("appprompt.ExtractHumanizedTextFromCLIOutput() error = %v", err)
+	}
+	if got != "这是一段更自然的表达。" {
+		t.Fatalf("appprompt.ExtractHumanizedTextFromCLIOutput() = %q", got)
+	}
+}
+
 func TestPersistGeneratedPromptFallsBackToCLIOutput(t *testing.T) {
 	s := &ChatService{store: testutil.OpenTestStore(t)}
 

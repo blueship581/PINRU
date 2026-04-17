@@ -1,6 +1,7 @@
 package chat
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -10,6 +11,7 @@ import (
 
 	appcli "github.com/blueship581/pinru/app/cli"
 	appprompt "github.com/blueship581/pinru/app/prompt"
+	"github.com/blueship581/pinru/internal/errs"
 	internalprompt "github.com/blueship581/pinru/internal/prompt"
 	"github.com/blueship581/pinru/internal/store"
 )
@@ -72,7 +74,7 @@ type promptArtifactSnapshot struct {
 
 func (s *ChatService) CreateSession(req CreateSessionRequest) (*store.ChatSession, error) {
 	if strings.TrimSpace(req.TaskID) == "" {
-		return nil, fmt.Errorf("taskId 不能为空")
+		return nil, errors.New(errs.MsgTaskIDRequired)
 	}
 	model := req.Model
 	if model == "" {
@@ -83,7 +85,7 @@ func (s *ChatService) CreateSession(req CreateSessionRequest) (*store.ChatSessio
 
 func (s *ChatService) ListSessions(taskID, model string) ([]store.ChatSession, error) {
 	if strings.TrimSpace(taskID) == "" {
-		return nil, fmt.Errorf("taskId 不能为空")
+		return nil, errors.New(errs.MsgTaskIDRequired)
 	}
 	sessions, err := s.store.ListChatSessions(taskID, model)
 	if err != nil {
@@ -98,7 +100,7 @@ func (s *ChatService) ListSessions(taskID, model string) ([]store.ChatSession, e
 func (s *ChatService) GetSessionWithMessages(sessionID string) (*SessionWithMessages, error) {
 	sess, err := s.store.GetChatSession(sessionID)
 	if err != nil {
-		return nil, fmt.Errorf("会话不存在: %s", sessionID)
+		return nil, fmt.Errorf(errs.FmtSessionNotFound, sessionID)
 	}
 	msgs, err := s.store.ListChatMessages(sessionID)
 	if err != nil {
@@ -113,7 +115,7 @@ func (s *ChatService) GetSessionWithMessages(sessionID string) (*SessionWithMess
 func (s *ChatService) RenameSession(sessionID, title string) error {
 	title = strings.TrimSpace(title)
 	if title == "" {
-		return fmt.Errorf("标题不能为空")
+		return errors.New(errs.MsgTitleRequired)
 	}
 	return s.store.UpdateChatSessionTitle(sessionID, title)
 }
@@ -130,10 +132,10 @@ func (s *ChatService) DeleteSession(sessionID string) error {
 func (s *ChatService) SendMessage(req SendMessageRequest) (*SendMessageResponse, error) {
 	content := strings.TrimSpace(req.Content)
 	if content == "" {
-		return nil, fmt.Errorf("消息内容不能为空")
+		return nil, errors.New(errs.MsgMessageContentEmpty)
 	}
 	if strings.TrimSpace(req.WorkDir) == "" {
-		return nil, fmt.Errorf("workDir 不能为空，请先完成领题 Clone")
+		return nil, errors.New(errs.MsgWorkDirRequired)
 	}
 
 	// Fetch session + history for context building
@@ -159,10 +161,10 @@ func (s *ChatService) SendMessage(req SendMessageRequest) (*SendMessageResponse,
 			return nil, fmt.Errorf("读取任务失败: %w", err)
 		}
 		if task == nil {
-			return nil, fmt.Errorf("任务不存在: %s", swm.Session.TaskID)
+			return nil, fmt.Errorf(errs.FmtTaskNotFound, swm.Session.TaskID)
 		}
 		if task.PromptGenerationStatus == "running" {
-			return nil, fmt.Errorf("当前任务正在后台生成提示词，请稍后再试")
+			return nil, errors.New(errs.MsgPromptGenerating)
 		}
 	}
 
@@ -533,7 +535,7 @@ func (s *ChatService) SaveMessageAsPrompt(taskID, messageID string) error {
 		return fmt.Errorf("消息不存在: %w", err)
 	}
 	if msg == nil || strings.TrimSpace(msg.Content) == "" {
-		return fmt.Errorf("消息内容为空，无法保存为提示词")
+		return errors.New(errs.MsgMessageEmptyForPrompt)
 	}
 
 	promptText := strings.TrimSpace(msg.Content)

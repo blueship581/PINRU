@@ -4,6 +4,8 @@ import (
 	"database/sql"
 	"fmt"
 	"time"
+
+	"github.com/blueship581/pinru/internal/errs"
 )
 
 type BackgroundJob struct {
@@ -147,7 +149,7 @@ func (s *Store) CancelBackgroundJob(id string) error {
 
 func (s *Store) DeleteBackgroundJob(id string) error {
 	res, err := s.DB.Exec("DELETE FROM background_jobs WHERE id = ?", id)
-	return ensureRowsAffected(res, err, "background job %q not found", id)
+	return ensureRowsAffected(res, err, errs.FmtStoreBgJobNotFound, id)
 }
 
 func (s *Store) IncrementBackgroundJobRetry(id string) error {
@@ -179,7 +181,7 @@ func scanBackgroundJob(row *sql.Row) (*BackgroundJob, error) {
 		return nil, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("scan background job: %w", err)
+		return nil, fmt.Errorf(errs.FmtStoreScanBgJob, err)
 	}
 	return &job, nil
 }
@@ -192,7 +194,7 @@ func scanBackgroundJobRows(rows *sql.Rows) (*BackgroundJob, error) {
 		&job.MaxRetries, &job.TimeoutSeconds, &job.CreatedAt, &job.StartedAt, &job.FinishedAt,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("scan background job row: %w", err)
+		return nil, fmt.Errorf(errs.FmtStoreScanBgJobRow, err)
 	}
 	return &job, nil
 }

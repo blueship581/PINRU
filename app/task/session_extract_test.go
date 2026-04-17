@@ -1,6 +1,7 @@
 package task
 
 import (
+	"database/sql"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -130,4 +131,80 @@ func TestPartitionTraeLogFilesByDayPrefersToday(t *testing.T) {
 	if len(history) != 1 || history[0] != historyFile {
 		t.Fatalf("history = %v, want [%s]", history, historyFile)
 	}
+}
+
+func TestLoadTraeWorkspaceStatePrefersCurrentSessionOwnerAcrossMultipleUsers(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "state.vscdb")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("sql.Open() error = %v", err)
+	}
+	defer db.Close()
+
+	if _, err := db.Exec(`CREATE TABLE ItemTable (key TEXT PRIMARY KEY, value TEXT)`); err != nil {
+		t.Fatalf("CREATE TABLE error = %v", err)
+	}
+
+	currentRawSessionID := "69de442f6d34f5e3ac85e2fd"
+	if err := insertTraeStateRow(db, "memento/icube-ai-agent-storage", `{"list":[{"isCurrent":true,"sessionId":"`+currentRawSessionID+`","messages":[]}],"currentSessionId":"`+currentRawSessionID+`"}`); err != nil {
+		t.Fatalf("insert memento error = %v", err)
+	}
+	if err := insertTraeStateRow(db, "1713494194401290_ai-chat:sessionRelation:planModeMap", `{"69de1f7c6d34f5e3ac85dbd2":false}`); err != nil {
+		t.Fatalf("insert legacy user relation error = %v", err)
+	}
+	if err := insertTraeStateRow(db, "573312257230252_ai-chat:sessionRelation:modelMap", `{"`+currentRawSessionID+`":{"solo_coder":"3_volcengine_volcengine//ep-20260331120931-5lxqv"}}`); err != nil {
+		t.Fatalf("insert current user modelMap error = %v", err)
+	}
+	if err := insertTraeStateRow(db, "573312257230252_ai-chat:sessionRelation:modeMap", `{"`+currentRawSessionID+`":{"solo_coder":0}}`); err != nil {
+		t.Fatalf("insert current user modeMap error = %v", err)
+	}
+	if err := insertTraeStateRow(db, "573312257230252_profile", `{"username":"alice"}`); err != nil {
+		t.Fatalf("insert current user profile error = %v", err)
+	}
+
+	state, err := loadTraeWorkspaceState(dbPath)
+	if err != nil {
+		t.Fatalf("loadTraeWorkspaceState() error = %v", err)
+	}
+	if state.UserID != "573312257230252" {
+		t.Fatalf("state.UserID = %q, want 573312257230252", state.UserID)
+	}
+	if state.Username != "alice" {
+		t.Fatalf("state.Username = %q, want alice", state.Username)
+	}
+	if state.CurrentRawSessionID != currentRawSessionID {
+		t.Fatalf("state.CurrentRawSessionID = %q, want %q", state.CurrentRawSessionID, currentRawSessionID)
+	}
+	if len(state.RawSessions) != 1 || state.RawSessions[0].RawSessionID != currentRawSessionID {
+		t.Fatalf("state.RawSessions = %#v, want current raw session only", state.RawSessions)
+	}
+}
+
+func TestInferTraeWorkspaceUserIDFallsBackToSingleKnownUser(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "state.vscdb")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("sql.Open() error = %v", err)
+	}
+	defer db.Close()
+
+	if _, err := db.Exec(`CREATE TABLE ItemTable (key TEXT PRIMARY KEY, value TEXT)`); err != nil {
+		t.Fatalf("CREATE TABLE error = %v", err)
+	}
+	if err := insertTraeStateRow(db, "573312257230252_ai-chat:sessionRelation:globalModelMap", `{"solo_coder":"model"}`); err != nil {
+		t.Fatalf("insert globalModelMap error = %v", err)
+	}
+
+	userID, err := inferTraeWorkspaceUserID(db, nil, "")
+	if err != nil {
+		t.Fatalf("inferTraeWorkspaceUserID() error = %v", err)
+	}
+	if userID != "573312257230252" {
+		t.Fatalf("userID = %q, want 573312257230252", userID)
+	}
+}
+
+func insertTraeStateRow(db *sql.DB, key, value string) error {
+	_, err := db.Exec(`INSERT INTO ItemTable (key, value) VALUES (?, ?)`, key, value)
+	return err
 }

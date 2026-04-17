@@ -71,6 +71,8 @@ export interface TaskFromDB {
   updatedAt: number;
   notes: string | null;
   projectConfigId: string | null;
+  projectType: string;
+  changeScope: string;
 }
 
 export type ReviewStatus = 'none' | 'running' | 'pass' | 'warning';
@@ -127,6 +129,28 @@ export interface AiReviewNodeFromDB {
   updatedAt: number;
 }
 
+export interface AiReviewRoundFromDB {
+  id: string;
+  taskId: string;
+  modelRunId: string | null;
+  localPath: string;
+  modelName: string;
+  roundNumber: number;
+  originalPrompt: string;
+  promptText: string;
+  status: ReviewStatus;
+  isCompleted: boolean | null;
+  isSatisfied: boolean | null;
+  reviewNotes: string;
+  nextPrompt: string;
+  projectType: string;
+  changeScope: string;
+  keyLocations: string;
+  jobId: string | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
 export interface TaskChildDirectory {
   name: string;
   path: string;
@@ -160,14 +184,6 @@ export interface UpdateModelRunRequest {
   finishedAt?: number | null;
 }
 
-export interface UpdateAiReviewNodeRequest {
-  id: string;
-  title: string;
-  issueType: string;
-  promptText: string;
-  reviewNotes: string;
-}
-
 export async function listTasks(projectConfigId?: string): Promise<TaskFromDB[]> {
   return callService('TaskService', 'ListTasks', projectConfigId ?? null);
 }
@@ -182,6 +198,14 @@ export async function listModelRuns(taskId: string): Promise<ModelRunFromDB[]> {
 
 export async function listAiReviewNodes(taskId: string): Promise<AiReviewNodeFromDB[]> {
   return callService('TaskService', 'ListAiReviewNodes', taskId);
+}
+
+export async function listAiReviewRounds(taskId: string): Promise<AiReviewRoundFromDB[]> {
+  return callService('TaskService', 'ListAiReviewRounds', taskId);
+}
+
+export async function saveAiReviewRoundNotes(roundID: string, reviewNotes: string, nextPrompt: string): Promise<void> {
+  return callService('TaskService', 'SaveAiReviewRoundNotes', roundID, reviewNotes, nextPrompt);
 }
 
 export async function listTaskChildDirectories(taskId: string): Promise<TaskChildDirectory[]> {
@@ -216,10 +240,6 @@ export async function extractTaskSessions(taskId: string): Promise<ExtractTaskSe
 
 export async function updateModelRun(request: UpdateModelRunRequest): Promise<void> {
   return callService('TaskService', 'UpdateModelRun', request);
-}
-
-export async function updateAiReviewNode(request: UpdateAiReviewNodeRequest): Promise<void> {
-  return callService('TaskService', 'UpdateAiReviewNode', request);
 }
 
 export async function deleteTask(id: string): Promise<void> {
@@ -273,4 +293,14 @@ export async function batchUpdateTasks(req: BatchUpdateTasksRequest): Promise<Ba
 
 export async function batchDeleteTasks(taskIds: string[]): Promise<BatchUpdateResult> {
   return callService('TaskService', 'BatchDeleteTasks', taskIds);
+}
+
+export interface UpdateTaskReportFieldsRequest {
+  id: string;
+  projectType: string;
+  changeScope: string;
+}
+
+export async function updateTaskReportFields(req: UpdateTaskReportFieldsRequest): Promise<void> {
+  return callService('TaskService', 'UpdateTaskReportFields', req);
 }

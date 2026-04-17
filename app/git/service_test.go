@@ -49,6 +49,32 @@ func TestInspectDirectoryReportsEmptiness(t *testing.T) {
 	}
 }
 
+func TestSanitizeInspectPathStripsQuotesAndTrailingSeparators(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{name: "plain", in: "/tmp/foo", want: "/tmp/foo"},
+		{name: "surrounding_spaces", in: "  /tmp/foo  ", want: "/tmp/foo"},
+		{name: "double_quoted", in: `"/tmp/foo"`, want: "/tmp/foo"},
+		{name: "single_quoted", in: `'/tmp/foo'`, want: "/tmp/foo"},
+		{name: "quoted_with_spaces", in: `  "/tmp/foo"  `, want: "/tmp/foo"},
+		{name: "trailing_slash", in: "/tmp/foo/", want: "/tmp/foo"},
+		{name: "trailing_backslash", in: `C:\Users\foo\`, want: `C:\Users\foo`},
+		{name: "multiple_trailing", in: "/tmp/foo///", want: "/tmp/foo"},
+		{name: "windows_drive_root_keeps_slash", in: `C:\`, want: `C:\`},
+		{name: "empty", in: "   ", want: ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := sanitizeInspectPath(c.in); got != c.want {
+				t.Fatalf("sanitizeInspectPath(%q) = %q, want %q", c.in, got, c.want)
+			}
+		})
+	}
+}
+
 func TestNormalizeManagedSourceFoldersSyncsTaskPromptArtifact(t *testing.T) {
 	testStore := testutil.OpenTestStore(t)
 	defer testStore.Close()

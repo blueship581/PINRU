@@ -10,6 +10,7 @@ import Board from './features/board';
 import Claim from './features/claim';
 import Submit from './features/submit';
 import Settings from './features/settings';
+import Report from './features/report';
 
 export default function App() {
   return (
@@ -19,6 +20,7 @@ export default function App() {
           <Route index element={<Board />} />
           <Route path="claim" element={<Claim />} />
           <Route path="submit" element={<RouteErrorBoundary><Submit /></RouteErrorBoundary>} />
+          <Route path="report" element={<RouteErrorBoundary><Report /></RouteErrorBoundary>} />
           <Route path="settings" element={<RouteErrorBoundary><Settings /></RouteErrorBoundary>} />
         </Route>
       </Routes>

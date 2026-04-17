@@ -27,8 +27,10 @@ import {
 } from 'lucide-react';
 import { useAppStore, type Task, type TaskStatus } from '../../store';
 import type { AiReviewPayload, AiReviewResult, BackgroundJob } from '../../api/job';
-import type { AiReviewNodeFromDB, ModelRunFromDB, PromptGenerationStatus, TaskFromDB } from '../../api/task';
+import type { AiReviewRoundFromDB, ModelRunFromDB, PromptGenerationStatus, TaskFromDB } from '../../api/task';
+import { saveAiReviewRoundNotes } from '../../api/task';
 import type { GeneratePromptRequest, LlmProviderConfig } from '../../api/llm';
+import { polishText as polishTextApi } from '../../api/llm';
 import {
   getTaskTypePresentation,
   normalizeTaskTypeName,
@@ -43,7 +45,6 @@ import {
 import { matchKindLabel } from '../lib/sessionCandidateUtils';
 import { formatModelRunDisplayLabel } from '../lib/sourceFolders';
 import { CopyIconButton } from './CopyIconButton';
-import { startClaude, onCLILine, onCLIDone } from '../../api/cli';
 
 export type TaskDetailDrawerTab = 'sessions' | 'prompt' | 'model-runs' | 'ai-review';
 export type TaskDetailDrawerModelOption = {
@@ -83,15 +84,6 @@ type AiReviewStatusEntry = {
   details: AiReviewStructuredDetails | null;
 };
 
-type AiReviewNodeDraft = {
-  title: string;
-  issueType: string;
-  promptText: string;
-  reviewNotes: string;
-  polishedPromptText: string;
-  polishedReviewNotes: string;
-};
-
 type StatusMetaMap = Record<TaskStatus, {
   label: string;
   dotCls: string;
@@ -110,7 +102,7 @@ interface TaskDetailDrawerProps {
   selected: Task;
   selectedTaskDetail: TaskFromDB | null;
   selectedModelRuns: ModelRunFromDB[];
-  selectedAiReviewNodes?: AiReviewNodeFromDB[];
+  selectedAiReviewRounds?: AiReviewRoundFromDB[];
   drawerLoading: boolean;
   drawerError: string;
   statusChanging: boolean;
@@ -160,15 +152,8 @@ interface TaskDetailDrawerProps {
   promptGenerating: boolean;
   onGeneratePrompt: (config: Omit<GeneratePromptRequest, 'taskId'>) => void | Promise<void>;
   onAiReview?: (run: ModelRunFromDB) => void;
-  onAiReviewNode?: (node: AiReviewNodeFromDB) => void | Promise<void>;
-  onSaveAiReviewNode?: (request: {
-    id: string;
-    title: string;
-    issueType: string;
-    promptText: string;
-    reviewNotes: string;
-  }) => void | Promise<void>;
   onDeleteAiReviewRecord?: (jobId: string) => void | Promise<void>;
+  onSubmitNextAiReviewRound?: (modelRunId: string, modelName: string, localPath: string, nextPromptOverride?: string) => void | Promise<void>;
 }
 
 const TAB_ITEMS: Array<{ id: TaskDetailDrawerTab; label: string; icon: React.ComponentType<{ className?: string }> }> = [
@@ -182,7 +167,6 @@ export default function TaskDetailDrawer({
   selected,
   selectedTaskDetail,
   selectedModelRuns,
-  selectedAiReviewNodes,
   drawerLoading,
   drawerError,
   statusChanging,
@@ -232,9 +216,9 @@ export default function TaskDetailDrawer({
   promptGenerating,
   onGeneratePrompt,
   onAiReview,
-  onAiReviewNode,
-  onSaveAiReviewNode,
   onDeleteAiReviewRecord,
+  selectedAiReviewRounds,
+  onSubmitNextAiReviewRound,
 }: TaskDetailDrawerProps) {
   const aiReviewVisible = useAppStore((state) => state.aiReviewVisible);
   const backgroundJobs = useAppStore((state) => state.backgroundJobs);
@@ -266,17 +250,14 @@ export default function TaskDetailDrawer({
   const [submitToast, setSubmitToast] = useState(false);
   const [deletingAiReviewJobId, setDeletingAiReviewJobId] = useState<string | null>(null);
   const [deleteAiReviewError, setDeleteAiReviewError] = useState('');
-  const [aiReviewNodeDrafts, setAiReviewNodeDrafts] = useState<Record<string, AiReviewNodeDraft>>({});
-  const [savingAiReviewNodeId, setSavingAiReviewNodeId] = useState<string | null>(null);
-  const [runningAiReviewNodeId, setRunningAiReviewNodeId] = useState<string | null>(null);
-  const [aiReviewNodeError, setAiReviewNodeError] = useState('');
-  const [collapsedNodeIds, setCollapsedNodeIds] = useState<Set<string>>(new Set());
-  const [editingNodePrompt, setEditingNodePrompt] = useState<string | null>(null);
-  const [editingNodeNotes, setEditingNodeNotes] = useState<string | null>(null);
-  const [copiedNodeField, setCopiedNodeField] = useState<{ id: string; field: string } | null>(null);
-  const [polishingField, setPolishingField] = useState<{ nodeId: string; field: 'promptText' | 'reviewNotes' } | null>(null);
-  const polishLineUnsubRef = useRef<(() => void) | null>(null);
-  const polishDoneUnsubRef = useRef<(() => void) | null>(null);
+  const [nextRoundPromptDrafts, setNextRoundPromptDrafts] = useState<Record<string, string>>({});
+  const [expandedRoundPrompts, setExpandedRoundPrompts] = useState<Set<string>>(new Set());
+  const [polishingKeys, setPolishingKeys] = useState<Set<string>>(new Set());
+  const [polishedNotes, setPolishedNotes] = useState<Record<string, string>>({});
+  const [polishError, setPolishError] = useState<string | null>(null);
+  const [savingRoundNotes, setSavingRoundNotes] = useState<Set<string>>(new Set());
+  const [editingNoteId, setEditingNoteId] = useState<string | null>(null);
+  const [editingNoteDraft, setEditingNoteDraft] = useState('');
   const [conversationEditMode, setConversationEditMode] = useState<string | null>(null);
   const [copiedConversation, setCopiedConversation] = useState<string | null>(null);
   const [sessionIdEditMode, setSessionIdEditMode] = useState<string | null>(null);
@@ -288,10 +269,6 @@ export default function TaskDetailDrawer({
   const safeSelectedModelRuns = useMemo(
     () => (Array.isArray(selectedModelRuns) ? selectedModelRuns : []),
     [selectedModelRuns],
-  );
-  const safeSelectedAiReviewNodes = useMemo(
-    () => (Array.isArray(selectedAiReviewNodes) ? selectedAiReviewNodes : []),
-    [selectedAiReviewNodes],
   );
   const promptLlmProviders = useMemo(
     () => safeLlmProviders.filter((provider) => provider.providerType === 'claude_code_acp'),
@@ -332,36 +309,6 @@ export default function TaskDetailDrawer({
     setDeleteAiReviewError('');
   }, [selected.id]);
 
-  useEffect(() => {
-    setAiReviewNodeError('');
-    setSavingAiReviewNodeId(null);
-    setRunningAiReviewNodeId(null);
-    setCollapsedNodeIds(new Set());
-    setEditingNodePrompt(null);
-    setEditingNodeNotes(null);
-    setCopiedNodeField(null);
-    polishLineUnsubRef.current?.();
-    polishDoneUnsubRef.current?.();
-    polishLineUnsubRef.current = null;
-    polishDoneUnsubRef.current = null;
-    setPolishingField(null);
-    setAiReviewNodeDrafts(
-      Object.fromEntries(
-        safeSelectedAiReviewNodes.map((node) => [
-          node.id,
-          {
-            title: node.title ?? '',
-            issueType: node.issueType ?? 'Bug修复',
-            promptText: node.promptText ?? '',
-            reviewNotes: node.reviewNotes ?? '',
-            polishedPromptText: '',
-            polishedReviewNotes: '',
-          },
-        ]),
-      ),
-    );
-  }, [selected.id, safeSelectedAiReviewNodes]);
-
   const toggleGenConstraint = (c: string) => {
     setGenConstraints(prev => {
       const next = new Set(prev);
@@ -380,6 +327,61 @@ export default function TaskDetailDrawer({
       next.has(s) ? next.delete(s) : next.add(s);
       return next;
     });
+  };
+
+  const handlePolish = async (key: string, text: string, onResult: (polished: string) => void, minLength?: number) => {
+    if (!text.trim() || polishingKeys.has(key)) return;
+    setPolishingKeys((prev) => new Set(prev).add(key));
+    setPolishError(null);
+    try {
+      const result = await polishTextApi({ text });
+      const polished = result.polishedText;
+      if (minLength !== undefined && [...polished].length < minLength) {
+        setPolishError(`润色结果过短（${[...polished].length} 字），要求至少 ${minLength} 字，请重试`);
+        setTimeout(() => setPolishError(null), 5000);
+        return;
+      }
+      onResult(polished);
+    } catch (err) {
+      setPolishError(err instanceof Error ? err.message : '润色失败');
+      setTimeout(() => setPolishError(null), 4000);
+    } finally {
+      setPolishingKeys((prev) => {
+        const next = new Set(prev);
+        next.delete(key);
+        return next;
+      });
+    }
+  };
+
+  const handleSaveRoundNotes = async (
+    roundId: string,
+    groupKey: string,
+    originalNotes: string,
+    originalNextPrompt: string,
+  ) => {
+    if (savingRoundNotes.has(roundId)) return;
+    setSavingRoundNotes((prev) => new Set(prev).add(roundId));
+    try {
+      const notes = polishedNotes[roundId] ?? originalNotes;
+      const nextPrompt = nextRoundPromptDrafts[groupKey] ?? originalNextPrompt;
+      await saveAiReviewRoundNotes(roundId, notes, nextPrompt);
+      // After saving, clear polished state so it shows the saved version
+      setPolishedNotes((prev) => {
+        const next = { ...prev };
+        delete next[roundId];
+        return next;
+      });
+    } catch (err) {
+      setPolishError(err instanceof Error ? err.message : '保存失败');
+      setTimeout(() => setPolishError(null), 4000);
+    } finally {
+      setSavingRoundNotes((prev) => {
+        const next = new Set(prev);
+        next.delete(roundId);
+        return next;
+      });
+    }
   };
 
   const handleStartGenerate = () => {
@@ -495,12 +497,12 @@ export default function TaskDetailDrawer({
     });
     return map;
   }, [taskAiReviewJobs]);
-  const latestAiReviewJobByNodeId = useMemo(() => {
+  const latestAiReviewJobByRoundId = useMemo(() => {
     const map = new Map<string, ParsedAiReviewJob>();
     taskAiReviewJobs.forEach((entry) => {
-      const nodeId = trimToNull(entry.output?.reviewNodeId) ?? trimToNull(entry.input?.reviewNodeId);
-      if (nodeId && !map.has(nodeId)) {
-        map.set(nodeId, entry);
+      const roundId = trimToNull(entry.output?.reviewRoundId) ?? trimToNull(entry.input?.reviewRoundId);
+      if (roundId && !map.has(roundId)) {
+        map.set(roundId, entry);
       }
     });
     return map;
@@ -575,13 +577,6 @@ export default function TaskDetailDrawer({
 
     return entries;
   }, [latestAiReviewJobByKey, safeSelectedModelRuns, sourceModelName]);
-  const aiReviewPassCount = safeSelectedAiReviewNodes.filter((node) => node.status === 'pass').length;
-  const aiReviewWarningCount = safeSelectedAiReviewNodes.filter((node) => node.status === 'warning').length;
-  const aiReviewRunningCount = safeSelectedAiReviewNodes.filter((node) => node.status === 'running').length;
-  const aiReviewTreeNodes = useMemo(
-    () => buildAiReviewTreeNodes(safeSelectedAiReviewNodes),
-    [safeSelectedAiReviewNodes],
-  );
   const availableTabItems = useMemo(
     () => TAB_ITEMS.filter((tab) => aiReviewVisible || tab.id !== 'ai-review'),
     [aiReviewVisible],
@@ -634,167 +629,6 @@ export default function TaskDetailDrawer({
       setDeleteAiReviewError(error instanceof Error ? error.message : '删除复审记录失败');
     } finally {
       setDeletingAiReviewJobId((current) => (current === entry.job.id ? null : current));
-    }
-  };
-
-  const getAiReviewNodeDraft = (node: AiReviewNodeFromDB): AiReviewNodeDraft => (
-    aiReviewNodeDrafts[node.id] ?? {
-      title: node.title ?? '',
-      issueType: node.issueType ?? 'Bug修复',
-      promptText: node.promptText ?? '',
-      reviewNotes: node.reviewNotes ?? '',
-      polishedPromptText: '',
-      polishedReviewNotes: '',
-    }
-  );
-
-  const handleAiReviewNodeDraftChange = (
-    nodeId: string,
-    patch: Partial<AiReviewNodeDraft>,
-  ) => {
-    setAiReviewNodeDrafts((prev) => {
-      const current = prev[nodeId] ?? {
-        title: '',
-        issueType: 'Bug修复',
-        promptText: '',
-        reviewNotes: '',
-      };
-      return {
-        ...prev,
-        [nodeId]: {
-          ...current,
-          ...patch,
-        },
-      };
-    });
-  };
-
-  const applyPolishedAiReviewNodeField = (
-    nodeId: string,
-    field: 'promptText' | 'reviewNotes',
-    value: string,
-  ) => {
-    if (field === 'promptText') {
-      handleAiReviewNodeDraftChange(nodeId, {
-        promptText: value,
-        polishedPromptText: '',
-      });
-      setEditingNodePrompt((current) => (current === nodeId ? null : current));
-      return;
-    }
-    handleAiReviewNodeDraftChange(nodeId, {
-      reviewNotes: value,
-      polishedReviewNotes: '',
-    });
-    setEditingNodeNotes((current) => (current === nodeId ? null : current));
-  };
-
-  const handlePolishText = async (
-    nodeId: string,
-    field: 'promptText' | 'reviewNotes',
-    text: string,
-    workDir: string,
-  ) => {
-    if (polishingField) return;
-    if (!workDir.trim()) {
-      setAiReviewNodeError('润色失败：工作目录为空');
-      return;
-    }
-    const acpProvider = promptLlmProviders[0];
-    if (!acpProvider) {
-      setAiReviewNodeError('润色失败：未配置 Claude Code(ACP) 提供商');
-      return;
-    }
-    const polishModel = acpProvider.polishModel?.trim() || acpProvider.model;
-    setAiReviewNodeError('');
-    setPolishingField({ nodeId, field });
-    polishLineUnsubRef.current?.();
-    polishDoneUnsubRef.current?.();
-    const collectedLines: string[] = [];
-    try {
-      const resp = await startClaude({
-        workDir,
-        prompt: `去除以下文字中的 AI 写作痕迹，使其更自然流畅。只输出改写后的文字，不要任何说明或前缀：\n\n${text}`,
-        model: polishModel,
-        thinkingDepth: '',
-        mode: 'agent',
-      });
-      polishLineUnsubRef.current = onCLILine(resp.sessionId, (line) => {
-        // 跳过 ANSI 控制符行和明显的工具/状态行
-        // eslint-disable-next-line no-control-regex
-        const stripped = line.replace(/\x1b\[[0-9;]*m/g, '').trim();
-        if (!stripped) return;
-        if (/^[ℹ✓✗⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏►]/.test(stripped)) return;
-        if (/^(Tool:|Result:|Bash\(|Read\(|Write\(|Edit\()/.test(stripped)) return;
-        collectedLines.push(stripped);
-      });
-      polishDoneUnsubRef.current = onCLIDone(resp.sessionId, (errMsg) => {
-        polishLineUnsubRef.current?.();
-        polishDoneUnsubRef.current?.();
-        polishLineUnsubRef.current = null;
-        polishDoneUnsubRef.current = null;
-        if (errMsg) {
-          setAiReviewNodeError(`润色失败：${errMsg}`);
-        } else {
-          const result = collectedLines.join('\n').trim();
-          if (result) {
-            const polishedKey = field === 'promptText' ? 'polishedPromptText' : 'polishedReviewNotes';
-            handleAiReviewNodeDraftChange(nodeId, { [polishedKey]: result });
-          } else {
-            setAiReviewNodeError('润色失败：未能提取有效文字');
-          }
-        }
-        setPolishingField(null);
-      });
-    } catch (e) {
-      setAiReviewNodeError(`润色失败：${e instanceof Error ? e.message : '未知错误'}`);
-      setPolishingField(null);
-    }
-  };
-
-  const handleSaveAiReviewNodeDraft = async (node: AiReviewNodeFromDB) => {
-    if (!onSaveAiReviewNode) {
-      return true;
-    }
-    const draft = getAiReviewNodeDraft(node);
-    setAiReviewNodeError('');
-    setSavingAiReviewNodeId(node.id);
-    try {
-      await onSaveAiReviewNode({
-        id: node.id,
-        title: draft.title.trim(),
-        issueType: draft.issueType.trim() || 'Bug修复',
-        promptText: draft.promptText.trim(),
-        reviewNotes: draft.reviewNotes.trim(),
-      });
-      return true;
-    } catch (error) {
-      setAiReviewNodeError(error instanceof Error ? error.message : '保存复审节点失败');
-      return false;
-    } finally {
-      setSavingAiReviewNodeId((current) => (current === node.id ? null : current));
-    }
-  };
-
-  const handleRunAiReviewNode = async (node: AiReviewNodeFromDB) => {
-    if (!onAiReviewNode) {
-      return;
-    }
-    if (hasAiReviewNodeDraftChanges(node, getAiReviewNodeDraft(node))) {
-      const saved = await handleSaveAiReviewNodeDraft(node);
-      if (!saved) {
-        return;
-      }
-    }
-
-    setAiReviewNodeError('');
-    setRunningAiReviewNodeId(node.id);
-    try {
-      await onAiReviewNode(node);
-    } catch (error) {
-      setAiReviewNodeError(error instanceof Error ? error.message : '提交节点复核失败');
-    } finally {
-      setRunningAiReviewNodeId((current) => (current === node.id ? null : current));
     }
   };
 
@@ -1709,529 +1543,477 @@ export default function TaskDetailDrawer({
   );
 
   const renderAiReviewWorkspace = () => {
-    const rootTreeNodes = aiReviewTreeNodes.filter((t) => t.depth === 1);
-    const nonRootTreeNodes = aiReviewTreeNodes.filter((t) => t.depth > 1);
-    const topOriginalPrompt =
-      rootTreeNodes.find((t) => t.node.originalPrompt?.trim())?.node.originalPrompt?.trim() ?? null;
-    const getDescendants = (rootId: string) =>
-      nonRootTreeNodes.filter((t) => t.node.rootId === rootId);
+    // Group rounds by modelRunId (fall back to localPath when modelRunId is null)
+    const allRounds = selectedAiReviewRounds ?? [];
 
-    const renderNodeCard = (
-      treeNode: { node: AiReviewNodeFromDB; depth: number; serial: number },
-      depthOffset: number,
-      displaySerial: number,
-    ) => {
-      const node = treeNode.node;
-      const draft = getAiReviewNodeDraft(node);
-      const reviewMeta =
-        node.status === 'none'
-          ? null
-          : reviewStatusPresentation(node.status, Math.max(node.runCount, 1));
-      const latestJob = latestAiReviewJobByNodeId.get(node.id) ?? null;
-      const latestJobStatus = latestJob ? backgroundJobStatusPresentation(latestJob.job.status) : null;
-      const dirty = hasAiReviewNodeDraftChanges(node, draft);
-      const nodeDetails = extractAiReviewDetailsFromNode(node);
-      const canRun = Boolean(onAiReviewNode) && Boolean(node.localPath) && node.status !== 'running';
-      const isCollapsed = collapsedNodeIds.has(node.id);
-
-      return (
-        <div
-          key={node.id}
-          className="overflow-hidden rounded-xl border border-zinc-800/70 bg-zinc-900/40"
-          style={{ marginLeft: `${Math.max(treeNode.depth - depthOffset, 0) * 20}px` }}
-        >
-          {/* 节点头部 */}
-          <div className="flex items-start gap-2.5 px-3 py-2.5">
-            <button
-              type="button"
-              className="mt-0.5 shrink-0 text-zinc-600 transition hover:text-zinc-300"
-              onClick={() =>
-                setCollapsedNodeIds((prev) => {
-                  const next = new Set(prev);
-                  if (next.has(node.id)) next.delete(node.id);
-                  else next.add(node.id);
-                  return next;
-                })
-              }
-              aria-label={isCollapsed ? '展开' : '收起'}
-            >
-              {isCollapsed ? (
-                <ChevronRight className="h-3.5 w-3.5" />
-              ) : (
-                <ChevronDown className="h-3.5 w-3.5" />
-              )}
-            </button>
-            <div className="min-w-0 flex-1">
-              <div className="flex flex-wrap items-center gap-1.5">
-                <span className="shrink-0 rounded-md bg-violet-500/15 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-violet-300">
-                  #{displaySerial}
-                </span>
-                <span className="text-[10px] text-zinc-500">{draft.issueType || 'Bug修复'}</span>
-                {reviewMeta ? (
-                  <span
-                    className={clsx(
-                      'inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold',
-                      reviewMeta.badgeCls,
-                    )}
-                  >
-                    {reviewMeta.icon}
-                    {reviewMeta.label}
-                  </span>
-                ) : (
-                  <WorkspaceBadge tone="neutral">未复审</WorkspaceBadge>
-                )}
-                {node.runCount > 0 && (
-                  <WorkspaceBadge tone="blue">第 {node.runCount} 轮</WorkspaceBadge>
-                )}
-                {node.modelRunId === null && (
-                  <WorkspaceBadge tone="warning">未关联模型</WorkspaceBadge>
-                )}
-                {dirty && <WorkspaceBadge tone="warning">待保存</WorkspaceBadge>}
-                {latestJobStatus && (
-                  <WorkspaceBadge tone={latestJobStatus.tone}>
-                    任务{latestJobStatus.label}
-                  </WorkspaceBadge>
-                )}
-              </div>
-              <input
-                value={draft.title}
-                onChange={(event) =>
-                  handleAiReviewNodeDraftChange(node.id, { title: event.target.value })
-                }
-                className="mt-1.5 w-full rounded-lg border border-zinc-800/60 bg-black/20 px-2.5 py-1.5 text-sm font-medium text-zinc-100 outline-none transition focus:border-indigo-500/60 focus:ring-1 focus:ring-indigo-500/40"
-                placeholder="问题标题"
-              />
-            </div>
-            <div className="flex shrink-0 items-center gap-1.5">
-              {onSaveAiReviewNode && (
-                <button
-                  type="button"
-                  disabled={!dirty || savingAiReviewNodeId === node.id}
-                  onClick={() => void handleSaveAiReviewNodeDraft(node)}
-                  className="inline-flex items-center justify-center gap-1 rounded-lg border border-zinc-700/70 bg-zinc-900 px-2.5 py-1.5 text-xs font-medium text-zinc-300 transition hover:border-zinc-600 hover:bg-zinc-800 disabled:opacity-40"
-                >
-                  {savingAiReviewNodeId === node.id ? (
-                    <RefreshCw className="h-3 w-3 animate-spin" />
-                  ) : (
-                    <Check className="h-3 w-3" />
-                  )}
-                  保存
-                </button>
-              )}
-              {canRun && (
-                <button
-                  type="button"
-                  disabled={runningAiReviewNodeId === node.id}
-                  onClick={() => void handleRunAiReviewNode(node)}
-                  className="inline-flex items-center justify-center gap-1 rounded-lg border border-violet-500/25 bg-violet-500/10 px-2.5 py-1.5 text-xs font-medium text-violet-300 transition hover:bg-violet-500/15 disabled:opacity-40"
-                >
-                  {runningAiReviewNodeId === node.id ? (
-                    <RefreshCw className="h-3 w-3 animate-spin" />
-                  ) : (
-                    <CheckCircle2 className="h-3 w-3" />
-                  )}
-                  复核
-                </button>
-              )}
-            </div>
-          </div>
-
-          {/* 可折叠主体 */}
-          {!isCollapsed && (
-            <div className="space-y-2.5 border-t border-zinc-800/40 px-3 py-3">
-              {/* 元信息 */}
-              <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[11px] text-zinc-500">
-                <span className="break-all">{node.localPath || '未记录目录'}</span>
-                {latestJob && (
-                  <span>
-                    复核于{' '}
-                    {formatAiReviewTimestamp(
-                      latestJob.job.finishedAt ??
-                        latestJob.job.startedAt ??
-                        latestJob.job.createdAt,
-                    )}
-                  </span>
-                )}
-              </div>
-
-              {/* 问题类型（内联，不单独成卡） */}
-              <div className="flex items-center gap-2">
-                <span className="shrink-0 text-[10px] font-medium text-zinc-500">问题类型</span>
-                <input
-                  value={draft.issueType}
-                  onChange={(event) =>
-                    handleAiReviewNodeDraftChange(node.id, { issueType: event.target.value })
-                  }
-                  className="min-w-0 flex-1 rounded-lg border border-zinc-800/60 bg-black/20 px-2.5 py-1 text-xs text-zinc-300 outline-none transition focus:border-indigo-500/60 focus:ring-1 focus:ring-indigo-500/40"
-                  placeholder="Bug修复"
-                />
-              </div>
-
-              {/* 决策标签 + 关键代码位置 */}
-              {nodeDetails && (nodeDetails.isCompleted !== null || nodeDetails.isSatisfied !== null || nodeDetails.projectType || nodeDetails.changeScope) && (
-                <div className="flex flex-wrap gap-1.5">
-                  <AiReviewDecisionBadge label="是否完成" value={nodeDetails.isCompleted} />
-                  <AiReviewDecisionBadge label="是否满意" value={nodeDetails.isSatisfied} />
-                  {nodeDetails.projectType && (
-                    <WorkspaceBadge tone="blue">{nodeDetails.projectType}</WorkspaceBadge>
-                  )}
-                  {nodeDetails.changeScope && (
-                    <WorkspaceBadge tone="neutral">{nodeDetails.changeScope}</WorkspaceBadge>
-                  )}
-                </div>
-              )}
-              {nodeDetails?.keyLocations && (
-                <div className="rounded-xl border border-zinc-800/60 bg-black/15 px-3 py-2">
-                  <p className="text-[10px] font-medium text-zinc-500">关键代码位置</p>
-                  <p className="mt-0.5 break-all font-mono text-[11px] leading-5 text-zinc-400">
-                    {nodeDetails.keyLocations}
-                  </p>
-                </div>
-              )}
-
-              {/* 当前节点提示词 - 双击编辑 */}
-              <div
-                className="cursor-text rounded-xl border border-indigo-500/20 bg-indigo-500/8 px-3 py-2.5"
-                onDoubleClick={() => {
-                  if (editingNodePrompt !== node.id) setEditingNodePrompt(node.id);
-                }}
-                title={editingNodePrompt === node.id ? undefined : '双击编辑提示词'}
-              >
-                <div className="flex items-start justify-between gap-2">
-                  <div className="min-w-0 flex-1">
-                    <p className="text-[10px] font-medium text-indigo-400/70">推荐提示词</p>
-                    {editingNodePrompt === node.id ? (
-                      <textarea
-                        autoFocus
-                        value={draft.promptText}
-                        onChange={(e) =>
-                          handleAiReviewNodeDraftChange(node.id, { promptText: e.target.value })
-                        }
-                        onBlur={() => setEditingNodePrompt(null)}
-                        onKeyDown={(e) => {
-                          if (e.key === 'Escape') setEditingNodePrompt(null);
-                        }}
-                        rows={4}
-                        placeholder="填写该节点下一次复核要带上的提示词"
-                        className="mt-1.5 w-full resize-y rounded-lg border border-indigo-500/40 bg-black/30 px-2 py-1.5 text-xs leading-6 text-indigo-100 outline-none focus:ring-1 focus:ring-indigo-500/40"
-                      />
-                    ) : (
-                      <div className="mt-1 whitespace-pre-wrap text-xs leading-5 text-indigo-100/90">
-                        {draft.promptText || (
-                          <span className="text-indigo-300/30">双击添加提示词…</span>
-                        )}
-                      </div>
-                    )}
-                    {node.nextPrompt && node.nextPrompt !== draft.promptText && (
-                      <div className="mt-2 border-t border-indigo-500/15 pt-1.5">
-                        <div className="flex items-center justify-between gap-1">
-                          <p className="text-[9px] font-medium text-indigo-400/40">AI 建议</p>
-                          <ActionIconButton
-                            label="应用 AI 建议"
-                            onClick={() => handleAiReviewNodeDraftChange(node.id, { promptText: node.nextPrompt, polishedPromptText: '' })}
-                          >
-                            <Check className="h-3 w-3" />
-                          </ActionIconButton>
-                        </div>
-                        <p className="mt-0.5 text-[11px] leading-5 text-indigo-200/50">
-                          {node.nextPrompt}
-                        </p>
-                      </div>
-                    )}
-                    {draft.polishedPromptText && draft.polishedPromptText !== draft.promptText && (
-                      <div className="mt-2 border-t border-indigo-500/15 pt-1.5">
-                        <div className="flex items-center justify-between gap-1">
-                          <p className="text-[9px] font-medium text-indigo-400/40">润色建议</p>
-                          <ActionIconButton
-                            label="应用润色建议"
-                            onClick={() =>
-                              applyPolishedAiReviewNodeField(
-                                node.id,
-                                'promptText',
-                                draft.polishedPromptText,
-                              )
-                            }
-                          >
-                            <Check className="h-3 w-3" />
-                          </ActionIconButton>
-                        </div>
-                        <p className="mt-0.5 text-[11px] leading-5 text-indigo-200/50">
-                          {draft.polishedPromptText}
-                        </p>
-                      </div>
-                    )}
-                  </div>
-                  {draft.promptText && editingNodePrompt !== node.id && (
-                    <div className="flex items-center gap-1">
-                      <ActionIconButton
-                        label={
-                          polishingField?.nodeId === node.id && polishingField.field === 'promptText'
-                            ? '润色中…'
-                            : '润色提示词'
-                        }
-                        disabled={!!polishingField}
-                        onClick={() => {
-                          void handlePolishText(node.id, 'promptText', draft.promptText, node.localPath);
-                        }}
-                      >
-                        {polishingField?.nodeId === node.id && polishingField.field === 'promptText' ? (
-                          <RefreshCw className="h-3.5 w-3.5 animate-spin" />
-                        ) : (
-                          <Wand2 className="h-3.5 w-3.5" />
-                        )}
-                      </ActionIconButton>
-                      <ActionIconButton
-                        label={
-                          copiedNodeField?.id === node.id && copiedNodeField.field === 'prompt'
-                            ? '已复制'
-                            : '复制提示词'
-                        }
-                        onClick={() => {
-                          void navigator.clipboard.writeText(draft.promptText).then(() => {
-                            setCopiedNodeField({ id: node.id, field: 'prompt' });
-                            setTimeout(() => setCopiedNodeField(null), 2000);
-                          });
-                        }}
-                      >
-                        {copiedNodeField?.id === node.id && copiedNodeField.field === 'prompt' ? (
-                          <Check className="h-3.5 w-3.5" />
-                        ) : (
-                          <Copy className="h-3.5 w-3.5" />
-                        )}
-                      </ActionIconButton>
-                    </div>
-                  )}
-                </div>
-              </div>
-
-              {/* 不满意结论 - 双击编辑 */}
-              <div
-                className="cursor-text rounded-xl border border-amber-500/20 bg-amber-500/8 px-3 py-2.5"
-                onDoubleClick={() => {
-                  if (editingNodeNotes !== node.id) setEditingNodeNotes(node.id);
-                }}
-                title={editingNodeNotes === node.id ? undefined : '双击编辑不满意结论'}
-              >
-                <div className="flex items-start justify-between gap-2">
-                  <div className="min-w-0 flex-1">
-                    <p className="text-[10px] font-medium text-amber-400/70">不满意结论</p>
-                    {editingNodeNotes === node.id ? (
-                      <textarea
-                        autoFocus
-                        value={draft.reviewNotes}
-                        onChange={(e) =>
-                          handleAiReviewNodeDraftChange(node.id, { reviewNotes: e.target.value })
-                        }
-                        onBlur={() => setEditingNodeNotes(null)}
-                        onKeyDown={(e) => {
-                          if (e.key === 'Escape') setEditingNodeNotes(null);
-                        }}
-                        rows={3}
-                        placeholder="填写当前节点的不满意结论，子复核会带上父节点结论"
-                        className="mt-1.5 w-full resize-y rounded-lg border border-amber-500/40 bg-black/30 px-2 py-1.5 text-xs leading-6 text-amber-100 outline-none focus:ring-1 focus:ring-amber-500/20"
-                      />
-                    ) : (
-                      <div className="mt-1 whitespace-pre-wrap text-xs leading-5 text-amber-100/90">
-                        {draft.reviewNotes || (
-                          <span className="text-amber-300/30">双击添加不满意结论…</span>
-                        )}
-                      </div>
-                    )}
-                    {draft.polishedReviewNotes && draft.polishedReviewNotes !== draft.reviewNotes && (
-                      <div className="mt-2 border-t border-amber-500/15 pt-1.5">
-                        <div className="flex items-center justify-between gap-1">
-                          <p className="text-[9px] font-medium text-amber-400/40">润色建议</p>
-                          <ActionIconButton
-                            label="应用润色建议"
-                            onClick={() =>
-                              applyPolishedAiReviewNodeField(
-                                node.id,
-                                'reviewNotes',
-                                draft.polishedReviewNotes,
-                              )
-                            }
-                          >
-                            <Check className="h-3 w-3" />
-                          </ActionIconButton>
-                        </div>
-                        <p className="mt-0.5 text-[11px] leading-5 text-amber-200/50">
-                          {draft.polishedReviewNotes}
-                        </p>
-                      </div>
-                    )}
-                  </div>
-                  {draft.reviewNotes && editingNodeNotes !== node.id && (
-                    <div className="flex items-center gap-1">
-                      <ActionIconButton
-                        label={
-                          polishingField?.nodeId === node.id && polishingField.field === 'reviewNotes'
-                            ? '润色中…'
-                            : '润色结论'
-                        }
-                        disabled={!!polishingField}
-                        onClick={() => {
-                          void handlePolishText(node.id, 'reviewNotes', draft.reviewNotes, node.localPath);
-                        }}
-                      >
-                        {polishingField?.nodeId === node.id && polishingField.field === 'reviewNotes' ? (
-                          <RefreshCw className="h-3.5 w-3.5 animate-spin" />
-                        ) : (
-                          <Wand2 className="h-3.5 w-3.5" />
-                        )}
-                      </ActionIconButton>
-                      <ActionIconButton
-                        label={
-                          copiedNodeField?.id === node.id && copiedNodeField.field === 'notes'
-                            ? '已复制'
-                            : '复制结论'
-                        }
-                        onClick={() => {
-                          void navigator.clipboard.writeText(draft.reviewNotes).then(() => {
-                            setCopiedNodeField({ id: node.id, field: 'notes' });
-                            setTimeout(() => setCopiedNodeField(null), 2000);
-                          });
-                        }}
-                      >
-                        {copiedNodeField?.id === node.id && copiedNodeField.field === 'notes' ? (
-                          <Check className="h-3.5 w-3.5" />
-                        ) : (
-                          <Copy className="h-3.5 w-3.5" />
-                        )}
-                      </ActionIconButton>
-                    </div>
-                  )}
-                </div>
-              </div>
-            </div>
-          )}
-        </div>
-      );
+    type RoundGroup = {
+      groupKey: string;
+      modelRunId: string | null;
+      modelName: string;
+      localPath: string;
+      rounds: typeof allRounds;
+      latestRound: typeof allRounds[number] | null;
     };
+
+    // Build an ordered list of groups preserving first-seen insertion order
+    const groupMap = new Map<string, RoundGroup>();
+    for (const round of allRounds) {
+      const key = round.modelRunId ?? round.localPath ?? 'unlinked';
+      if (!groupMap.has(key)) {
+        groupMap.set(key, {
+          groupKey: key,
+          modelRunId: round.modelRunId,
+          modelName: round.modelName,
+          localPath: round.localPath,
+          rounds: [],
+          latestRound: null,
+        });
+      }
+      groupMap.get(key)!.rounds.push(round);
+    }
+    // Sort each group's rounds by roundNumber ASC and determine latestRound
+    const groups: RoundGroup[] = [];
+    for (const group of groupMap.values()) {
+      group.rounds.sort((a, b) => a.roundNumber - b.roundNumber);
+      group.latestRound = group.rounds[group.rounds.length - 1] ?? null;
+      groups.push(group);
+    }
+
+    // Stats derived from rounds
+    const roundPassCount = allRounds.filter((r) => r.status === 'pass').length;
+    const roundWarningCount = allRounds.filter((r) => r.status === 'warning').length;
+    const roundRunningCount = allRounds.filter((r) => r.status === 'running').length;
 
     return (
       <div className="h-full overflow-y-auto px-4 py-5 sm:px-6 lg:px-8">
         <div className="mx-auto max-w-5xl space-y-6 pb-6">
-          {/* 统计概况 */}
-          <div className="grid gap-3 md:grid-cols-4">
-            <InfoTile label="问题节点">
-              {String(nonRootTreeNodes.length > 0 ? nonRootTreeNodes.length : safeSelectedAiReviewNodes.length)}
-            </InfoTile>
-            <InfoTile label="复审通过">{String(aiReviewPassCount)}</InfoTile>
-            <InfoTile label="复审未过">{String(aiReviewWarningCount)}</InfoTile>
-            <InfoTile label="复审中">{String(aiReviewRunningCount)}</InfoTile>
-          </div>
-
-          {/* 原始任务提示词 - 顶层展示 */}
-          {topOriginalPrompt && (
-            <SectionBlock icon={Terminal} title="原始任务提示词" description="首轮审核所用的完整任务提示词。">
-              <AiReviewTextCard
-                title=""
-                value={topOriginalPrompt}
-                copyLabel="复制原始任务提示词"
-                tone="indigo"
-              />
-            </SectionBlock>
+          {/* 润色错误提示 */}
+          {polishError && (
+            <div className="rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-300">
+              {polishError}
+            </div>
           )}
 
-          {/* 复核树 */}
-          <SectionBlock
-            icon={CheckCircle2}
-            title="复核树"
-            description="首轮审核是组织者：发现多个问题时自动拆分为子节点，每个子节点可独立进行多轮复核。"
-          >
-            {aiReviewNodeError && (
-              <p className="mb-3 rounded-2xl border border-red-500/20 bg-red-500/10 px-3 py-2 text-sm text-red-200">
-                {aiReviewNodeError}
-              </p>
-            )}
-            {rootTreeNodes.length === 0 ? (
+          {/* 统计概况 */}
+          <div className="grid gap-3 md:grid-cols-4">
+            <InfoTile label="复审轮次">{String(allRounds.length)}</InfoTile>
+            <InfoTile label="复审通过">{String(roundPassCount)}</InfoTile>
+            <InfoTile label="复审未过">{String(roundWarningCount)}</InfoTile>
+            <InfoTile label="复审中">{String(roundRunningCount)}</InfoTile>
+          </div>
+
+          {/* 每个模型执行的复审轮次列表 */}
+          {groups.length === 0 ? (
+            <SectionBlock
+              icon={CheckCircle2}
+              title="线性复审"
+              description="每次复审以轮次记录，可持续迭代直到满意为止。"
+            >
               <div className="rounded-2xl border border-dashed border-stone-300 bg-stone-50 px-4 py-10 text-center text-sm text-stone-500 dark:border-zinc-800 dark:bg-zinc-900/20 dark:text-zinc-500">
-                还没有复核树。先在「执行概况」里发起一次首轮 AI 复核。
+                还没有复审记录。先在「执行概况」里对模型执行副本发起首轮 AI 复审。
               </div>
-            ) : (
-              <div className="space-y-5">
-                {rootTreeNodes.map((rootTreeNode) => {
-                  const rootNode = rootTreeNode.node;
-                  const rootReviewMeta =
-                    rootNode.status === 'none'
-                      ? null
-                      : reviewStatusPresentation(rootNode.status, Math.max(rootNode.runCount, 1));
-                  const rootLatestJob = latestAiReviewJobByNodeId.get(rootNode.id) ?? null;
-                  const descendants = getDescendants(rootNode.id);
+            </SectionBlock>
+          ) : (
+            groups.map((group) => {
+              const latestStatus = group.latestRound?.status ?? 'none';
+              const latestReviewMeta =
+                latestStatus === 'none'
+                  ? null
+                  : reviewStatusPresentation(latestStatus, group.latestRound?.roundNumber ?? 1);
 
-                  return (
-                    <div key={rootNode.id} className="space-y-2">
-                      {/* 首轮审核 organizer */}
-                      <div className="rounded-2xl border border-zinc-700/50 bg-zinc-900/60 px-4 py-3">
-                        <div className="flex flex-wrap items-center gap-2">
-                          <span className="text-xs font-semibold text-zinc-300">首轮审核</span>
-                          {rootReviewMeta ? (
-                            <span
-                              className={clsx(
-                                'inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold',
-                                rootReviewMeta.badgeCls,
+              // Draft key for next-round prompt textarea
+              const draftKey = group.groupKey;
+              // Pre-fill: use explicit state draft if the user has typed something,
+              // otherwise fall back to the latest round's nextPrompt
+              const nextPromptDraft =
+                nextRoundPromptDrafts[draftKey] !== undefined
+                  ? nextRoundPromptDrafts[draftKey]
+                  : (group.latestRound?.nextPrompt ?? '');
+
+              // Find matching ModelRunFromDB for the "启动首轮复审" fallback button
+              const matchingModelRun = safeSelectedModelRuns.find(
+                (r) => r.id === group.modelRunId,
+              ) ?? null;
+
+              return (
+                <div key={group.groupKey}>
+                <SectionBlock
+                  icon={CheckCircle2}
+                  title={group.modelName || group.localPath || '未知模型'}
+                  description={group.localPath || '未记录目录'}
+                  badge={
+                    latestReviewMeta ? (
+                      <span
+                        className={clsx(
+                          'inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-[10px] font-semibold',
+                          latestReviewMeta.badgeCls,
+                        )}
+                      >
+                        {latestReviewMeta.icon}
+                        {latestReviewMeta.label}
+                      </span>
+                    ) : (
+                      <WorkspaceBadge tone="neutral">未复审</WorkspaceBadge>
+                    )
+                  }
+                >
+                  {/* 轮次卡片列表 */}
+                  {group.rounds.length === 0 ? (
+                    <div className="rounded-2xl border border-dashed border-zinc-800 px-4 py-8 text-center text-sm text-zinc-500">
+                      暂无复审记录。
+                    </div>
+                  ) : (
+                    <div className="space-y-3">
+                      {group.rounds.map((round) => {
+                        const roundMeta =
+                          round.status === 'none'
+                            ? null
+                            : reviewStatusPresentation(round.status, round.roundNumber);
+                        const promptExpanded = expandedRoundPrompts.has(round.id);
+
+                        return (
+                          <div
+                            key={round.id}
+                            className="overflow-hidden rounded-xl border border-zinc-800/70 bg-zinc-900/40"
+                          >
+                            {/* 轮次头部 */}
+                            <div className="flex flex-wrap items-center gap-2 px-3.5 py-2.5">
+                              <span className="shrink-0 rounded-md bg-violet-500/15 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-violet-300">
+                                第 {round.roundNumber} 轮
+                              </span>
+                              {round.status === 'running' && (
+                                <RefreshCw className="h-3.5 w-3.5 animate-spin text-violet-300" />
                               )}
-                            >
-                              {rootReviewMeta.icon}
-                              {rootReviewMeta.label}
-                            </span>
-                          ) : (
-                            <WorkspaceBadge tone="neutral">未复审</WorkspaceBadge>
-                          )}
-                          {rootNode.runCount > 0 && (
-                            <WorkspaceBadge tone="blue">已执行 {rootNode.runCount} 次</WorkspaceBadge>
-                          )}
-                          {rootNode.modelRunId === null && (
-                            <WorkspaceBadge tone="warning">未关联模型</WorkspaceBadge>
-                          )}
-                        </div>
-                        <p className="mt-1 break-all text-xs text-zinc-500">
-                          {rootNode.localPath || '未记录目录'}
-                        </p>
-                        {rootLatestJob && (
-                          <p className="mt-0.5 text-xs text-zinc-600">
-                            最近复核：
-                            {formatAiReviewTimestamp(
-                              rootLatestJob.job.finishedAt ??
-                                rootLatestJob.job.startedAt ??
-                                rootLatestJob.job.createdAt,
-                            )}
-                          </p>
-                        )}
-                        {rootNode.reviewNotes?.trim() && (
-                          <div className="mt-3 border-t border-zinc-700/40 pt-3">
-                            <p className="text-[10px] font-semibold uppercase tracking-[0.22em] text-amber-300">
-                              首轮发现问题
-                            </p>
-                            <p className="mt-1.5 whitespace-pre-wrap text-xs leading-6 text-amber-100/80">
-                              {rootNode.reviewNotes}
-                            </p>
-                          </div>
-                        )}
-                      </div>
+                              {roundMeta ? (
+                                <span
+                                  className={clsx(
+                                    'inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold',
+                                    roundMeta.badgeCls,
+                                  )}
+                                >
+                                  {roundMeta.icon}
+                                  {roundMeta.label}
+                                </span>
+                              ) : (
+                                <WorkspaceBadge tone="neutral">进行中</WorkspaceBadge>
+                              )}
+                              {round.isCompleted !== null && (
+                                <AiReviewDecisionBadge label="是否完成" value={round.isCompleted} />
+                              )}
+                              {round.isSatisfied !== null && (
+                                <AiReviewDecisionBadge label="是否满意" value={round.isSatisfied} />
+                              )}
+                              <span className="ml-auto text-[10px] text-zinc-600">
+                                {formatAiReviewTimestamp(round.createdAt)}
+                              </span>
+                            </div>
 
-                      {/* 子问题列表 */}
-                      {descendants.length === 0 ? (
-                        rootNode.status === 'none' || rootNode.status === 'running' ? (
-                          <div className="rounded-2xl border border-dashed border-zinc-800 px-4 py-6 text-center text-sm text-zinc-500">
-                            首轮复核完成后，发现的问题会在这里自动展开。
+                            {/* 使用提示词 - 可展开 */}
+                            <div className="border-t border-zinc-800/40">
+                              <button
+                                type="button"
+                                className="flex w-full items-center gap-1.5 px-3.5 py-2 text-left transition hover:bg-zinc-800/30"
+                                onClick={() =>
+                                  setExpandedRoundPrompts((prev) => {
+                                    const next = new Set(prev);
+                                    if (next.has(round.id)) next.delete(round.id);
+                                    else next.add(round.id);
+                                    return next;
+                                  })
+                                }
+                              >
+                                {promptExpanded ? (
+                                  <ChevronDown className="h-3 w-3 shrink-0 text-zinc-500" />
+                                ) : (
+                                  <ChevronRight className="h-3 w-3 shrink-0 text-zinc-500" />
+                                )}
+                                <span className="text-[10px] font-medium text-zinc-500">使用提示词</span>
+                              </button>
+                              {promptExpanded && (
+                                <div className="px-3.5 pb-3">
+                                  <div className="rounded-lg border border-indigo-500/20 bg-indigo-500/8 px-3 py-2.5">
+                                    <p className="whitespace-pre-wrap text-xs leading-5 text-indigo-100/90">
+                                      {round.promptText || (
+                                        <span className="text-indigo-300/30">（无提示词）</span>
+                                      )}
+                                    </p>
+                                  </div>
+                                </div>
+                              )}
+                            </div>
+
+                            {/* 结论 */}
+                            {round.reviewNotes?.trim() && (
+                              <div className="border-t border-zinc-800/40 px-3.5 py-3">
+                                <div className="flex items-center gap-1.5">
+                                  <p className="text-[10px] font-medium text-amber-400/70">结论</p>
+                                  <CopyIconButton
+                                    value={polishedNotes[round.id] ?? round.reviewNotes}
+                                    label="复制结论"
+                                    className="rounded p-0.5 text-zinc-500 transition hover:bg-zinc-800/40 hover:text-zinc-300"
+                                    iconClassName="h-3 w-3"
+                                  />
+                                  <button
+                                    type="button"
+                                    disabled={polishingKeys.has(`notes-${round.id}`)}
+                                    onClick={() =>
+                                      void handlePolish(
+                                        `notes-${round.id}`,
+                                        round.reviewNotes,
+                                        (polished) => setPolishedNotes((prev) => ({ ...prev, [round.id]: polished })),
+                                        50,
+                                      )
+                                    }
+                                    title="润色"
+                                    className="rounded p-0.5 text-zinc-500 transition hover:bg-zinc-800/40 hover:text-zinc-300 disabled:opacity-40"
+                                  >
+                                    {polishingKeys.has(`notes-${round.id}`) ? (
+                                      <RefreshCw className="h-3 w-3 animate-spin" />
+                                    ) : (
+                                      <Wand2 className="h-3 w-3" />
+                                    )}
+                                  </button>
+                                  <button
+                                    type="button"
+                                    disabled={savingRoundNotes.has(round.id)}
+                                    onClick={() =>
+                                      void handleSaveRoundNotes(
+                                        round.id,
+                                        group.groupKey,
+                                        round.reviewNotes,
+                                        round.nextPrompt ?? '',
+                                      )
+                                    }
+                                    title="保存"
+                                    className="rounded p-0.5 text-zinc-500 transition hover:bg-zinc-800/40 hover:text-zinc-300 disabled:opacity-40"
+                                  >
+                                    {savingRoundNotes.has(round.id) ? (
+                                      <RefreshCw className="h-3 w-3 animate-spin" />
+                                    ) : (
+                                      <Check className="h-3 w-3" />
+                                    )}
+                                  </button>
+                                </div>
+                                {editingNoteId === round.id ? (
+                                  <div className="mt-1.5 space-y-1.5">
+                                    <textarea
+                                      autoFocus
+                                      rows={4}
+                                      value={editingNoteDraft}
+                                      onChange={(e) => setEditingNoteDraft(e.target.value)}
+                                      onKeyDown={(e) => {
+                                        if (e.key === 'Escape') {
+                                          setEditingNoteId(null);
+                                        }
+                                      }}
+                                      className="w-full resize-y rounded-lg border border-amber-500/30 bg-black/20 px-2.5 py-2 text-xs leading-5 text-amber-100/90 outline-none transition focus:border-amber-500/50 focus:ring-1 focus:ring-amber-500/20"
+                                    />
+                                    <div className="flex items-center gap-2">
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          const trimmed = editingNoteDraft.trim();
+                                          if (trimmed) {
+                                            setPolishedNotes((prev) => ({ ...prev, [round.id]: trimmed }));
+                                          }
+                                          setEditingNoteId(null);
+                                        }}
+                                        className="text-[10px] text-amber-400/70 hover:text-amber-300"
+                                      >
+                                        确认
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => setEditingNoteId(null)}
+                                        className="text-[10px] text-zinc-500 hover:text-zinc-300"
+                                      >
+                                        取消
+                                      </button>
+                                    </div>
+                                  </div>
+                                ) : (
+                                  <>
+                                    <p
+                                      title="双击编辑"
+                                      onDoubleClick={() => {
+                                        setEditingNoteId(round.id);
+                                        setEditingNoteDraft(polishedNotes[round.id] ?? round.reviewNotes ?? '');
+                                      }}
+                                      className="mt-1.5 cursor-text whitespace-pre-wrap text-xs leading-5 text-amber-100/80"
+                                    >
+                                      {polishedNotes[round.id] ?? round.reviewNotes}
+                                    </p>
+                                    {polishedNotes[round.id] && (
+                                      <button
+                                        type="button"
+                                        onClick={() => setPolishedNotes((prev) => {
+                                          const next = { ...prev };
+                                          delete next[round.id];
+                                          return next;
+                                        })}
+                                        className="mt-1 text-[10px] text-zinc-500 hover:text-zinc-300"
+                                      >
+                                        恢复原文
+                                      </button>
+                                    )}
+                                  </>
+                                )}
+                              </div>
+                            )}
+
+                            {/* 额外元信息 */}
+                            {(round.projectType || round.changeScope || round.keyLocations) && (
+                              <div className="border-t border-zinc-800/40 px-3.5 py-2.5 space-y-1.5">
+                                {(round.projectType || round.changeScope) && (
+                                  <div className="flex flex-wrap gap-1.5">
+                                    {round.projectType && (
+                                      <WorkspaceBadge tone="blue">{round.projectType}</WorkspaceBadge>
+                                    )}
+                                    {round.changeScope && (
+                                      <WorkspaceBadge tone="neutral">{round.changeScope}</WorkspaceBadge>
+                                    )}
+                                  </div>
+                                )}
+                                {round.keyLocations && (
+                                  <div className="rounded-lg border border-zinc-800/60 bg-black/15 px-2.5 py-1.5">
+                                    <p className="text-[10px] font-medium text-zinc-500">关键代码位置</p>
+                                    <p className="mt-0.5 break-all font-mono text-[11px] leading-5 text-zinc-400">
+                                      {round.keyLocations}
+                                    </p>
+                                  </div>
+                                )}
+                              </div>
+                            )}
                           </div>
+                        );
+                      })}
+                    </div>
+                  )}
+
+                  {/* 下一轮操作区 */}
+                  <div className="mt-4 space-y-2.5 rounded-xl border border-zinc-800/50 bg-zinc-900/30 px-3.5 py-3.5">
+                    <div className="flex items-center gap-1.5">
+                      <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-zinc-500">
+                        下一轮提示词
+                      </p>
+                      <CopyIconButton
+                        value={nextPromptDraft}
+                        label="复制提示词"
+                        className="rounded p-0.5 text-zinc-500 transition hover:bg-zinc-800/40 hover:text-zinc-300"
+                        iconClassName="h-3 w-3"
+                      />
+                      <button
+                        type="button"
+                        disabled={!nextPromptDraft.trim() || polishingKeys.has(`draft-${draftKey}`)}
+                        onClick={() =>
+                          void handlePolish(
+                            `draft-${draftKey}`,
+                            nextPromptDraft,
+                            (polished) => setNextRoundPromptDrafts((prev) => ({ ...prev, [draftKey]: polished })),
+                          )
+                        }
+                        title="润色"
+                        className="rounded p-0.5 text-zinc-500 transition hover:bg-zinc-800/40 hover:text-zinc-300 disabled:opacity-40"
+                      >
+                        {polishingKeys.has(`draft-${draftKey}`) ? (
+                          <RefreshCw className="h-3 w-3 animate-spin" />
                         ) : (
-                          <div className="rounded-2xl border border-dashed border-emerald-800/40 bg-emerald-900/10 px-4 py-6 text-center text-sm text-emerald-400">
-                            首轮审核通过，未发现需修复的子问题。
-                          </div>
-                        )
-                      ) : (
-                        <div className="space-y-2 pl-2">
-                          {descendants.map((treeNode, idx) => renderNodeCard(treeNode, 2, idx + 1))}
-                        </div>
+                          <Wand2 className="h-3 w-3" />
+                        )}
+                      </button>
+                      {group.latestRound && (
+                        <button
+                          type="button"
+                          disabled={savingRoundNotes.has(group.latestRound.id)}
+                          onClick={() =>
+                            void handleSaveRoundNotes(
+                              group.latestRound!.id,
+                              group.groupKey,
+                              group.latestRound!.reviewNotes ?? '',
+                              group.latestRound!.nextPrompt ?? '',
+                            )
+                          }
+                          title="保存下一轮提示词"
+                          className="rounded p-0.5 text-zinc-500 transition hover:bg-zinc-800/40 hover:text-zinc-300 disabled:opacity-40"
+                        >
+                          {savingRoundNotes.has(group.latestRound.id) ? (
+                            <RefreshCw className="h-3 w-3 animate-spin" />
+                          ) : (
+                            <Check className="h-3 w-3" />
+                          )}
+                        </button>
                       )}
                     </div>
-                  );
-                })}
-              </div>
-            )}
-          </SectionBlock>
+                    <textarea
+                      rows={3}
+                      value={nextPromptDraft}
+                      onChange={(e) =>
+                        setNextRoundPromptDrafts((prev) => ({
+                          ...prev,
+                          [draftKey]: e.target.value,
+                        }))
+                      }
+                      placeholder={
+                        group.rounds.length === 0
+                          ? '填写首轮复审提示词（留空则使用默认提示词）'
+                          : '填写下一轮复审要追加的提示词，留空则沿用上一轮建议…'
+                      }
+                      className="w-full resize-y rounded-lg border border-zinc-700/60 bg-black/20 px-2.5 py-2 text-xs leading-5 text-zinc-200 outline-none transition focus:border-indigo-500/50 focus:ring-1 focus:ring-indigo-500/30 placeholder:text-zinc-600"
+                    />
+                    {group.rounds.length === 0 && matchingModelRun && onAiReview ? (
+                      // No rounds yet — show "启动首轮复审" via the existing onAiReview prop
+                      <button
+                        type="button"
+                        disabled={!group.localPath || latestStatus === 'running'}
+                        onClick={() => {
+                          onAiReview(matchingModelRun);
+                        }}
+                        className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-violet-500/25 bg-violet-500/10 px-3 py-1.5 text-xs font-medium text-violet-200 transition hover:bg-violet-500/15 disabled:cursor-not-allowed disabled:opacity-40"
+                      >
+                        <span className="flex h-4 w-4 items-center justify-center rounded border border-violet-500/20 bg-violet-500/10 text-[9px] font-semibold text-violet-300">
+                          AI
+                        </span>
+                        启动首轮复审
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        disabled={
+                          !onSubmitNextAiReviewRound ||
+                          !group.localPath ||
+                          latestStatus === 'running'
+                        }
+                        onClick={() => {
+                          if (!onSubmitNextAiReviewRound || !group.modelRunId) return;
+                          void onSubmitNextAiReviewRound(
+                            group.modelRunId,
+                            group.modelName,
+                            group.localPath,
+                            nextPromptDraft.trim() || undefined,
+                          );
+                        }}
+                        className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-violet-500/25 bg-violet-500/10 px-3 py-1.5 text-xs font-medium text-violet-200 transition hover:bg-violet-500/15 disabled:cursor-not-allowed disabled:opacity-40"
+                      >
+                        {latestStatus === 'running' ? (
+                          <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                        ) : (
+                          <span className="flex h-4 w-4 items-center justify-center rounded border border-violet-500/20 bg-violet-500/10 text-[9px] font-semibold text-violet-300">
+                            AI
+                          </span>
+                        )}
+                        {latestStatus === 'running'
+                          ? '复审中…'
+                          : group.rounds.length === 0
+                          ? '启动首轮复审'
+                          : '启动下一轮复审'}
+                      </button>
+                    )}
+                  </div>
+                </SectionBlock>
+                </div>
+              );
+            })
+          )}
         </div>
       </div>
     );
@@ -2819,8 +2601,9 @@ function parseAiReviewPayload(raw: string | null | undefined): AiReviewPayload |
   }
   try {
     const parsed = JSON.parse(text) as Partial<AiReviewPayload>;
+    const anyParsed = parsed as Record<string, unknown>;
     return {
-      reviewNodeId: typeof parsed.reviewNodeId === 'string' ? parsed.reviewNodeId : null,
+      reviewRoundId: typeof anyParsed.reviewRoundId === 'string' ? anyParsed.reviewRoundId : (typeof anyParsed.reviewNodeId === 'string' ? anyParsed.reviewNodeId : null),
       modelRunId: parsed.modelRunId ?? null,
       modelName: typeof parsed.modelName === 'string' ? parsed.modelName : '',
       localPath: typeof parsed.localPath === 'string' ? parsed.localPath : '',
@@ -2843,8 +2626,9 @@ function parseAiReviewResult(raw: string | null | undefined): AiReviewResult | n
     ) {
       return null;
     }
+    const anyResult = parsed as Record<string, unknown>;
     return {
-      reviewNodeId: typeof parsed.reviewNodeId === 'string' ? parsed.reviewNodeId : '',
+      reviewRoundId: typeof anyResult.reviewRoundId === 'string' ? anyResult.reviewRoundId : (typeof anyResult.reviewNodeId === 'string' ? anyResult.reviewNodeId : ''),
       modelRunId: typeof parsed.modelRunId === 'string' ? parsed.modelRunId : '',
       modelName: parsed.modelName,
       reviewStatus: parsed.reviewStatus,
@@ -2856,20 +2640,6 @@ function parseAiReviewResult(raw: string | null | undefined): AiReviewResult | n
       projectType: typeof parsed.projectType === 'string' ? parsed.projectType : undefined,
       changeScope: typeof parsed.changeScope === 'string' ? parsed.changeScope : undefined,
       keyLocations: typeof parsed.keyLocations === 'string' ? parsed.keyLocations : undefined,
-      issues: Array.isArray(parsed.issues)
-        ? parsed.issues
-            .map((issue) => {
-              const candidate = issue as unknown as Record<string, unknown>;
-              return {
-                title: typeof candidate.title === 'string' ? candidate.title : '',
-                issueType: typeof candidate.issueType === 'string' ? candidate.issueType : '',
-                reviewNotes: typeof candidate.reviewNotes === 'string' ? candidate.reviewNotes : '',
-                nextPrompt: typeof candidate.nextPrompt === 'string' ? candidate.nextPrompt : '',
-                keyLocations: typeof candidate.keyLocations === 'string' ? candidate.keyLocations : '',
-              };
-            })
-            .filter((issue) => issue.title || issue.reviewNotes || issue.nextPrompt)
-        : undefined,
     };
   } catch {
     return null;
@@ -2894,22 +2664,6 @@ function extractAiReviewDetailsFromResult(
   return hasAiReviewDetails(details) ? details : null;
 }
 
-function extractAiReviewDetailsFromNode(
-  node: AiReviewNodeFromDB | null | undefined,
-): AiReviewStructuredDetails | null {
-  if (!node) {
-    return null;
-  }
-  const details: AiReviewStructuredDetails = {
-    isCompleted: typeof node.isCompleted === 'boolean' ? node.isCompleted : null,
-    isSatisfied: typeof node.isSatisfied === 'boolean' ? node.isSatisfied : null,
-    projectType: trimToNull(node.projectType),
-    changeScope: trimToNull(node.changeScope),
-    keyLocations: trimToNull(node.keyLocations),
-  };
-  return hasAiReviewDetails(details) ? details : null;
-}
-
 function parseAiReviewProgressDetails(
   raw: string | null | undefined,
 ): AiReviewStructuredDetails | null {
@@ -2926,7 +2680,7 @@ function parseAiReviewProgressDetails(
   try {
     const parsed = JSON.parse(text.slice(jsonStart)) as Partial<AiReviewResult>;
     return extractAiReviewDetailsFromResult({
-      reviewNodeId: typeof parsed.reviewNodeId === 'string' ? parsed.reviewNodeId : '',
+      reviewRoundId: typeof parsed.reviewRoundId === 'string' ? parsed.reviewRoundId : '',
       modelRunId: typeof parsed.modelRunId === 'string' ? parsed.modelRunId : '',
       modelName: typeof parsed.modelName === 'string' ? parsed.modelName : '',
       reviewStatus: parsed.reviewStatus === 'pass' || parsed.reviewStatus === 'warning' ? parsed.reviewStatus : 'warning',
@@ -2938,7 +2692,6 @@ function parseAiReviewProgressDetails(
       projectType: typeof parsed.projectType === 'string' ? parsed.projectType : undefined,
       changeScope: typeof parsed.changeScope === 'string' ? parsed.changeScope : undefined,
       keyLocations: typeof parsed.keyLocations === 'string' ? parsed.keyLocations : undefined,
-      issues: undefined,
     });
   } catch {
     return null;
@@ -2961,55 +2714,6 @@ function meaningfulAiReviewText(value: string | null | undefined) {
     return null;
   }
   return trimmed;
-}
-
-function hasAiReviewNodeDraftChanges(
-  node: AiReviewNodeFromDB,
-  draft: AiReviewNodeDraft,
-) {
-  return (
-    draft.title.trim() !== (node.title ?? '').trim() ||
-    draft.issueType.trim() !== (node.issueType ?? '').trim() ||
-    draft.promptText.trim() !== (node.promptText ?? '').trim() ||
-    draft.reviewNotes.trim() !== (node.reviewNotes ?? '').trim()
-  );
-}
-
-function buildAiReviewTreeNodes(nodes: AiReviewNodeFromDB[]) {
-  if (nodes.length === 0) {
-    return [] as Array<{ node: AiReviewNodeFromDB; depth: number; serial: number }>;
-  }
-
-  const childrenByParent = new Map<string | null, AiReviewNodeFromDB[]>();
-  nodes.forEach((node) => {
-    const key = node.parentId ?? null;
-    const current = childrenByParent.get(key) ?? [];
-    current.push(node);
-    childrenByParent.set(key, current);
-  });
-  childrenByParent.forEach((value) => {
-    value.sort((a, b) => {
-      if (a.level !== b.level) {
-        return a.level - b.level;
-      }
-      if (a.sequence !== b.sequence) {
-        return a.sequence - b.sequence;
-      }
-      return (a.createdAt ?? 0) - (b.createdAt ?? 0);
-    });
-  });
-
-  const result: Array<{ node: AiReviewNodeFromDB; depth: number; serial: number }> = [];
-  let serial = 1;
-  const walk = (parentId: string | null, depth: number) => {
-    (childrenByParent.get(parentId) ?? []).forEach((node) => {
-      result.push({ node, depth, serial });
-      serial += 1;
-      walk(node.id, depth + 1);
-    });
-  };
-  walk(null, 1);
-  return result;
 }
 
 function buildAiReviewKey(modelRunId: string | null | undefined, localPath: string | null | undefined) {

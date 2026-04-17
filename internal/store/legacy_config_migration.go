@@ -7,6 +7,8 @@ import (
 	"log/slog"
 	"strings"
 	"time"
+
+	"github.com/blueship581/pinru/internal/errs"
 )
 
 const (
@@ -149,7 +151,7 @@ func (s *Store) migrateLegacyProjects(defaultSubmitRepoFallback string) error {
 			now,
 			now,
 		); err != nil {
-			return fmt.Errorf("migrate legacy project %s: %w", projectID, err)
+			return fmt.Errorf(errs.FmtStoreLegacyMigrate, projectID, err)
 		}
 	}
 
@@ -225,7 +227,7 @@ func (s *Store) migrateLegacyGitHubAccounts(raw string) error {
 			now,
 			now,
 		); err != nil {
-			return fmt.Errorf("migrate legacy github account %s: %w", accountID, err)
+			return fmt.Errorf(errs.FmtStoreLegacyMigrateGH, accountID, err)
 		}
 	}
 
@@ -316,7 +318,7 @@ func (s *Store) migrateLegacyLLMProviders() error {
 			now,
 			now,
 		); err != nil {
-			return fmt.Errorf("migrate legacy llm provider %s: %w", providerID, err)
+			return fmt.Errorf(errs.FmtStoreLegacyMigrateLLM, providerID, err)
 		}
 	}
 

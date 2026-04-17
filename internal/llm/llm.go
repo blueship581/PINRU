@@ -3,6 +3,7 @@ package llm
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/blueship581/pinru/internal/errs"
 	"github.com/blueship581/pinru/internal/util"
 )
 
@@ -52,7 +54,7 @@ func thinkingBudgetTokens(budget string) int {
 
 func BuildProvider(cfg Config) (Provider, error) {
 	if !IsACPProvider(cfg.ProviderType) && strings.TrimSpace(cfg.APIKey) == "" {
-		return nil, fmt.Errorf("API Key 不能为空")
+		return nil, errors.New(errs.MsgAPIKeyRequired)
 	}
 	switch cfg.ProviderType {
 	case "openai_compatible":
@@ -72,7 +74,7 @@ func BuildProvider(cfg Config) (Provider, error) {
 	case "codex_acp":
 		return &codexACPProvider{cfg: cfg}, nil
 	default:
-		return nil, fmt.Errorf("unknown provider type: %s", cfg.ProviderType)
+		return nil, fmt.Errorf(errs.FmtUnknownProviderType, cfg.ProviderType)
 	}
 }
 
@@ -219,23 +221,23 @@ func checkLLMResponse(resp *http.Response) error {
 	if len(msg) > 320 {
 		msg = msg[:320] + "..."
 	}
-	return fmt.Errorf("模型请求失败（%d）: %s", resp.StatusCode, strings.TrimSpace(msg))
+	return fmt.Errorf(errs.FmtLLMRequestFail, resp.StatusCode, strings.TrimSpace(msg))
 }
 
 func extractOpenAIText(resp *http.Response) (string, error) {
 	var result map[string]interface{}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return "", fmt.Errorf("解析模型响应失败: %w", err)
+		return "", fmt.Errorf(errs.FmtLLMParseResponseFail, err)
 	}
 	choices, _ := result["choices"].([]interface{})
 	if len(choices) == 0 {
-		return "", fmt.Errorf("OpenAI 兼容模型未返回可用的文本内容")
+		return "", errors.New(errs.MsgOpenAINoTextContent)
 	}
 	choice, _ := choices[0].(map[string]interface{})
 	msg, _ := choice["message"].(map[string]interface{})
 	content, _ := msg["content"].(string)
 	if strings.TrimSpace(content) == "" {
-		return "", fmt.Errorf("OpenAI 兼容模型未返回可用的文本内容")
+		return "", errors.New(errs.MsgOpenAINoTextContent)
 	}
 	return strings.TrimSpace(content), nil
 }
@@ -243,7 +245,7 @@ func extractOpenAIText(resp *http.Response) (string, error) {
 func extractAnthropicText(resp *http.Response) (string, error) {
 	var result map[string]interface{}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return "", fmt.Errorf("解析模型响应失败: %w", err)
+		return "", fmt.Errorf(errs.FmtLLMParseResponseFail, err)
 	}
 	contentArr, _ := result["content"].([]interface{})
 	var texts []string
@@ -254,7 +256,7 @@ func extractAnthropicText(resp *http.Response) (string, error) {
 		}
 	}
 	if len(texts) == 0 {
-		return "", fmt.Errorf("Anthropic 模型未返回可用的文本内容")
+		return "", errors.New(errs.MsgAnthropicNoTextContent)
 	}
 	return strings.Join(texts, "\n\n"), nil
 }
@@ -272,7 +274,7 @@ func (p *claudeCodeACPProvider) TestConnection() error {
 	// 先检查 CLI 是否安装（支持打包应用的受限 PATH 环境）
 	claudePath, err := util.ResolveCLI("claude")
 	if err != nil {
-		return fmt.Errorf("Claude Code CLI 未安装，请执行: npm install -g @anthropic-ai/claude-code")
+		return errors.New(errs.MsgClaudeCodeCliNotInstalled)
 	}
 
 	// 真实发一次 API 请求，验证 ACP 代理可达且有可用账号
@@ -295,20 +297,20 @@ func (p *claudeCodeACPProvider) TestConnection() error {
 	select {
 	case <-timer.C:
 		_ = cmd.Process.Kill()
-		return fmt.Errorf("Claude Code ACP 连接超时（60s），请检查网络或 ACP 配置")
+		return errors.New(errs.MsgClaudeCodeAcpTimeout)
 	case r := <-ch:
 		output := strings.TrimSpace(string(r.out))
 		if r.err != nil {
 			if strings.Contains(output, "No available accounts") || strings.Contains(output, "no available accounts") {
-				return fmt.Errorf("ACP 账号池暂时耗尽（503），请稍后重试")
+				return errors.New(errs.MsgClaudeCodeAcpBusyShort)
 			}
 			if strings.Contains(output, "模型配置不存在") {
-				return fmt.Errorf("ACP 代理不支持当前模型，请检查 ACP 配置")
+				return errors.New(errs.MsgClaudeCodeAcpUnsupport)
 			}
 			if output != "" {
-				return fmt.Errorf("Claude Code ACP 调用失败: %s", output)
+				return fmt.Errorf(errs.FmtClaudeCodeAcpFail, output)
 			}
-			return fmt.Errorf("Claude Code ACP 调用失败: %v", r.err)
+			return fmt.Errorf(errs.FmtClaudeCodeAcpFailErr, r.err)
 		}
 		return nil
 	}
@@ -317,7 +319,7 @@ func (p *claudeCodeACPProvider) TestConnection() error {
 func (p *claudeCodeACPProvider) Generate(systemPrompt, userPrompt string) (string, error) {
 	claudePath, err := util.ResolveCLI("claude")
 	if err != nil {
-		return "", fmt.Errorf("Claude Code CLI 未安装，请执行: npm install -g @anthropic-ai/claude-code")
+		return "", errors.New(errs.MsgClaudeCodeCliNotInstalled)
 	}
 	prompt := systemPrompt + "\n\n" + userPrompt
 	args := []string{"--print", "--model", p.cfg.Model, prompt}
@@ -326,13 +328,13 @@ func (p *claudeCodeACPProvider) Generate(systemPrompt, userPrompt string) (strin
 	out, err := cmd.Output()
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
-			return "", fmt.Errorf("Claude Code CLI 调用失败: %s", strings.TrimSpace(string(exitErr.Stderr)))
+			return "", fmt.Errorf(errs.FmtClaudeCodeCliFailStderr, strings.TrimSpace(string(exitErr.Stderr)))
 		}
-		return "", fmt.Errorf("Claude Code CLI 调用失败: %w", err)
+		return "", fmt.Errorf(errs.FmtClaudeCodeCliFailErr, err)
 	}
 	result := strings.TrimSpace(string(out))
 	if result == "" {
-		return "", fmt.Errorf("Claude Code CLI 未返回可用内容")
+		return "", errors.New(errs.MsgClaudeCodeCliNoContent)
 	}
 	return result, nil
 }
@@ -349,11 +351,11 @@ func (p *codexACPProvider) Model() string { return p.cfg.Model }
 func (p *codexACPProvider) TestConnection() error {
 	codexPath, err := util.ResolveCLI("codex")
 	if err != nil {
-		return fmt.Errorf("Codex CLI 未安装或不可用: %v", err)
+		return fmt.Errorf(errs.FmtCodexCliUnavailable, err)
 	}
 	cmd := exec.Command(codexPath, "--version")
 	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("Codex CLI 未安装或不可用: %v", strings.TrimSpace(string(out)))
+		return fmt.Errorf(errs.FmtCodexCliUnavailableOut, strings.TrimSpace(string(out)))
 	}
 	return nil
 }
@@ -361,7 +363,7 @@ func (p *codexACPProvider) TestConnection() error {
 func (p *codexACPProvider) Generate(systemPrompt, userPrompt string) (string, error) {
 	codexPath, err := util.ResolveCLI("codex")
 	if err != nil {
-		return "", fmt.Errorf("Codex CLI 未安装，请先安装后重试")
+		return "", errors.New(errs.MsgCodexCliNotInstalled)
 	}
 	prompt := systemPrompt + "\n\n" + userPrompt
 	args := []string{"--quiet", "--model", p.cfg.Model, prompt}
@@ -369,13 +371,13 @@ func (p *codexACPProvider) Generate(systemPrompt, userPrompt string) (string, er
 	out, err := cmd.Output()
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
-			return "", fmt.Errorf("Codex CLI 调用失败: %s", strings.TrimSpace(string(exitErr.Stderr)))
+			return "", fmt.Errorf(errs.FmtCodexCliFailStderr, strings.TrimSpace(string(exitErr.Stderr)))
 		}
-		return "", fmt.Errorf("Codex CLI 调用失败: %w", err)
+		return "", fmt.Errorf(errs.FmtCodexCliFailErr, err)
 	}
 	result := strings.TrimSpace(string(out))
 	if result == "" {
-		return "", fmt.Errorf("Codex CLI 未返回可用内容")
+		return "", errors.New(errs.MsgCodexCliNoContent)
 	}
 	return result, nil
 }

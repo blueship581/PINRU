@@ -27,12 +27,12 @@ import {
 import { testLlmProvider, type LlmProviderConfig } from '../../api/llm';
 import {
   flashStatus,
-  formatErrorMessage,
   isAcpProvider,
   normalizeGitHubAccounts,
   normalizeProviders,
   validateGitLabSettings,
 } from './utils/settingsUtils';
+import { toErrorMessage as formatErrorMessage } from '../../shared/lib/errorMessage';
 import {
   DataManagementPanel,
   EMPTY_GITHUB_FORM,

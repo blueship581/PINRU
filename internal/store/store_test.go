@@ -153,8 +153,38 @@ func TestOpenRejectsMigrationChecksumMismatch(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected checksum mismatch error")
 	}
-	if !strings.Contains(err.Error(), "migration checksum mismatch") {
+	if !strings.Contains(err.Error(), "数据库迁移校验不一致") {
 		t.Fatalf("unexpected error = %v", err)
+	}
+}
+
+func TestOpenRejectsSQLSyntaxErrorMissingClosingParen(t *testing.T) {
+	brokenSQL := "CREATE TABLE broken_table (id TEXT PRIMARY KEY, name TEXT"
+
+	dbPath := filepath.Join(t.TempDir(), "pinru.db")
+	_, err := Open(dbPath, brokenSQL)
+	if err == nil {
+		t.Fatal("Open() should have failed on SQL syntax error, got nil")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "数据库迁移执行失败") {
+		t.Fatalf("error should mention migration exec, got: %v", msg)
+	}
+	if !strings.Contains(msg, "broken_table") {
+		t.Fatalf("error should contain the table name 'broken_table', got: %v", msg)
+	}
+}
+
+func TestOpenRejectsSQLSyntaxErrorMalformedCreateTable(t *testing.T) {
+	brokenSQL := "CREATE TABLE ;"
+
+	dbPath := filepath.Join(t.TempDir(), "pinru.db")
+	_, err := Open(dbPath, brokenSQL)
+	if err == nil {
+		t.Fatal("Open() should have failed on malformed SQL, got nil")
+	}
+	if !strings.Contains(err.Error(), "数据库迁移执行失败") {
+		t.Fatalf("error should mention migration exec, got: %v", err)
 	}
 }
 
@@ -760,8 +790,8 @@ func TestCreateProjectRejectsInvalidTaskTypePayload(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected CreateProject() to reject invalid task type payload")
 	}
-	if !strings.Contains(err.Error(), "invalid task type JSON") {
-		t.Fatalf("CreateProject() error = %v, want invalid task type JSON", err)
+	if !strings.Contains(err.Error(), "任务类型配置数据损坏") {
+		t.Fatalf("CreateProject() error = %v, want 任务类型配置数据损坏", err)
 	}
 }
 

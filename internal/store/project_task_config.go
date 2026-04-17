@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+
+	"github.com/blueship581/pinru/internal/errs"
 )
 
 type ProjectTaskConfig struct {
@@ -42,7 +44,7 @@ func parseTaskTypeList(raw string) ([]string, error) {
 	if strings.HasPrefix(trimmed, "[") {
 		var parsed []any
 		if err := json.Unmarshal([]byte(trimmed), &parsed); err != nil {
-			return nil, fmt.Errorf("invalid task type JSON: %w", err)
+			return nil, fmt.Errorf(errs.FmtStoreInvalidTaskTypeJSON, err)
 		}
 
 		taskTypes := make([]string, 0, len(parsed))

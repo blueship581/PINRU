@@ -470,6 +470,26 @@ func TestExecuteAiReviewIncrementsReviewRoundAcrossSubmissions(t *testing.T) {
 		t.Fatalf("UpdateModelRunReview() error = %v", err)
 	}
 
+	// Pre-create 2 completed rounds so the next round will be 3
+	modelRunIDPtr := "run-review-round"
+	now := time.Now().Unix()
+	for i := 1; i <= 2; i++ {
+		if err := testStore.CreateAiReviewRound(store.AiReviewRound{
+			ID:          fmt.Sprintf("round-pre-%d", i),
+			TaskID:      taskID,
+			ModelRunID:  &modelRunIDPtr,
+			LocalPath:   workDir,
+			ModelName:   "cotv21-pro",
+			RoundNumber: i,
+			Status:      "warning",
+			ReviewNotes: fmt.Sprintf("round %d notes", i),
+			CreatedAt:   now - int64(100-i),
+			UpdatedAt:   now - int64(100-i),
+		}); err != nil {
+			t.Fatalf("CreateAiReviewRound(%d) error = %v", i, err)
+		}
+	}
+
 	if err := testStore.CreateBackgroundJob(store.BackgroundJob{
 		ID:             "job-review-round",
 		JobType:        "ai_review",
@@ -600,8 +620,9 @@ func TestCancelJobRestoresPreviousAiReviewResult(t *testing.T) {
 		ProjectName:     "label-01849",
 		TaskType:        "Bug修复",
 	}
+	modelRunID := "run-cancel-review-restore"
 	modelRuns := []store.ModelRun{{
-		ID:           "run-cancel-review-restore",
+		ID:           modelRunID,
 		TaskID:       taskID,
 		ModelName:    "cotv21-pro",
 		LocalPath:    &workDir,
@@ -611,40 +632,54 @@ func TestCancelJobRestoresPreviousAiReviewResult(t *testing.T) {
 	if err := testStore.CreateTaskWithModelRuns(task, modelRuns); err != nil {
 		t.Fatalf("CreateTaskWithModelRuns() error = %v", err)
 	}
-	if err := testStore.UpdateModelRunReview("run-cancel-review-restore", "running", 3, nil); err != nil {
+	if err := testStore.UpdateModelRunReview(modelRunID, "running", 3, nil); err != nil {
 		t.Fatalf("UpdateModelRunReview() error = %v", err)
 	}
-	nodeID := "node-cancel-review-restore"
-	modelRunID := "run-cancel-review-restore"
-	if err := testStore.CreateAiReviewNode(store.AiReviewNode{
-		ID:          nodeID,
+
+	// Create a previous completed round (round 2)
+	now := time.Now().Unix()
+	prevNotes := "previous result"
+	if err := testStore.CreateAiReviewRound(store.AiReviewRound{
+		ID:          "round-prev-restore",
 		TaskID:      taskID,
 		ModelRunID:  &modelRunID,
-		RootID:      nodeID,
-		ModelName:   "cotv21-pro",
 		LocalPath:   workDir,
-		Title:       "首轮审核",
-		IssueType:   "Bug修复",
-		Level:       1,
-		Sequence:    1,
-		Status:      "running",
-		RunCount:    3,
-		LastJobID:   strPtr("job-review-running"),
-		IsActive:    true,
-		ReviewNotes: "running result",
+		ModelName:   "cotv21-pro",
+		RoundNumber: 2,
+		Status:      "warning",
+		ReviewNotes: prevNotes,
+		CreatedAt:   now - 100,
+		UpdatedAt:   now - 100,
 	}); err != nil {
-		t.Fatalf("CreateAiReviewNode() error = %v", err)
+		t.Fatalf("CreateAiReviewRound(prev) error = %v", err)
+	}
+
+	// Create the current running round (round 3)
+	roundID := "round-cancel-review-restore"
+	jobID := "job-review-running"
+	if err := testStore.CreateAiReviewRound(store.AiReviewRound{
+		ID:          roundID,
+		TaskID:      taskID,
+		ModelRunID:  &modelRunID,
+		LocalPath:   workDir,
+		ModelName:   "cotv21-pro",
+		RoundNumber: 3,
+		Status:      "running",
+		JobID:       &jobID,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}); err != nil {
+		t.Fatalf("CreateAiReviewRound(running) error = %v", err)
 	}
 
 	payloadJSON, err := json.Marshal(AiReviewPayload{
-		ReviewNodeID: strPtr(nodeID),
-		ModelRunID:   strPtr("run-cancel-review-restore"),
-		ModelName:    "cotv21-pro",
-		LocalPath:    workDir,
-		NodeSnapshot: &AiReviewNodeSnapshot{
-			Status:      "warning",
-			RunCount:    2,
-			ReviewNotes: "previous result",
+		ReviewRoundID: strPtr(roundID),
+		ModelRunID:    strPtr(modelRunID),
+		ModelName:     "cotv21-pro",
+		LocalPath:     workDir,
+		RoundSnapshot: &AiReviewRoundSnapshot{
+			Status:      "none",
+			RoundNumber: 3,
 		},
 	})
 	if err != nil {
@@ -652,7 +687,7 @@ func TestCancelJobRestoresPreviousAiReviewResult(t *testing.T) {
 	}
 	taskIDPtr := taskID
 	if err := testStore.CreateBackgroundJob(store.BackgroundJob{
-		ID:             "job-review-running",
+		ID:             jobID,
 		JobType:        "ai_review",
 		TaskID:         &taskIDPtr,
 		Status:         "running",
@@ -666,11 +701,11 @@ func TestCancelJobRestoresPreviousAiReviewResult(t *testing.T) {
 	}
 
 	jobSvc := &JobService{store: testStore, running: make(map[string]context.CancelFunc)}
-	if err := jobSvc.CancelJob("job-review-running"); err != nil {
+	if err := jobSvc.CancelJob(jobID); err != nil {
 		t.Fatalf("CancelJob() error = %v", err)
 	}
 
-	cancelledJob, err := testStore.GetBackgroundJob("job-review-running")
+	cancelledJob, err := testStore.GetBackgroundJob(jobID)
 	if err != nil {
 		t.Fatalf("GetBackgroundJob() error = %v", err)
 	}
@@ -678,7 +713,7 @@ func TestCancelJobRestoresPreviousAiReviewResult(t *testing.T) {
 		t.Fatalf("cancelled job status = %v, want cancelled", cancelledJob)
 	}
 
-	run, err := testStore.GetModelRunByID("run-cancel-review-restore")
+	run, err := testStore.GetModelRunByID(modelRunID)
 	if err != nil {
 		t.Fatalf("GetModelRunByID() error = %v", err)
 	}
@@ -691,22 +726,17 @@ func TestCancelJobRestoresPreviousAiReviewResult(t *testing.T) {
 	if run.ReviewRound != 2 {
 		t.Fatalf("ReviewRound = %d, want 2", run.ReviewRound)
 	}
-	if run.ReviewNotes == nil || *run.ReviewNotes != "previous result" {
-		t.Fatalf("ReviewNotes = %v, want previous result", run.ReviewNotes)
-	}
 
-	node, err := testStore.GetAiReviewNode(nodeID)
+	// Verify the running round was restored to none
+	round, err := testStore.GetAiReviewRound(roundID)
 	if err != nil {
-		t.Fatalf("GetAiReviewNode() error = %v", err)
+		t.Fatalf("GetAiReviewRound() error = %v", err)
 	}
-	if node == nil {
-		t.Fatalf("GetAiReviewNode() = nil")
+	if round == nil {
+		t.Fatalf("GetAiReviewRound() = nil")
 	}
-	if node.Status != "warning" {
-		t.Fatalf("node status = %q, want warning", node.Status)
-	}
-	if node.RunCount != 2 {
-		t.Fatalf("node run count = %d, want 2", node.RunCount)
+	if round.Status != "none" {
+		t.Fatalf("round status = %q, want none", round.Status)
 	}
 }
 
@@ -721,8 +751,9 @@ func TestCancelJobClearsAiReviewRunningStateWithoutHistory(t *testing.T) {
 		ProjectName:     "label-01849",
 		TaskType:        "Bug修复",
 	}
+	modelRunID := "run-cancel-review-clear"
 	modelRuns := []store.ModelRun{{
-		ID:           "run-cancel-review-clear",
+		ID:           modelRunID,
 		TaskID:       taskID,
 		ModelName:    "cotv21-pro",
 		LocalPath:    &workDir,
@@ -732,38 +763,37 @@ func TestCancelJobClearsAiReviewRunningStateWithoutHistory(t *testing.T) {
 	if err := testStore.CreateTaskWithModelRuns(task, modelRuns); err != nil {
 		t.Fatalf("CreateTaskWithModelRuns() error = %v", err)
 	}
-	if err := testStore.UpdateModelRunReview("run-cancel-review-clear", "running", 1, nil); err != nil {
+	if err := testStore.UpdateModelRunReview(modelRunID, "running", 1, nil); err != nil {
 		t.Fatalf("UpdateModelRunReview() error = %v", err)
 	}
-	nodeID := "node-cancel-review-clear"
-	modelRunID := "run-cancel-review-clear"
-	if err := testStore.CreateAiReviewNode(store.AiReviewNode{
-		ID:         nodeID,
-		TaskID:     taskID,
-		ModelRunID: &modelRunID,
-		RootID:     nodeID,
-		ModelName:  "cotv21-pro",
-		LocalPath:  workDir,
-		Title:      "首轮审核",
-		IssueType:  "Bug修复",
-		Level:      1,
-		Sequence:   1,
-		Status:     "running",
-		RunCount:   1,
-		LastJobID:  strPtr("job-review-clear"),
-		IsActive:   true,
+
+	// Create the first (and only) round in running state — no prior history
+	roundID := "round-cancel-review-clear"
+	jobID := "job-review-clear"
+	now := time.Now().Unix()
+	if err := testStore.CreateAiReviewRound(store.AiReviewRound{
+		ID:          roundID,
+		TaskID:      taskID,
+		ModelRunID:  &modelRunID,
+		LocalPath:   workDir,
+		ModelName:   "cotv21-pro",
+		RoundNumber: 1,
+		Status:      "running",
+		JobID:       &jobID,
+		CreatedAt:   now,
+		UpdatedAt:   now,
 	}); err != nil {
-		t.Fatalf("CreateAiReviewNode() error = %v", err)
+		t.Fatalf("CreateAiReviewRound() error = %v", err)
 	}
 
 	payloadJSON, err := json.Marshal(AiReviewPayload{
-		ReviewNodeID: strPtr(nodeID),
-		ModelRunID:   strPtr("run-cancel-review-clear"),
-		ModelName:    "cotv21-pro",
-		LocalPath:    workDir,
-		NodeSnapshot: &AiReviewNodeSnapshot{
-			Status:   "none",
-			RunCount: 0,
+		ReviewRoundID: strPtr(roundID),
+		ModelRunID:    strPtr(modelRunID),
+		ModelName:     "cotv21-pro",
+		LocalPath:     workDir,
+		RoundSnapshot: &AiReviewRoundSnapshot{
+			Status:      "none",
+			RoundNumber: 0,
 		},
 	})
 	if err != nil {
@@ -771,7 +801,7 @@ func TestCancelJobClearsAiReviewRunningStateWithoutHistory(t *testing.T) {
 	}
 	taskIDPtr := taskID
 	if err := testStore.CreateBackgroundJob(store.BackgroundJob{
-		ID:             "job-review-clear",
+		ID:             jobID,
 		JobType:        "ai_review",
 		TaskID:         &taskIDPtr,
 		Status:         "running",
@@ -785,11 +815,11 @@ func TestCancelJobClearsAiReviewRunningStateWithoutHistory(t *testing.T) {
 	}
 
 	jobSvc := &JobService{store: testStore, running: make(map[string]context.CancelFunc)}
-	if err := jobSvc.CancelJob("job-review-clear"); err != nil {
+	if err := jobSvc.CancelJob(jobID); err != nil {
 		t.Fatalf("CancelJob() error = %v", err)
 	}
 
-	run, err := testStore.GetModelRunByID("run-cancel-review-clear")
+	run, err := testStore.GetModelRunByID(modelRunID)
 	if err != nil {
 		t.Fatalf("GetModelRunByID() error = %v", err)
 	}
@@ -1040,115 +1070,6 @@ func TestDeleteAiReviewJobKeepsCurrentResultWhenDeletingOlderRecord(t *testing.T
 	}
 	if run.ReviewNotes == nil || *run.ReviewNotes != "keep latest" {
 		t.Fatalf("ReviewNotes = %v, want keep latest", run.ReviewNotes)
-	}
-}
-
-func TestSyncAiReviewNodeChildrenDeactivatesPreviousDescendants(t *testing.T) {
-	testStore := testutil.OpenTestStore(t)
-	rootNode := store.AiReviewNode{
-		ID:             "node-root-tree",
-		TaskID:         "task-tree",
-		ModelRunID:     strPtr("run-tree"),
-		RootID:         "node-root-tree",
-		ModelName:      "cotv21-pro",
-		LocalPath:      "/tmp/task-tree/cotv21-pro",
-		Title:          "首轮审核",
-		IssueType:      "Bug修复",
-		Level:          1,
-		Sequence:       1,
-		Status:         "warning",
-		RunCount:       1,
-		OriginalPrompt: "原始提示词",
-		PromptText:     "首轮提示词",
-		ReviewNotes:    "首轮存在多个问题",
-		IsActive:       true,
-	}
-	if err := testStore.CreateAiReviewNode(rootNode); err != nil {
-		t.Fatalf("CreateAiReviewNode(root) error = %v", err)
-	}
-
-	childID := "node-child-old"
-	if err := testStore.CreateAiReviewNode(store.AiReviewNode{
-		ID:                childID,
-		TaskID:            rootNode.TaskID,
-		ModelRunID:        rootNode.ModelRunID,
-		ParentID:          &rootNode.ID,
-		RootID:            rootNode.RootID,
-		ModelName:         rootNode.ModelName,
-		LocalPath:         rootNode.LocalPath,
-		Title:             "旧子问题",
-		IssueType:         "Bug修复",
-		Level:             2,
-		Sequence:          1,
-		Status:            "warning",
-		PromptText:        "旧子提示词",
-		ReviewNotes:       "旧子问题结论",
-		ParentReviewNotes: rootNode.ReviewNotes,
-		IsActive:          true,
-	}); err != nil {
-		t.Fatalf("CreateAiReviewNode(old child) error = %v", err)
-	}
-
-	if err := testStore.CreateAiReviewNode(store.AiReviewNode{
-		ID:                "node-grandchild-old",
-		TaskID:            rootNode.TaskID,
-		ModelRunID:        rootNode.ModelRunID,
-		ParentID:          &childID,
-		RootID:            rootNode.RootID,
-		ModelName:         rootNode.ModelName,
-		LocalPath:         rootNode.LocalPath,
-		Title:             "旧孙问题",
-		IssueType:         "Bug修复",
-		Level:             3,
-		Sequence:          1,
-		Status:            "warning",
-		PromptText:        "旧孙提示词",
-		ReviewNotes:       "旧孙问题结论",
-		ParentReviewNotes: "旧子问题结论",
-		IsActive:          true,
-	}); err != nil {
-		t.Fatalf("CreateAiReviewNode(old grandchild) error = %v", err)
-	}
-
-	jobSvc := New(testStore, nil, nil, nil, nil, nil)
-	if err := jobSvc.syncAiReviewNodeChildren(rootNode, &appcli.CodexReviewResult{
-		Issues: []appcli.CodexReviewIssue{
-			{
-				Title:       "新问题 1",
-				IssueType:   "Bug修复",
-				ReviewNotes: "新的子问题结论",
-				NextPrompt:  "新的子提示词",
-			},
-		},
-	}); err != nil {
-		t.Fatalf("syncAiReviewNodeChildren() error = %v", err)
-	}
-
-	oldChild, err := testStore.GetAiReviewNode(childID)
-	if err != nil {
-		t.Fatalf("GetAiReviewNode(old child) error = %v", err)
-	}
-	if oldChild == nil || oldChild.IsActive {
-		t.Fatalf("old child active state = %#v, want inactive", oldChild)
-	}
-
-	oldGrandchild, err := testStore.GetAiReviewNode("node-grandchild-old")
-	if err != nil {
-		t.Fatalf("GetAiReviewNode(old grandchild) error = %v", err)
-	}
-	if oldGrandchild == nil || oldGrandchild.IsActive {
-		t.Fatalf("old grandchild active state = %#v, want inactive", oldGrandchild)
-	}
-
-	activeNodes, err := testStore.ListAiReviewNodes(rootNode.TaskID)
-	if err != nil {
-		t.Fatalf("ListAiReviewNodes() error = %v", err)
-	}
-	if len(activeNodes) != 2 {
-		t.Fatalf("active node count = %d, want 2", len(activeNodes))
-	}
-	if activeNodes[1].ParentID == nil || *activeNodes[1].ParentID != rootNode.ID {
-		t.Fatalf("new child parent = %v, want %s", activeNodes[1].ParentID, rootNode.ID)
 	}
 }
 
