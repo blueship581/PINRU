@@ -7,12 +7,16 @@ var builtinSkills = map[string]string{
 	"评审项目提示词生成": skillPromptGen,
 }
 
-// skillPromptGen is SKILL.md for the 评审项目提示词生成 skill (v3.0).
+// skillPromptGen is SKILL.md for the 评审项目提示词生成 skill (v3.1).
 // v3.0 changes:
 //   - Added output format anchoring at the top (输出铁律) for stronger constraint
 //   - Step 3: changed from Agent sub-agents to direct Read for speed
 //   - Step 5: stronger output prohibition with fallback rules
 //   - Added ⛔ output prohibition section at the bottom
+// v3.1 changes:
+//   - Step 3: split read-depth by taskType; Bug 修复类不再受 2 文件上限
+//   - New Step 3.5: Bug 定位与复现路径确认（调用链通读 / 候选清单 / 优先级排序 / 可复现性强校验）
+//   - Step 5: 新增 Bug 修复类额外自检，防止"像 bug 但代码里不成立"的题目
 const skillPromptGen = `---
 name: 评审项目提示词生成
 description: 根据评审项目代码仓库自动生成评测提示词（未归类/Bug修复/代码生成/Feature迭代/代码理解/代码重构/工程化）
@@ -59,9 +63,37 @@ taskType / constraints / scope / notes（可选）
 1. 运行一次 find 获取目录结构：
 find . -maxdepth 3 -not -path '*/.git/*' -not -path '*/node_modules/*' -not -path '*/__pycache__/*' | sort
 
-2. 从目录结构判断最核心的 2 个业务文件，用 Read 工具顺序读取（不用 Agent 子代理）。
+2. 根据 taskType 决定读码深度：
+   - 非 Bug 修复类：从目录结构判断最核心的 2 个业务文件，Read 顺序读取。
+   - Bug 修复类：进入 Step 3.5，按调用链通读，不受 2 个文件上限限制。
 
-注意：Step 3 的所有分析结果仅供内部使用，不要在最终响应中输出任何分析内容。
+注意：Step 3 及 Step 3.5 的所有分析结果仅供内部使用，不要在最终响应中输出任何分析内容。
+
+### Step 3.5：Bug 定位与复现路径确认（仅 taskType = Bug 修复时执行）
+
+目标：**先在代码里找到真实存在的 bug，再翻译成用户语言**，而不是先想一个像 bug 的故事再套到项目上。
+
+1. 按"疑似 bug 关注点 → 相关调用链完整读完"的顺序读码：
+   - 先挑一个聚焦点（例如某个用户动作、某个表单、某个状态持久化）。
+   - 把该关注点涉及的**所有文件**都 Read 完整：入口视图/组件 + 相关 store/状态管理 + 相关 API 层 + 路由守卫/拦截器 + 涉及的后端处理（如果在仓内）。
+   - 禁止只读 1-2 个文件就下结论。跨文件交互（store 清理、路由守卫、全局拦截器）是 bug 高发区，必须看全。
+
+2. 产出内部 bug 候选清单（不输出），每个候选必须能填完以下四项：
+   - 触发路径：用户最少几步操作能触发（例如"输错密码 5 次 → 登出 → 刷新"）
+   - 涉及代码：文件名 + 行号 + 相关函数
+   - 根因：代码为什么会错
+   - 可观察现象：用户在 UI/接口返回上能直接看到什么异常
+
+3. 从候选里挑一条出题，**优先级排序**：
+   - 触发路径 ≤ 3 步用户操作
+   - 现象直观可见（UI 变化、报错、数据异常），不需要打开 devtools 才发现
+   - 不依赖特殊前置状态（session 过期、脏 localStorage、并发等）
+   - 如果所有候选都超过 3 步或依赖特殊前置状态 → 选最短那个，并且题目的"触发场景"必须把前置动作**逐步写全**，不得省略
+
+4. 可复现性强校验（内部自问，任一不通过则换 bug 或改写触发场景）：
+   - 新克隆仓库、干净环境下，按题目里写的步骤能不能看到题目里写的现象？
+   - 题目描述的"当前行为"是不是代码真实行为？（不是想当然的 bug 故事）
+   - 模型只读题目、不看我的分析，能不能按题目定位到同一块代码？
 
 ### Step 4：生成提示词
 
@@ -90,6 +122,11 @@ find . -maxdepth 3 -not -path '*/.git/*' -not -path '*/node_modules/*' -not -pat
 ### Step 5：自检、写入、结束
 
 **自检**（内部完成，不写进响应）：字数、技术标识、禁用词、读感。
+
+**Bug 修复类额外自检**（任一不通过必须重写）：
+- 题目里的"当前行为"是不是代码里真实存在的行为，而不是猜测？
+- 题目里的"触发场景"是不是最短复现步骤的 1:1 翻译，前置动作（登录、登出、过期、刷新、切页）写全了吗？
+- 被测模型按题目去代码里找，能不能定位到我在 Step 3.5 选定的那段代码？
 
 **写入**：用 Write 工具把提示词正文写入当前目录的 任务提示词.md。
 
