@@ -186,10 +186,9 @@ func PromptArtifactPath(workDir string) string {
 **背景：** 压缩由 System Prompt 规则要求 LLM 自检，若 LLM 未遵守则由调用方二次调用压缩专用 Prompt。
 
 **排查步骤：**
-1. 使用 `PromptBodyRuneCount(promptText)` 确认正文字数（空白字符不计入）。
-2. 使用 `SplitPromptSections` 分离正文与约束标签，只对正文部分计数。
-3. 手动调用 `BuildShortenSystemPrompt` + `BuildShortenUserPrompt` 发起压缩请求。
-4. 压缩后重新拼接约束标签，调用 `SaveTaskPrompt` 保存结果。
+1. 使用 `PromptBodyRuneCount(promptText)` 确认全文字数（空白字符不计入；兼容旧格式时排除约束标签行）。
+2. 手动调用 `BuildShortenSystemPrompt` + `BuildShortenUserPrompt` 发起压缩请求。
+3. 压缩后调用 `SaveTaskPrompt` 保存结果。
 
 ### 5.3 提示词提取失败
 

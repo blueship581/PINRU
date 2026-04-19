@@ -26,6 +26,7 @@ GeneratePromptRequest
         v
   [构建 Skill Prompt] buildSkillPrompt(req)
   格式: "/评审项目提示词生成 [PINRU]\ntaskType: ...\nconstraints: ...\nscope: ...\nnotes: ..."
+  注：constraints 仅作为方向参考传给 LLM，严禁在输出中使用"xx约束："标签格式
         |
         v
   [CLI Agent 执行] executeCliWithRetry (maxRetries=1)
@@ -196,7 +197,6 @@ func (s *PromptService) resolveProviderForTest(provider store.LLMProvider) (stor
 | rune 数 >= 12                 | +1   |
 | 包含汉字                       | +2   |
 | 包含 `。！？`                  | +2   |
-| 包含「约束」二字                | +1   |
 | 非空行数 2–6 行                | +2   |
 | 非空行数 = 1 行                | +1   |
 | 非空行数 > 8 行                | -1   |
@@ -213,15 +213,15 @@ func (s *PromptService) resolveProviderForTest(provider store.LLMProvider) (stor
 
 1. **只写业务需求，禁止写技术实现**：不能出现文件路径、类名、方法名、函数名、变量名、import 语句、package 名、数据库表名、字段名、API 路径的具体字符串；可以出现功能描述、业务场景、用户视角的操作描述。
 
-2. **禁止 Markdown 格式**：不能出现井号标题、双星粗体、代码块、有序或无序列表符号；输出必须是纯文本段落，可用换行分隔不同约束标签。
+2. **禁止 Markdown 格式**：不能出现井号标题、双星粗体、代码块、有序或无序列表符号；输出必须是纯文本段落。
 
-3. **简短直接**：正文描述控制在 2–4 句话内，清晰表达「用户遇到了什么问题」或「需要什么新功能」；正文部分总长度不得超过 80 个字（不含后续约束标签，空白字符不计入）；去掉所有铺垫语、客套语和废话。
+3. **简短直接**：正文描述控制在 2–4 句话内，清晰表达「用户遇到了什么问题」或「需要什么新功能」；全文总长度不得超过 80 个字（空白字符不计入）；去掉所有铺垫语、客套语和废话。
 
-4. **约束标签格式（若有）**：每个约束标签另起一行，格式为 `<标签名称>：<具体要求>`；约束要求也必须用业务语言表达，不能出现技术标识符；若无约束，则结尾不加任何约束行。
+4. **约束要求必须融入正文**：所有约束要求（技术栈、架构、代码风格、业务规则等）必须作为正文的自然组成部分写出，和需求描述合在同一段里；严禁将约束单独分段、分行或加任何前缀标签；严禁出现"xx约束：""xx约束:""xx要求："等"标签名称：内容"形式的分类标头；最终输出应该是一整段连贯的文字，像真实开发者在聊天窗口里一口气说完的需求；若无约束，则不要为了凑字数而添加约束相关的句子。
 
 5. **口语化、自然**：读起来要像真实开发者或产品经理发出的任务描述；去除 AI 写作惯用的刻板措辞。
 
-6. **输出前自检**：如果正文部分超过 80 个字，先自行压缩语言，再输出最终版本。
+6. **输出前自检**：如果全文超过 80 个字，先自行压缩语言，再输出最终版本。
 
 ---
 
@@ -231,16 +231,16 @@ func (s *PromptService) resolveProviderForTest(provider store.LLMProvider) (stor
 
 `PromptBodyExceedsLimit(promptText string) bool` 返回 `true`，即：
 - `PromptBodyRuneCount` > `MaxPromptBodyRunes`（80）
-- 计算时排除空白字符、约束标签行（以「技术栈约束：/架构约束：/代码规范约束：/非代码回复约束：/业务逻辑约束：」开头的行）
+- 计算时排除空白字符；兼容旧格式时排除约束标签行
 
 ### 实现
 
 压缩由独立调用 LLM 完成，使用专用 System/User Prompt：
 
-- `BuildShortenSystemPrompt(limit int)`：角色设定为「中文产品需求文案编辑」，指定字数上限，要求不改业务含义、不引入技术实现、不增加约束标签，只输出精炼后的正文。
-- `BuildShortenUserPrompt(body string, limit int)`：传入正文原文和上限，要求保留业务场景、问题现象和目标结果。
+- `BuildShortenSystemPrompt(limit int)`：角色设定为「中文产品需求文案编辑」，指定字数上限，要求不改业务含义、不引入技术实现，所有约束融入正文，只输出精炼后的文字。
+- `BuildShortenUserPrompt(body string, limit int)`：传入原文和上限，要求保留业务场景、问题现象和目标结果，所有内容合在一段里。
 
-`SplitPromptSections(promptText string)` 用于在压缩前分离正文与约束标签，压缩完成后重新拼接。
+`SplitPromptSections(promptText string)` 保留用于向后兼容旧格式提示词（含约束标签行的），新生成的提示词不再有独立约束行。
 
 ---
 

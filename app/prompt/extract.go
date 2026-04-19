@@ -511,10 +511,6 @@ func PromptCandidateScore(text string) int {
 	if strings.ContainsAny(trimmed, "。！？") {
 		score += 2
 	}
-	if strings.Contains(trimmed, "约束") {
-		score += 1
-	}
-
 	nonEmptyLines := 0
 	for _, line := range strings.Split(trimmed, "\n") {
 		if strings.TrimSpace(line) != "" {
