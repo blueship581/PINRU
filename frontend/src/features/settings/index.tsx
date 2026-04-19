@@ -65,6 +65,7 @@ export default function Settings() {
   const [gitlabToken, setGitlabToken] = useState('');
   const [gitlabUsername, setGitlabUsername] = useState('');
   const [gitlabHasToken, setGitlabHasToken] = useState(false);
+  const [gitlabSkipTlsVerify, setGitlabSkipTlsVerify] = useState(false);
   const [githubAccounts, setGithubAccounts] = useState<GitHubAccountConfig[]>([]);
   const [llmProviders, setLlmProviders] = useState<LlmProviderConfig[]>([]);
 
@@ -115,6 +116,7 @@ export default function Settings() {
         setGitlabToken('');
         setGitlabUsername(settings.username ?? '');
         setGitlabHasToken(settings.hasToken);
+        setGitlabSkipTlsVerify(settings.skipTlsVerify ?? false);
         setGitlabLoadError('');
       } catch (error) {
         if (cancelled) return;
@@ -190,7 +192,12 @@ export default function Settings() {
     setSavingGitlab(true);
     setGitlabError('');
     try {
-      await saveGitLabSettings(gitlabUrl.trim(), gitlabUsername.trim(), gitlabToken.trim());
+      await saveGitLabSettings(
+        gitlabUrl.trim(),
+        gitlabUsername.trim(),
+        gitlabToken.trim(),
+        gitlabSkipTlsVerify,
+      );
       setGitlabHasToken(gitlabHasToken || gitlabToken.trim().length > 0);
       setGitlabToken('');
       flashStatus(setGitlabSaveStatus, 'saved');
@@ -200,7 +207,7 @@ export default function Settings() {
     } finally {
       setSavingGitlab(false);
     }
-  }, [gitlabHasToken, gitlabUrl, gitlabToken, gitlabUsername]);
+  }, [gitlabHasToken, gitlabSkipTlsVerify, gitlabUrl, gitlabToken, gitlabUsername]);
 
   const handleTestConnection = useCallback(async () => {
     const validationError = validateGitLabSettings(gitlabUrl, gitlabToken, gitlabHasToken);
@@ -214,7 +221,11 @@ export default function Settings() {
     setConnectionStatus('idle');
     setGitlabError('');
     try {
-      const ok = await testGitLabConnection(gitlabUrl.trim(), gitlabToken.trim());
+      const ok = await testGitLabConnection(
+        gitlabUrl.trim(),
+        gitlabToken.trim(),
+        gitlabSkipTlsVerify,
+      );
       setConnectionStatus(ok ? 'success' : 'error');
     } catch (error) {
       console.error('GitLab test failed:', error);
@@ -223,7 +234,7 @@ export default function Settings() {
     } finally {
       setTestingConnection(false);
     }
-  }, [gitlabHasToken, gitlabUrl, gitlabToken]);
+  }, [gitlabHasToken, gitlabSkipTlsVerify, gitlabUrl, gitlabToken]);
 
   const openCreateGithubModal = () => {
     setGithubForm({
@@ -631,6 +642,7 @@ export default function Settings() {
                 gitlabToken={gitlabToken}
                 gitlabUsername={gitlabUsername}
                 gitlabHasToken={gitlabHasToken}
+                gitlabSkipTlsVerify={gitlabSkipTlsVerify}
                 gitlabError={gitlabError}
                 testingConnection={testingConnection}
                 connectionStatus={connectionStatus}
@@ -650,6 +662,11 @@ export default function Settings() {
                 onGitlabUsernameChange={(value) => {
                   setGitlabUsername(value);
                   setGitlabError('');
+                }}
+                onGitlabSkipTlsVerifyChange={(value) => {
+                  setGitlabSkipTlsVerify(value);
+                  setGitlabError('');
+                  setConnectionStatus('idle');
                 }}
                 onTestConnection={handleTestConnection}
                 onSave={handleSaveGitlab}

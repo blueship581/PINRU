@@ -3,6 +3,7 @@ package gitlab
 import (
 	"archive/tar"
 	"compress/gzip"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -28,9 +29,7 @@ type Project struct {
 	HTTPURLToRepo *string `json:"http_url_to_repo"`
 }
 
-var client = &http.Client{Timeout: 20 * time.Second}
-
-func TestConnection(apiURL, token string) (bool, error) {
+func TestConnection(apiURL, token string, skipTLSVerify bool) (bool, error) {
 	baseURL, err := normalizeAPIBaseURL(apiURL)
 	if err != nil {
 		return false, err
@@ -44,7 +43,7 @@ func TestConnection(apiURL, token string) (bool, error) {
 		return false, err
 	}
 	req.Header.Set("PRIVATE-TOKEN", token)
-	resp, err := client.Do(req)
+	resp, err := newHTTPClient(skipTLSVerify).Do(req)
 	if err != nil {
 		return false, err
 	}
@@ -52,7 +51,7 @@ func TestConnection(apiURL, token string) (bool, error) {
 	return resp.StatusCode == 200, nil
 }
 
-func FetchProject(projectRef, apiURL, token string) (*Project, error) {
+func FetchProject(projectRef, apiURL, token string, skipTLSVerify bool) (*Project, error) {
 	baseURL, err := normalizeAPIBaseURL(apiURL)
 	if err != nil {
 		return nil, err
@@ -64,7 +63,7 @@ func FetchProject(projectRef, apiURL, token string) (*Project, error) {
 		return nil, err
 	}
 	req.Header.Set("PRIVATE-TOKEN", token)
-	resp, err := client.Do(req)
+	resp, err := newHTTPClient(skipTLSVerify).Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -80,7 +79,7 @@ func FetchProject(projectRef, apiURL, token string) (*Project, error) {
 	return &p, nil
 }
 
-func DownloadArchive(projectID int64, apiURL, token, destination string, sha *string) error {
+func DownloadArchive(projectID int64, apiURL, token, destination string, sha *string, skipTLSVerify bool) error {
 	baseURL, err := normalizeAPIBaseURL(apiURL)
 	if err != nil {
 		return err
@@ -102,7 +101,7 @@ func DownloadArchive(projectID int64, apiURL, token, destination string, sha *st
 		return err
 	}
 	req.Header.Set("PRIVATE-TOKEN", token)
-	resp, err := client.Do(req)
+	resp, err := newHTTPClient(skipTLSVerify).Do(req)
 	if err != nil {
 		return err
 	}
@@ -179,6 +178,19 @@ func moveContents(src, dst string) error {
 		}
 	}
 	return nil
+}
+
+func newHTTPClient(skipTLSVerify bool) *http.Client {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	if transport.TLSClientConfig == nil {
+		transport.TLSClientConfig = &tls.Config{}
+	}
+	//nolint:gosec // Controlled by an explicit user setting for temporary GitLab certificate bypass.
+	transport.TLSClientConfig.InsecureSkipVerify = skipTLSVerify
+	return &http.Client{
+		Timeout:   20 * time.Second,
+		Transport: transport,
+	}
 }
 
 func trimURL(u string) string {

@@ -68,7 +68,7 @@ func createMockGitExecutable(t *testing.T) string {
 }
 
 func TestBuildGitAuthEnvUsesExtraHeader(t *testing.T) {
-	env := buildGitAuthEnv("https://github.com/example/repo.git", "alice", "secret-token")
+	env := buildGitAuthEnv("https://github.com/example/repo.git", "alice", "secret-token", false)
 	envMap := make(map[string]string, len(env))
 	for _, item := range env {
 		key, value, ok := strings.Cut(item, "=")
@@ -80,6 +80,9 @@ func TestBuildGitAuthEnvUsesExtraHeader(t *testing.T) {
 
 	if envMap["GIT_TERMINAL_PROMPT"] != "0" {
 		t.Fatalf("GIT_TERMINAL_PROMPT = %q, want 0", envMap["GIT_TERMINAL_PROMPT"])
+	}
+	if envMap["GIT_CONFIG_COUNT"] != "1" {
+		t.Fatalf("GIT_CONFIG_COUNT = %q, want 1", envMap["GIT_CONFIG_COUNT"])
 	}
 	if envMap["GIT_CONFIG_KEY_0"] != "http.https://github.com/.extraHeader" {
 		t.Fatalf("GIT_CONFIG_KEY_0 = %q", envMap["GIT_CONFIG_KEY_0"])
@@ -101,9 +104,34 @@ func TestBuildGitAuthEnvUsesExtraHeader(t *testing.T) {
 }
 
 func TestBuildGitAuthEnvDisablesPromptWithoutCredentials(t *testing.T) {
-	env := buildGitAuthEnv("https://github.com/example/repo.git", "", "")
+	env := buildGitAuthEnv("https://github.com/example/repo.git", "", "", false)
 	if len(env) != 1 || env[0] != "GIT_TERMINAL_PROMPT=0" {
 		t.Fatalf("env = %v, want only GIT_TERMINAL_PROMPT=0", env)
+	}
+}
+
+func TestBuildGitAuthEnvCanDisableTLSVerification(t *testing.T) {
+	env := buildGitAuthEnv("https://gitlab.example.com/group/repo.git", "alice", "secret-token", true)
+	envMap := make(map[string]string, len(env))
+	for _, item := range env {
+		key, value, ok := strings.Cut(item, "=")
+		if !ok {
+			t.Fatalf("invalid env item: %q", item)
+		}
+		envMap[key] = value
+	}
+
+	if envMap["GIT_CONFIG_COUNT"] != "2" {
+		t.Fatalf("GIT_CONFIG_COUNT = %q, want 2", envMap["GIT_CONFIG_COUNT"])
+	}
+	if envMap["GIT_CONFIG_KEY_0"] != "http.https://gitlab.example.com/.sslVerify" {
+		t.Fatalf("GIT_CONFIG_KEY_0 = %q", envMap["GIT_CONFIG_KEY_0"])
+	}
+	if envMap["GIT_CONFIG_VALUE_0"] != "false" {
+		t.Fatalf("GIT_CONFIG_VALUE_0 = %q, want false", envMap["GIT_CONFIG_VALUE_0"])
+	}
+	if envMap["GIT_CONFIG_KEY_1"] != "http.https://gitlab.example.com/.extraHeader" {
+		t.Fatalf("GIT_CONFIG_KEY_1 = %q", envMap["GIT_CONFIG_KEY_1"])
 	}
 }
 
@@ -117,7 +145,7 @@ func TestCloneWithProgressHonorsContextCancellation(t *testing.T) {
 	defer cancel()
 
 	start := time.Now()
-	err := CloneWithProgress(ctx, "https://example.com/demo.git", filepath.Join(root, "clone"), "", "", func(string) {})
+	err := CloneWithProgress(ctx, "https://example.com/demo.git", filepath.Join(root, "clone"), "", "", false, func(string) {})
 	elapsed := time.Since(start)
 
 	if !errors.Is(err, context.DeadlineExceeded) {

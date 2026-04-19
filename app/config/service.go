@@ -1,6 +1,7 @@
 package config
 
 import (
+	"strconv"
 	"strings"
 
 	"github.com/blueship581/pinru/internal/github"
@@ -30,9 +31,10 @@ func New(store *store.Store) *ConfigService {
 
 // GitLabSettings is the sanitized view of GitLab credentials returned to the frontend.
 type GitLabSettings struct {
-	URL      string `json:"url"`
-	Username string `json:"username"`
-	HasToken bool   `json:"hasToken"`
+	URL           string `json:"url"`
+	Username      string `json:"username"`
+	HasToken      bool   `json:"hasToken"`
+	SkipTLSVerify bool   `json:"skipTlsVerify"`
 }
 
 func (s *ConfigService) GetConfig(key string) (string, error) {
@@ -46,7 +48,7 @@ func (s *ConfigService) SetConfig(key, value string) error {
 	return s.store.SetConfig(key, value)
 }
 
-func (s *ConfigService) TestGitLabConnection(url, token string) (bool, error) {
+func (s *ConfigService) TestGitLabConnection(url, token string, skipTLSVerify bool) (bool, error) {
 	if strings.TrimSpace(url) == "" {
 		storedURL, err := s.store.GetConfig("gitlab_url")
 		if err != nil {
@@ -61,7 +63,7 @@ func (s *ConfigService) TestGitLabConnection(url, token string) (bool, error) {
 		}
 		token = storedToken
 	}
-	return gitlab.TestConnection(url, token)
+	return gitlab.TestConnection(url, token, skipTLSVerify)
 }
 
 func (s *ConfigService) TestGitHubConnection(username, token string) (bool, error) {
@@ -98,19 +100,27 @@ func (s *ConfigService) GetGitLabSettings() (*GitLabSettings, error) {
 	if err != nil {
 		return nil, err
 	}
+	skipTLSVerify, err := s.getGitLabSkipTLSVerify()
+	if err != nil {
+		return nil, err
+	}
 
 	return &GitLabSettings{
-		URL:      strings.TrimSpace(url),
-		Username: strings.TrimSpace(username),
-		HasToken: strings.TrimSpace(token) != "",
+		URL:           strings.TrimSpace(url),
+		Username:      strings.TrimSpace(username),
+		HasToken:      strings.TrimSpace(token) != "",
+		SkipTLSVerify: skipTLSVerify,
 	}, nil
 }
 
-func (s *ConfigService) SaveGitLabSettings(url, username, token string) error {
+func (s *ConfigService) SaveGitLabSettings(url, username, token string, skipTLSVerify bool) error {
 	if err := s.store.SetConfig("gitlab_url", strings.TrimSpace(url)); err != nil {
 		return err
 	}
 	if err := s.store.SetConfig("gitlab_username", strings.TrimSpace(username)); err != nil {
+		return err
+	}
+	if err := s.store.SetConfig("gitlab_skip_tls_verify", strconv.FormatBool(skipTLSVerify)); err != nil {
 		return err
 	}
 	if strings.TrimSpace(token) != "" {
@@ -119,6 +129,18 @@ func (s *ConfigService) SaveGitLabSettings(url, username, token string) error {
 		}
 	}
 	return nil
+}
+
+func (s *ConfigService) getGitLabSkipTLSVerify() (bool, error) {
+	value, err := s.store.GetConfig("gitlab_skip_tls_verify")
+	if err != nil {
+		return false, err
+	}
+	parsed, err := strconv.ParseBool(strings.TrimSpace(value))
+	if err != nil {
+		return false, nil
+	}
+	return parsed, nil
 }
 
 // Project CRUD

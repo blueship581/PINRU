@@ -96,6 +96,7 @@ export function GitLabSettingsPanel({
   gitlabToken,
   gitlabUsername,
   gitlabHasToken,
+  gitlabSkipTlsVerify,
   gitlabError,
   testingConnection,
   connectionStatus,
@@ -105,6 +106,7 @@ export function GitLabSettingsPanel({
   onGitlabUrlChange,
   onGitlabTokenChange,
   onGitlabUsernameChange,
+  onGitlabSkipTlsVerifyChange,
   onTestConnection,
   onSave,
 }: {
@@ -114,6 +116,7 @@ export function GitLabSettingsPanel({
   gitlabToken: string;
   gitlabUsername: string;
   gitlabHasToken: boolean;
+  gitlabSkipTlsVerify: boolean;
   gitlabError: string;
   testingConnection: boolean;
   connectionStatus: 'idle' | 'success' | 'error';
@@ -123,6 +126,7 @@ export function GitLabSettingsPanel({
   onGitlabUrlChange: (value: string) => void;
   onGitlabTokenChange: (value: string) => void;
   onGitlabUsernameChange: (value: string) => void;
+  onGitlabSkipTlsVerifyChange: (value: boolean) => void;
   onTestConnection: () => void;
   onSave: () => void;
 }) {
@@ -170,6 +174,20 @@ export function GitLabSettingsPanel({
               className={inputCls}
             />
           </Field>
+          <label className="flex items-start gap-3 rounded-2xl border border-amber-200/70 bg-amber-50/70 px-4 py-3 text-sm text-amber-900 dark:border-amber-900/60 dark:bg-amber-950/30 dark:text-amber-100">
+            <input
+              type="checkbox"
+              checked={gitlabSkipTlsVerify}
+              onChange={(event) => onGitlabSkipTlsVerifyChange(event.target.checked)}
+              className="mt-1 h-4 w-4 rounded border-amber-300 text-amber-600 focus:ring-amber-500"
+            />
+            <span className="space-y-1">
+              <span className="block font-semibold">临时跳过 TLS 证书校验</span>
+              <span className="block text-xs text-amber-700 dark:text-amber-200/80">
+                仅在 GitLab 证书过期、自签名或证书链异常时临时启用。会同时影响测试连接、项目查询和 Clone。
+              </span>
+            </span>
+          </label>
 
           {gitlabError && <ErrorMsg msg={gitlabError} />}
 

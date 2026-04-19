@@ -91,6 +91,7 @@ export interface GitLabSettings {
   url: string;
   username: string;
   hasToken: boolean;
+  skipTlsVerify: boolean;
 }
 
 export interface TraeSettings {
@@ -108,8 +109,12 @@ export async function setConfig(key: string, value: string): Promise<void> {
   return callService('ConfigService', 'SetConfig', key, value);
 }
 
-export async function testGitLabConnection(url: string, token: string): Promise<boolean> {
-  return callService('ConfigService', 'TestGitLabConnection', url, token);
+export async function testGitLabConnection(
+  url: string,
+  token: string,
+  skipTlsVerify: boolean,
+): Promise<boolean> {
+  return callService('ConfigService', 'TestGitLabConnection', url, token, skipTlsVerify);
 }
 
 export async function testGitHubConnection(username: string, token: string): Promise<boolean> {
@@ -128,8 +133,13 @@ export async function getGitLabSettings(): Promise<GitLabSettings> {
   return callService('ConfigService', 'GetGitLabSettings');
 }
 
-export async function saveGitLabSettings(url: string, username: string, token: string): Promise<void> {
-  return callService('ConfigService', 'SaveGitLabSettings', url, username, token);
+export async function saveGitLabSettings(
+  url: string,
+  username: string,
+  token: string,
+  skipTlsVerify: boolean,
+): Promise<void> {
+  return callService('ConfigService', 'SaveGitLabSettings', url, username, token, skipTlsVerify);
 }
 
 export async function getTraeSettings(): Promise<TraeSettings> {

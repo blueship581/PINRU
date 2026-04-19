@@ -77,10 +77,14 @@ type ManagedClaimPathPlan struct {
 }
 
 func (s *GitService) FetchGitLabProject(projectRef, url, token string) (*gl.Project, error) {
-	return gl.FetchProject(projectRef, url, token)
+	return gl.FetchProject(projectRef, url, token, false)
 }
 
 func (s *GitService) FetchGitLabProjects(projectRefs []string, url, token string) []GitLabProjectLookupResult {
+	return s.fetchGitLabProjects(projectRefs, url, token, false)
+}
+
+func (s *GitService) fetchGitLabProjects(projectRefs []string, url, token string, skipTLSVerify bool) []GitLabProjectLookupResult {
 	results := make([]GitLabProjectLookupResult, len(projectRefs))
 	sem := make(chan struct{}, 6)
 	var wg sync.WaitGroup
@@ -90,7 +94,7 @@ func (s *GitService) FetchGitLabProjects(projectRefs []string, url, token string
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			p, err := gl.FetchProject(r, url, token)
+			p, err := gl.FetchProject(r, url, token, skipTLSVerify)
 			result := GitLabProjectLookupResult{ProjectRef: r, Project: p}
 			if err != nil {
 				errStr := err.Error()
@@ -104,11 +108,11 @@ func (s *GitService) FetchGitLabProjects(projectRefs []string, url, token string
 }
 
 func (s *GitService) FetchConfiguredGitLabProjects(projectRefs []string) ([]GitLabProjectLookupResult, error) {
-	url, _, token, err := s.loadConfiguredGitLabCredentials()
+	url, _, token, skipTLSVerify, err := s.loadConfiguredGitLabCredentials()
 	if err != nil {
 		return nil, err
 	}
-	return s.FetchGitLabProjects(projectRefs, url, token), nil
+	return s.fetchGitLabProjects(projectRefs, url, token, skipTLSVerify), nil
 }
 
 func (s *GitService) cloneProjectWithProgress(
@@ -117,18 +121,19 @@ func (s *GitService) cloneProjectWithProgress(
 	path,
 	username,
 	token string,
+	skipTLSVerify bool,
 	onProgress func(string),
 ) error {
 	progress := onProgress
 	if progress == nil {
 		progress = func(string) {}
 	}
-	return gitops.CloneWithProgress(ctx, cloneURL, path, username, token, progress)
+	return gitops.CloneWithProgress(ctx, cloneURL, path, username, token, skipTLSVerify, progress)
 }
 
 func (s *GitService) CloneProject(cloneURL, path, username, token string) error {
 	app := application.Get()
-	return s.cloneProjectWithProgress(context.Background(), cloneURL, path, username, token, func(msg string) {
+	return s.cloneProjectWithProgress(context.Background(), cloneURL, path, username, token, false, func(msg string) {
 		app.Event.Emit("clone-progress", msg)
 	})
 }
@@ -140,7 +145,7 @@ func (s *GitService) CloneProjectWithProgress(
 	token string,
 	onProgress func(string),
 ) error {
-	return s.cloneProjectWithProgress(context.Background(), cloneURL, path, username, token, onProgress)
+	return s.cloneProjectWithProgress(context.Background(), cloneURL, path, username, token, false, onProgress)
 }
 
 func (s *GitService) CloneConfiguredProject(cloneURL, path string) error {
@@ -161,15 +166,15 @@ func (s *GitService) CloneConfiguredProjectWithContext(
 	path string,
 	onProgress func(string),
 ) error {
-	_, username, token, err := s.loadConfiguredGitLabCredentials()
+	_, username, token, skipTLSVerify, err := s.loadConfiguredGitLabCredentials()
 	if err != nil {
 		return err
 	}
-	return s.cloneProjectWithProgress(ctx, cloneURL, path, username, token, onProgress)
+	return s.cloneProjectWithProgress(ctx, cloneURL, path, username, token, skipTLSVerify, onProgress)
 }
 
 func (s *GitService) DownloadGitLabProject(projectID int64, url, token, destination string, sha *string) error {
-	return gl.DownloadArchive(projectID, url, token, destination, sha)
+	return gl.DownloadArchive(projectID, url, token, destination, sha, false)
 }
 
 func (s *GitService) CopyProjectDirectory(ctx context.Context, sourcePath, destinationPath string) error {
@@ -580,19 +585,24 @@ func buildGitInitializationMessage(modelNames []string) string {
 	return fmt.Sprintf("已为 %d 个模型目录补 Git 基线", len(modelNames))
 }
 
-func (s *GitService) loadConfiguredGitLabCredentials() (url, username, token string, err error) {
+func (s *GitService) loadConfiguredGitLabCredentials() (url, username, token string, skipTLSVerify bool, err error) {
 	url, err = s.store.GetConfig("gitlab_url")
 	if err != nil {
-		return "", "", "", err
+		return "", "", "", false, err
 	}
 	token, err = s.store.GetConfig("gitlab_token")
 	if err != nil {
-		return "", "", "", err
+		return "", "", "", false, err
 	}
 	username, err = s.store.GetConfig("gitlab_username")
 	if err != nil {
-		return "", "", "", err
+		return "", "", "", false, err
 	}
+	skipTLSVerifyValue, err := s.store.GetConfig("gitlab_skip_tls_verify")
+	if err != nil {
+		return "", "", "", false, err
+	}
+	skipTLSVerify, _ = strconv.ParseBool(strings.TrimSpace(skipTLSVerifyValue))
 
 	url = strings.TrimSpace(url)
 	token = strings.TrimSpace(token)
@@ -601,10 +611,10 @@ func (s *GitService) loadConfiguredGitLabCredentials() (url, username, token str
 		username = "oauth2"
 	}
 	if url == "" || token == "" {
-		return "", "", "", errors.New(errs.MsgGitLabSettingsMissing)
+		return "", "", "", false, errors.New(errs.MsgGitLabSettingsMissing)
 	}
 
-	return url, username, token, nil
+	return url, username, token, skipTLSVerify, nil
 }
 
 func (s *GitService) syncTaskPromptArtifact(task store.Task, taskBasePath string) (string, string, error) {

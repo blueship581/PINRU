@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -44,7 +45,7 @@ func CheckPathsExist(paths []string) []string {
 	return existing
 }
 
-func CloneWithProgress(ctx context.Context, cloneURL, path, username, token string, onProgress func(string)) error {
+func CloneWithProgress(ctx context.Context, cloneURL, path, username, token string, skipTLSVerify bool, onProgress func(string)) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -67,7 +68,7 @@ func CloneWithProgress(ctx context.Context, cloneURL, path, username, token stri
 
 	cmd := exec.CommandContext(ctx, "git", "clone", "--depth", "1", "--progress", cloneURL, stagingPath)
 	cmd.WaitDelay = 5 * time.Second
-	cmd.Env = append(os.Environ(), buildGitAuthEnv(cloneURL, username, token)...)
+	cmd.Env = append(os.Environ(), buildGitAuthEnv(cloneURL, username, token, skipTLSVerify)...)
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
 		return fmt.Errorf(errs.FmtGitStartFail, err)
@@ -264,7 +265,7 @@ func PushBranch(path, branch, username, token string) error {
 
 	pushCmd := exec.Command("git", "push", "origin", branch+":"+branch, "--force")
 	pushCmd.Dir = path
-	pushCmd.Env = append(os.Environ(), buildGitAuthEnv(originURL, username, token)...)
+	pushCmd.Env = append(os.Environ(), buildGitAuthEnv(originURL, username, token, false)...)
 	pushCmd.Stderr = os.Stderr
 	return pushCmd.Run()
 }
@@ -283,27 +284,36 @@ func WorkspacePath(targetRepo string) string {
 	return filepath.Join(WorkspaceRoot(), sanitized)
 }
 
-func buildGitAuthEnv(rawURL, username, token string) []string {
+func buildGitAuthEnv(rawURL, username, token string, skipTLSVerify bool) []string {
 	trimmedUsername := strings.TrimSpace(username)
 	trimmedToken := strings.TrimSpace(token)
-	if trimmedUsername == "" || trimmedToken == "" {
-		return []string{"GIT_TERMINAL_PROMPT=0"}
-	}
-
 	parsedURL, err := url.Parse(strings.TrimSpace(rawURL))
 	if err != nil || parsedURL.Scheme == "" || parsedURL.Host == "" {
 		return []string{"GIT_TERMINAL_PROMPT=0"}
 	}
 
 	baseURL := fmt.Sprintf("%s://%s/", parsedURL.Scheme, parsedURL.Host)
-	authHeader := "Authorization: Basic " + base64.StdEncoding.EncodeToString([]byte(trimmedUsername+":"+trimmedToken))
-
-	return []string{
-		"GIT_TERMINAL_PROMPT=0",
-		"GIT_CONFIG_COUNT=1",
-		"GIT_CONFIG_KEY_0=http." + baseURL + ".extraHeader",
-		"GIT_CONFIG_VALUE_0=" + authHeader,
+	env := []string{"GIT_TERMINAL_PROMPT=0"}
+	configIndex := 0
+	if skipTLSVerify {
+		env = append(env,
+			"GIT_CONFIG_KEY_"+strconv.Itoa(configIndex)+"=http."+baseURL+".sslVerify",
+			"GIT_CONFIG_VALUE_"+strconv.Itoa(configIndex)+"=false",
+		)
+		configIndex++
 	}
+	if trimmedUsername != "" && trimmedToken != "" {
+		authHeader := "Authorization: Basic " + base64.StdEncoding.EncodeToString([]byte(trimmedUsername+":"+trimmedToken))
+		env = append(env,
+			"GIT_CONFIG_KEY_"+strconv.Itoa(configIndex)+"=http."+baseURL+".extraHeader",
+			"GIT_CONFIG_VALUE_"+strconv.Itoa(configIndex)+"="+authHeader,
+		)
+		configIndex++
+	}
+	if configIndex == 0 {
+		return env
+	}
+	return append(env, "GIT_CONFIG_COUNT="+strconv.Itoa(configIndex))
 }
 
 func contextErr(ctx context.Context) error {

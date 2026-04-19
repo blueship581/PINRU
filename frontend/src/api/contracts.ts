@@ -82,14 +82,14 @@ export type WailsServiceContract = {
   ConfigService: {
     GetConfig: ServiceMethod<[key: string], string>;
     SetConfig: ServiceMethod<[key: string, value: string], void>;
-    TestGitLabConnection: ServiceMethod<[url: string, token: string], boolean>;
+    TestGitLabConnection: ServiceMethod<[url: string, token: string, skipTlsVerify: boolean], boolean>;
     TestGitHubConnection: ServiceMethod<[username: string, token: string], boolean>;
     TestGitHubAccountConnection: ServiceMethod<
       [id: string, username: string, token: string],
       boolean
     >;
     GetGitLabSettings: ServiceMethod<[], GitLabSettings>;
-    SaveGitLabSettings: ServiceMethod<[url: string, username: string, token: string], void>;
+    SaveGitLabSettings: ServiceMethod<[url: string, username: string, token: string, skipTlsVerify: boolean], void>;
     ListProjects: ServiceMethod<[], ProjectConfig[]>;
     CreateProject: ServiceMethod<[project: ProjectConfig], void>;
     UpdateProject: ServiceMethod<[project: ProjectConfig], void>;
