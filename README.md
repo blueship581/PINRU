@@ -24,16 +24,19 @@
 - [核心工作流](#核心工作流)
 - [数据模型](#数据模型)
 - [API 参考](#api-参考)
+- [使用指南](#使用指南)
 
 ---
 
 ## 功能特性
 
 - **任务看板** — 从 GitLab 领取评审项目，自动下载代码归档到本地
+- **题库管理** — 支持 B 类题（本地 zip 压缩包）和 A 类题（GitLab 仓库），可导入多个来源并复用
 - **提示词生成** — 分析仓库结构，调用 LLM 生成面向各 AI 模型的执行提示词
 - **多模型执行** — 在独立目录中调用 Claude Code、Codex 等 CLI 工具并发执行评审
-- **AI 自动审核** — 评审完成后自动召回 LLM 对产出质量打分（pass / warning）
+- **AI 复审** — 评审完成后由 Codex 审核产出是否符合提示词要求，给出结论与下一轮提示词建议
 - **一键提交 PR** — 将源码与模型产出推送到 GitHub，自动创建带标签的 Pull Request
+- **项目总览** — 查看项目内题目分布统计、提示词聚合信息
 - **后台任务队列** — 所有耗时操作（克隆、执行、提交）均异步处理，前端实时轮询进度
 - **多 LLM Provider** — 统一接口兼容 OpenAI Compatible API 与 Anthropic API
 
@@ -59,13 +62,23 @@
 
 ### 前置依赖
 
+**构建工具链**
+
 | 依赖 | 版本 | 说明 |
 |------|------|------|
 | [Go](https://go.dev/dl/) | 1.23+ | 后端编译 |
 | [Node.js](https://nodejs.org/) | 18+ | 前端构建 |
-| [Wails v3 CLI](https://v3.wails.io/getting-started/installation/) | v3 alpha | 开发热重载 |
+| [Wails v3 CLI](https://v3.wails.io/getting-started/installation/) | v3 alpha | 开发热重载（可选） |
 | [Task](https://taskfile.dev/) | 任意 | 可选，简化命令 |
 | git | — | 仓库操作 |
+
+**运行时依赖**（使用对应功能前需安装）
+
+| 依赖 | 用途 |
+|------|------|
+| `git` | 克隆仓库、创建分支 |
+| `claude`（Claude Code CLI） | 执行 Claude 模型评审 |
+| `codex`（Codex CLI） | 执行 Codex 模型评审 / AI 复审 |
 
 ```bash
 # 1. 克隆仓库
@@ -281,7 +294,7 @@ PINRU/
 │   └── 001_init.sql             # 数据库 Schema
 ├── frontend/                    # React 前端
 │   ├── src/
-│   │   ├── features/            # 功能模块（board/claim/prompt/submit/settings）
+│   │   ├── features/            # 功能模块（board/claim/prompt/submit/settings/overview）
 │   │   ├── shared/              # 共享组件与 Hooks
 │   │   ├── api/                 # Wails RPC 调用封装
 │   │   └── store.ts             # Zustand 全局状态
@@ -304,15 +317,17 @@ PINRU/
 ## 核心工作流
 
 ```
-领题 (Claim) → 生成提示词 (Prompt) → 执行 (Execute) → 提交 PR (Submit)
+配置 → 领题 (Claim) → 生成提示词 (Prompt) → 执行 → AI 复审（可选）→ 提交 PR (Submit)
 ```
 
 | 阶段 | 说明 |
 |------|------|
-| **领题** | 调用 GitLab API 获取可评审项目，下载代码归档到本地，为每个目标模型创建独立副本目录 |
+| **配置** | 填写 GitLab / GitHub / LLM Provider / 项目信息 |
+| **领题** | 支持两种模式：① 综合题库（B 类本地 zip + A 类 GitLab 仓库）；② 题库模式（直接从 GitLab 一次性拉取）。下载后为每个目标模型创建独立副本目录 |
 | **生成提示词** | 分析仓库结构，调用 LLM 生成面向各 AI 模型的执行提示词，保存到数据库 |
-| **执行** | 在各模型副本目录中调用 CLI（`claude` / `codex`），读取提示词执行评审；AI 自动审核产出质量（pass / warning） |
-| **提交 PR** | 将源码与模型产出推送到 GitHub，通过 API 自动创建 Pull Request，记录 PR URL |
+| **执行** | 在各模型副本目录中调用 CLI（`claude` / `codex`），读取提示词执行评审 |
+| **AI 复审** | 由 Codex 审核本次代码变更是否符合提示词要求；未通过则给出结论及下一轮建议提示词（支持 AI 润色） |
+| **提交 PR** | 选择 GitHub 账号，将源码与模型产出推送，通过 API 自动创建 Pull Request，记录 PR URL |
 
 ---
 
@@ -341,6 +356,7 @@ AI 审核状态（`review_status`）：`none` → `running` → `pass` / `warnin
 | `model_runs` | 单模型执行记录，含 PR URL 与审核状态 |
 | `background_jobs` | 后台异步任务队列 |
 | `projects` | GitLab 项目配置（URL、模型列表等） |
+| `question_bank` | 题库条目（支持 zip 本地导入与 GitLab 仓库两种来源） |
 | `llm_providers` | LLM 提供商（API Key、Base URL、模型名） |
 | `github_accounts` | GitHub 认证信息 |
 | `configs` | 全局 KV 配置 |
@@ -412,6 +428,21 @@ Call.ByName('main.ServiceName.MethodName', ...args);
 |------|------|
 | `ListJobs(taskID?)` | 列出后台任务（可按 task 过滤） |
 | `CancelJob(id)` | 取消待执行的后台任务 |
+
+---
+
+## 使用指南
+
+完整操作说明请查阅 [docs/user-guide.md](docs/user-guide.md)，涵盖：
+
+- 初次配置（GitLab / GitHub / LLM / 项目）
+- 领题两种模式（综合题库 / GitLab 直拉）
+- 看板卡片操作与任务详情抽屉
+- 提示词生成与手动编辑
+- AI 复审使用方法
+- 提交 PR 流程
+- 项目总览统计
+- 常见操作（删除任务、多账号切换等）
 
 ---
 
