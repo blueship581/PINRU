@@ -12,6 +12,9 @@ import (
 const (
 	DefaultManagedSourceFolderName = "source"
 	DefaultManagedTaskTypeName     = "feature迭代"
+	QuestionBankFolderName         = "question_bank"
+	QuestionBankArchivesFolderName = "archives"
+	QuestionBankSourcesFolderName  = "sources"
 )
 
 func ExpandTilde(path string) string {
@@ -124,13 +127,50 @@ func BuildManagedSourceFolderPath(basePath string, projectID int64, taskType str
 	return BuildManagedSourceFolderPathWithSequence(basePath, projectID, taskType, 0)
 }
 
+func BuildManagedSourceFolderNameFromTaskPath(taskPath string) string {
+	trimmedPath := strings.TrimSpace(taskPath)
+	if trimmedPath == "" {
+		return DefaultManagedSourceFolderName
+	}
+
+	baseName := filepath.Base(NormalizePath(trimmedPath))
+	if baseName == "." || baseName == string(filepath.Separator) || strings.TrimSpace(baseName) == "" {
+		return DefaultManagedSourceFolderName
+	}
+	return baseName
+}
+
 func BuildManagedSourceFolderPathWithSequence(basePath string, projectID int64, taskType string, sequence int) string {
 	trimmedBase := strings.TrimSpace(basePath)
-	folderName := BuildManagedSourceFolderNameWithSequence(projectID, taskType, sequence)
+	folderName := BuildManagedSourceFolderNameFromTaskPath(trimmedBase)
 	if trimmedBase == "" {
 		return folderName
 	}
 	return filepath.Join(trimmedBase, folderName)
+}
+
+func BuildQuestionBankRootPath(basePath string) string {
+	trimmedBase := strings.TrimSpace(basePath)
+	if trimmedBase == "" {
+		return QuestionBankFolderName
+	}
+	return filepath.Join(trimmedBase, QuestionBankFolderName)
+}
+
+func BuildQuestionBankArchivesPath(basePath string) string {
+	return filepath.Join(BuildQuestionBankRootPath(basePath), QuestionBankArchivesFolderName)
+}
+
+func BuildQuestionBankSourcesPath(basePath string) string {
+	return filepath.Join(BuildQuestionBankRootPath(basePath), QuestionBankSourcesFolderName)
+}
+
+func BuildQuestionBankSourcePath(basePath string, questionID int64) string {
+	return filepath.Join(BuildQuestionBankSourcesPath(basePath), strconv.FormatInt(questionID, 10))
+}
+
+func BuildQuestionBankArchivePath(basePath, archiveName string) string {
+	return filepath.Join(BuildQuestionBankArchivesPath(basePath), strings.TrimSpace(archiveName))
 }
 
 func ParseManagedTaskFolderSequence(name, projectName, taskType string) (int, bool) {

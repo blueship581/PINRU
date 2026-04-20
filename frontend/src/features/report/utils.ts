@@ -1,11 +1,23 @@
 import type { TaskFromDB, AiReviewRoundFromDB, ModelRunFromDB, TaskSession } from '../../api/task';
 import type { ReportRow } from './types';
+import { extractTaskClaimSequence, isLocalSyntheticProjectId } from '../../shared/lib/taskId';
 
 function getLatestAiRound(rounds: AiReviewRoundFromDB[]): AiReviewRoundFromDB | null {
   if (rounds.length === 0) return null;
   return rounds.reduce((latest, r) =>
     r.roundNumber > latest.roundNumber ? r : latest,
   );
+}
+
+export function resolveReportRepoId(
+  task: Pick<TaskFromDB, 'id' | 'gitlabProjectId' | 'projectName'>,
+): string {
+  const projectName = task.projectName.trim();
+  if (isLocalSyntheticProjectId(task.gitlabProjectId) && projectName) {
+    const sequence = extractTaskClaimSequence(task.id);
+    return sequence ? `${projectName}-${sequence}` : projectName;
+  }
+  return String(task.gitlabProjectId);
 }
 
 /**
@@ -64,6 +76,7 @@ export function assembleReportRows(
     const latestRound = getLatestAiRound(rounds);
     const aiProjectType = latestRound?.projectType ?? '';
     const aiChangeScope = latestRound?.changeScope ?? '';
+    const repoId = resolveReportRepoId(task);
 
     const modelRuns = modelRunsByTask.get(task.id) ?? [];
     const { sessions: mrSessions, modelRunSessionId } = collectExecutionData(modelRuns);
@@ -83,7 +96,7 @@ export function assembleReportRows(
     if (sessions.length === 0) {
       rows.push({
         taskId: task.id,
-        repoId: task.gitlabProjectId,
+        repoId,
         sessionId: fallbackSessionId,
         sessionIndex: -1,
         promptText: task.promptText,
@@ -101,7 +114,7 @@ export function assembleReportRows(
         const session = sessions[i];
         rows.push({
           taskId: task.id,
-          repoId: task.gitlabProjectId,
+          repoId,
           sessionId: session.sessionId || fallbackSessionId,
           sessionIndex: i,
           promptText: task.promptText,
@@ -118,8 +131,9 @@ export function assembleReportRows(
     }
   }
 
-  // Sort by repoId ascending (numeric)
-  rows.sort((a, b) => a.repoId - b.repoId);
+  rows.sort((a, b) =>
+    a.repoId.localeCompare(b.repoId, 'zh-CN', { numeric: true, sensitivity: 'base' }),
+  );
 
   return rows;
 }

@@ -53,6 +53,55 @@ export interface ManagedClaimPathPlan {
   sourcePath: string;
 }
 
+export interface QuestionBankItem {
+  projectConfigId: string;
+  questionId: number;
+  displayName: string;
+  sourceKind: 'gitlab' | 'local_archive' | 'local_directory' | string;
+  sourcePath: string;
+  archivePath: string | null;
+  originRef: string;
+  status: 'ready' | 'error' | string;
+  errorMessage: string | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface ImportLocalSourceDetail {
+  name: string;
+  kind: string;
+  path: string;
+  status: string;
+  message: string;
+  taskId?: string;
+}
+
+export interface ImportLocalSourcesResult {
+  projectId: string;
+  projectName: string;
+  importedCount: number;
+  skippedCount: number;
+  errorCount: number;
+  removedCount: number;
+  details: ImportLocalSourceDetail[];
+}
+
+export interface QuestionBankSyncDetail {
+  questionId: number;
+  displayName: string;
+  status: string;
+  message: string;
+}
+
+export interface QuestionBankSyncResult {
+  projectId: string;
+  projectName: string;
+  syncedCount: number;
+  skippedCount: number;
+  errorCount: number;
+  details: QuestionBankSyncDetail[];
+}
+
 export async function fetchGitLabProject(projectRef: string, url: string, token: string): Promise<GitLabProject> {
   return callService('GitService', 'FetchGitLabProject', projectRef, url, token);
 }
@@ -123,6 +172,51 @@ export async function planManagedClaimPaths(
 
 export async function normalizeManagedSourceFolders(projectId: string): Promise<NormalizeManagedSourceFoldersResult> {
   return callService('GitService', 'NormalizeManagedSourceFolders', projectId);
+}
+
+export async function listQuestionBankItems(projectId: string): Promise<QuestionBankItem[]> {
+  return callService('GitService', 'ListQuestionBankItems', projectId);
+}
+
+export async function scanLocalQuestionBank(projectId: string): Promise<ImportLocalSourcesResult> {
+  return callService('GitService', 'ScanLocalQuestionBank', projectId);
+}
+
+export async function syncGitLabQuestionBank(
+  projectId: string,
+  questionIds?: number[],
+): Promise<QuestionBankSyncResult> {
+  return callService('GitService', 'SyncGitLabQuestionBank', projectId, questionIds ?? []);
+}
+
+export async function refreshQuestionBankItem(
+  projectId: string,
+  questionId: number,
+): Promise<QuestionBankSyncResult> {
+  return callService('GitService', 'RefreshQuestionBankItem', projectId, questionId);
+}
+
+export async function deleteQuestionBankItem(
+  projectId: string,
+  questionId: number,
+): Promise<void> {
+  await callService('GitService', 'DeleteQuestionBankItem', projectId, questionId);
+}
+
+export async function importLocalSources(projectId: string): Promise<ImportLocalSourcesResult> {
+  return callService('GitService', 'ImportLocalSources', projectId);
+}
+
+export async function pickQuestionBankArchives(): Promise<string[]> {
+  const result = (await callService('GitService', 'PickQuestionBankArchives')) as string[] | null;
+  return result ?? [];
+}
+
+export async function importQuestionBankArchives(
+  projectId: string,
+  archivePaths: string[],
+): Promise<ImportLocalSourcesResult> {
+  return callService('GitService', 'ImportQuestionBankArchives', projectId, archivePaths);
 }
 
 export function onCloneProgress(callback: (message: string) => void): () => void {

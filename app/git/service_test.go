@@ -1,7 +1,9 @@
 package git
 
 import (
+	"archive/zip"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -369,6 +371,344 @@ func TestPlanManagedClaimPathsReusesDeletedTaskSlot(t *testing.T) {
 	}
 }
 
+func TestImportLocalSourcesImportsZipArchiveAndAvoidsDuplicateReimport(t *testing.T) {
+	testStore := testutil.OpenTestStore(t)
+	defer testStore.Close()
+
+	project := store.Project{
+		ID:                "project-local-zip",
+		Name:              "Demo",
+		GitLabURL:         "https://gitlab.example.com",
+		GitLabToken:       "glpat-test",
+		CloneBasePath:     t.TempDir(),
+		Models:            "ORIGIN,claude-code",
+		SourceModelFolder: "ORIGIN",
+	}
+	if err := testStore.CreateProject(project); err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+
+	archivePath := filepath.Join(project.CloneBasePath, "local-demo.zip")
+	createZipArchive(t, archivePath, map[string]string{
+		"local-demo/README.md": "# Demo\n",
+		"local-demo/main.go":   "package main\n",
+	})
+
+	s := &GitService{store: testStore}
+	result, err := s.ImportLocalSources(project.ID)
+	if err != nil {
+		t.Fatalf("ImportLocalSources() error = %v", err)
+	}
+	if result.ImportedCount != 1 || result.SkippedCount != 0 || result.ErrorCount != 0 {
+		t.Fatalf("unexpected import summary: %+v", result)
+	}
+
+	if len(result.Details) != 1 {
+		t.Fatalf("details len = %d, want 1", len(result.Details))
+	}
+	tasks, err := testStore.ListTasks(&project.ID)
+	if err != nil {
+		t.Fatalf("ListTasks() error = %v", err)
+	}
+	if len(tasks) != 0 {
+		t.Fatalf("tasks len = %d, want 0", len(tasks))
+	}
+
+	items, err := testStore.ListQuestionBankItems(project.ID)
+	if err != nil {
+		t.Fatalf("ListQuestionBankItems() error = %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("question bank items len = %d, want 1", len(items))
+	}
+	item := items[0]
+	if item.SourceKind != "local_archive" {
+		t.Fatalf("SourceKind = %q, want local_archive", item.SourceKind)
+	}
+	if item.ArchivePath == nil || strings.TrimSpace(*item.ArchivePath) == "" {
+		t.Fatalf("expected archived source path, got %+v", item)
+	}
+
+	assertPathExists(t, filepath.Join(item.SourcePath, "README.md"))
+	assertPathExists(t, filepath.Join(item.SourcePath, ".git"))
+	assertPathNotExists(t, filepath.Join(item.SourcePath, "local-demo"))
+	assertPathExists(t, *item.ArchivePath)
+	assertPathNotExists(t, archivePath)
+
+	createZipArchive(t, archivePath, map[string]string{
+		"local-demo/README.md": "# Demo duplicate\n",
+	})
+
+	secondResult, err := s.ImportLocalSources(project.ID)
+	if err != nil {
+		t.Fatalf("second ImportLocalSources() error = %v", err)
+	}
+	if secondResult.ImportedCount != 0 || secondResult.SkippedCount != 1 || secondResult.ErrorCount != 0 {
+		t.Fatalf("unexpected second import summary: %+v", secondResult)
+	}
+	if !strings.Contains(secondResult.Details[0].Message, "题库已存在题目") {
+		t.Fatalf("skip message = %q, want existing question bank hint", secondResult.Details[0].Message)
+	}
+}
+
+func TestImportLocalSourcesImportsSevenZipArchive(t *testing.T) {
+	testStore := testutil.OpenTestStore(t)
+	defer testStore.Close()
+
+	project := store.Project{
+		ID:                "project-local-7z",
+		Name:              "Demo",
+		GitLabURL:         "https://gitlab.example.com",
+		GitLabToken:       "glpat-test",
+		CloneBasePath:     t.TempDir(),
+		Models:            "ORIGIN,cotv21-pro",
+		SourceModelFolder: "ORIGIN",
+	}
+	if err := testStore.CreateProject(project); err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+
+	archivePath := filepath.Join(project.CloneBasePath, "fixture.7z")
+	copyFile(t, sevenZipFixturePath(t, "t0.7z"), archivePath)
+
+	s := &GitService{store: testStore}
+	result, err := s.ImportLocalSources(project.ID)
+	if err != nil {
+		t.Fatalf("ImportLocalSources() error = %v", err)
+	}
+	if result.ImportedCount != 1 || result.ErrorCount != 0 {
+		t.Fatalf("unexpected import summary: %+v", result)
+	}
+
+	tasks, err := testStore.ListTasks(&project.ID)
+	if err != nil {
+		t.Fatalf("ListTasks() error = %v", err)
+	}
+	if len(tasks) != 0 {
+		t.Fatalf("tasks len = %d, want 0", len(tasks))
+	}
+
+	items, err := testStore.ListQuestionBankItems(project.ID)
+	if err != nil {
+		t.Fatalf("ListQuestionBankItems() error = %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("question bank items len = %d, want 1", len(items))
+	}
+	item := items[0]
+
+	assertPathExists(t, filepath.Join(item.SourcePath, ".git"))
+
+	entries, err := os.ReadDir(item.SourcePath)
+	if err != nil {
+		t.Fatalf("ReadDir(source) error = %v", err)
+	}
+	if len(entries) == 0 {
+		t.Fatalf("expected extracted source contents")
+	}
+}
+
+func TestImportLocalSourcesMigratesDirectoryAndPrefersDirectoryOverArchive(t *testing.T) {
+	testStore := testutil.OpenTestStore(t)
+	defer testStore.Close()
+
+	project := store.Project{
+		ID:                "project-local-dir",
+		Name:              "Demo",
+		GitLabURL:         "https://gitlab.example.com",
+		GitLabToken:       "glpat-test",
+		CloneBasePath:     t.TempDir(),
+		Models:            "ORIGIN,model-a",
+		SourceModelFolder: "ORIGIN",
+	}
+	if err := testStore.CreateProject(project); err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+
+	dirPath := filepath.Join(project.CloneBasePath, "sample")
+	if err := os.MkdirAll(dirPath, 0o755); err != nil {
+		t.Fatalf("MkdirAll(dirPath) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dirPath, "README.md"), []byte("# demo"), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	archivePath := filepath.Join(project.CloneBasePath, "sample.zip")
+	createZipArchive(t, archivePath, map[string]string{
+		"sample/README.md": "# archive\n",
+	})
+
+	s := &GitService{store: testStore}
+	result, err := s.ImportLocalSources(project.ID)
+	if err != nil {
+		t.Fatalf("ImportLocalSources() error = %v", err)
+	}
+	if result.ImportedCount != 1 || result.SkippedCount != 1 || result.ErrorCount != 0 {
+		t.Fatalf("unexpected import summary: %+v", result)
+	}
+
+	assertPathNotExists(t, dirPath)
+	assertPathExists(t, archivePath)
+
+	tasks, err := testStore.ListTasks(&project.ID)
+	if err != nil {
+		t.Fatalf("ListTasks() error = %v", err)
+	}
+	if len(tasks) != 0 {
+		t.Fatalf("tasks len = %d, want 0", len(tasks))
+	}
+
+	items, err := testStore.ListQuestionBankItems(project.ID)
+	if err != nil {
+		t.Fatalf("ListQuestionBankItems() error = %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("question bank items len = %d, want 1", len(items))
+	}
+	if items[0].SourceKind != "local_directory" {
+		t.Fatalf("SourceKind = %q, want local_directory", items[0].SourceKind)
+	}
+	assertPathExists(t, filepath.Join(items[0].SourcePath, "README.md"))
+	assertPathExists(t, filepath.Join(items[0].SourcePath, ".git"))
+
+	skippedArchive := false
+	for _, detail := range result.Details {
+		if detail.Kind == "archive" && strings.Contains(detail.Message, "同名已解压目录") {
+			skippedArchive = true
+		}
+	}
+	if !skippedArchive {
+		t.Fatalf("expected archive conflict detail, got %+v", result.Details)
+	}
+}
+
+func TestImportLocalSourcesSkipsTrackedHiddenAndModelDirectories(t *testing.T) {
+	testStore := testutil.OpenTestStore(t)
+	defer testStore.Close()
+
+	project := store.Project{
+		ID:                "project-local-skip",
+		Name:              "Demo",
+		GitLabURL:         "https://gitlab.example.com",
+		GitLabToken:       "glpat-test",
+		CloneBasePath:     t.TempDir(),
+		Models:            "ORIGIN,model-a",
+		SourceModelFolder: "ORIGIN",
+	}
+	if err := testStore.CreateProject(project); err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+
+	trackedTaskPath := filepath.Join(project.CloneBasePath, "tracked")
+	trackedSourcePath := filepath.Join(trackedTaskPath, "origin")
+	if err := os.MkdirAll(trackedSourcePath, 0o755); err != nil {
+		t.Fatalf("MkdirAll(trackedSourcePath) error = %v", err)
+	}
+	task := store.Task{
+		ID:              "tracked-task",
+		GitLabProjectID: 1849,
+		ProjectName:     "tracked",
+		TaskType:        "未归类",
+		LocalPath:       &trackedTaskPath,
+		ProjectConfigID: &project.ID,
+	}
+	if err := testStore.CreateTask(task); err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+	if err := testStore.CreateModelRun(store.ModelRun{
+		ID:        "tracked-origin",
+		TaskID:    task.ID,
+		ModelName: "ORIGIN",
+		LocalPath: &trackedSourcePath,
+	}); err != nil {
+		t.Fatalf("CreateModelRun() error = %v", err)
+	}
+
+	if err := os.MkdirAll(filepath.Join(project.CloneBasePath, ".hidden"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(hidden) error = %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(project.CloneBasePath, "ORIGIN"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(modelDir) error = %v", err)
+	}
+
+	s := &GitService{store: testStore}
+	result, err := s.ImportLocalSources(project.ID)
+	if err != nil {
+		t.Fatalf("ImportLocalSources() error = %v", err)
+	}
+	if result.ImportedCount != 0 || result.ErrorCount != 0 {
+		t.Fatalf("unexpected import summary: %+v", result)
+	}
+	if result.SkippedCount != 0 {
+		t.Fatalf("SkippedCount = %d, want 0 for silently ignored managed items", result.SkippedCount)
+	}
+}
+
+func TestImportLocalSourcesRejectsUnsafeArchiveAndCleansUp(t *testing.T) {
+	testStore := testutil.OpenTestStore(t)
+	defer testStore.Close()
+
+	project := store.Project{
+		ID:                "project-local-bad",
+		Name:              "Demo",
+		GitLabURL:         "https://gitlab.example.com",
+		GitLabToken:       "glpat-test",
+		CloneBasePath:     t.TempDir(),
+		Models:            "ORIGIN,model-a",
+		SourceModelFolder: "ORIGIN",
+	}
+	if err := testStore.CreateProject(project); err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+
+	archivePath := filepath.Join(project.CloneBasePath, "bad.zip")
+	createZipArchive(t, archivePath, map[string]string{
+		"../evil.txt": "nope",
+	})
+
+	s := &GitService{store: testStore}
+	result, err := s.ImportLocalSources(project.ID)
+	if err != nil {
+		t.Fatalf("ImportLocalSources() error = %v", err)
+	}
+	if result.ImportedCount != 0 || result.ErrorCount != 1 {
+		t.Fatalf("unexpected import summary: %+v", result)
+	}
+
+	tasks, err := testStore.ListTasks(&project.ID)
+	if err != nil {
+		t.Fatalf("ListTasks() error = %v", err)
+	}
+	if len(tasks) != 0 {
+		t.Fatalf("tasks len = %d, want 0", len(tasks))
+	}
+
+	items, err := testStore.ListQuestionBankItems(project.ID)
+	if err != nil {
+		t.Fatalf("ListQuestionBankItems() error = %v", err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("question bank items len = %d, want 0", len(items))
+	}
+
+	entries, err := os.ReadDir(project.CloneBasePath)
+	if err != nil {
+		t.Fatalf("ReadDir() error = %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("unexpected base path entries after failed import: %+v", entries)
+	}
+	assertPathExists(t, archivePath)
+
+	questionBankSources := util.BuildQuestionBankSourcesPath(project.CloneBasePath)
+	sourceEntries, err := os.ReadDir(questionBankSources)
+	if err != nil {
+		t.Fatalf("ReadDir(questionBankSources) error = %v", err)
+	}
+	if len(sourceEntries) != 0 {
+		t.Fatalf("question_bank/sources should be empty after cleanup, got %+v", sourceEntries)
+	}
+}
+
 func initGitRepoInDir(t *testing.T, dir, branch string) {
 	t.Helper()
 	if err := runGitCommand(dir, "init", "-b", branch); err != nil {
@@ -407,4 +747,76 @@ func runGitCommand(dir string, args ...string) error {
 		return fmt.Errorf("%w: %s", err, strings.TrimSpace(string(output)))
 	}
 	return nil
+}
+
+func createZipArchive(t *testing.T, path string, files map[string]string) {
+	t.Helper()
+
+	file, err := os.Create(path)
+	if err != nil {
+		t.Fatalf("Create(%q) error = %v", path, err)
+	}
+	defer file.Close()
+
+	writer := zip.NewWriter(file)
+	for name, content := range files {
+		entryWriter, err := writer.Create(name)
+		if err != nil {
+			t.Fatalf("zip Create(%q) error = %v", name, err)
+		}
+		if _, err := entryWriter.Write([]byte(content)); err != nil {
+			t.Fatalf("zip Write(%q) error = %v", name, err)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("zip Close() error = %v", err)
+	}
+}
+
+func sevenZipFixturePath(t *testing.T, fileName string) string {
+	t.Helper()
+
+	modCache := strings.TrimSpace(os.Getenv("GOMODCACHE"))
+	if modCache == "" {
+		output, err := exec.Command("go", "env", "GOMODCACHE").CombinedOutput()
+		if err != nil {
+			t.Fatalf("go env GOMODCACHE failed: %v\n%s", err, output)
+		}
+		modCache = strings.TrimSpace(string(output))
+	}
+	return filepath.Join(modCache, "github.com", "bodgit", "sevenzip@v1.6.1", "testdata", fileName)
+}
+
+func copyFile(t *testing.T, sourcePath, destinationPath string) {
+	t.Helper()
+
+	source, err := os.Open(sourcePath)
+	if err != nil {
+		t.Fatalf("Open(%q) error = %v", sourcePath, err)
+	}
+	defer source.Close()
+
+	destination, err := os.Create(destinationPath)
+	if err != nil {
+		t.Fatalf("Create(%q) error = %v", destinationPath, err)
+	}
+	defer destination.Close()
+
+	if _, err := io.Copy(destination, source); err != nil {
+		t.Fatalf("Copy(%q -> %q) error = %v", sourcePath, destinationPath, err)
+	}
+}
+
+func assertPathExists(t *testing.T, path string) {
+	t.Helper()
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("expected path %q to exist: %v", path, err)
+	}
+}
+
+func assertPathNotExists(t *testing.T, path string) {
+	t.Helper()
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("expected path %q to not exist, err = %v", path, err)
+	}
 }

@@ -168,7 +168,7 @@ interface AppState {
 export const useAppStore = create<AppState>((set) => ({
   theme: 'dark',
   setTheme: (theme) => set({ theme }),
-  aiReviewVisible: false,
+  aiReviewVisible: true,
   unlockAiReview: () => set({ aiReviewVisible: true }),
   tasks: [],
   loadTasks: async () => {

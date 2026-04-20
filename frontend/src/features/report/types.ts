@@ -1,6 +1,6 @@
 export interface ReportRow {
   taskId: string;
-  repoId: number;
+  repoId: string;
   sessionId: string;
   sessionIndex: number;
   promptText: string | null;

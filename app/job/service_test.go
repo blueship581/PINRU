@@ -446,6 +446,66 @@ func TestExecuteGitCloneCleansResidualDirectoriesAfterCancellation(t *testing.T)
 	}
 }
 
+func TestExecuteQuestionBankMaterializeCleansResidualDirectoriesAfterFailure(t *testing.T) {
+	testStore := testutil.OpenTestStore(t)
+	defer testStore.Close()
+
+	root := t.TempDir()
+	bankSourcePath := filepath.Join(root, "broken-source")
+	if err := os.MkdirAll(bankSourcePath, 0o755); err != nil {
+		t.Fatalf("MkdirAll(bankSourcePath) error = %v", err)
+	}
+	brokenFilePath := filepath.Join(bankSourcePath, "secret.txt")
+	if err := os.WriteFile(brokenFilePath, []byte("no access"), 0o600); err != nil {
+		t.Fatalf("WriteFile(brokenFilePath) error = %v", err)
+	}
+	if err := os.Chmod(brokenFilePath, 0); err != nil {
+		t.Fatalf("Chmod(brokenFilePath) error = %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chmod(brokenFilePath, 0o600)
+	})
+
+	targetSourcePath := filepath.Join(root, "label-01872-bug修复-1", "01872-bug修复-1")
+	copyPath := filepath.Join(root, "label-01872-bug修复-1", "cotv21-pro")
+	payloadJSON, err := json.Marshal(QuestionBankMaterializePayload{
+		BankSourcePath:   bankSourcePath,
+		TargetSourcePath: targetSourcePath,
+		SourceModelID:    "ORIGIN",
+		CopyTargets: []GitCloneCopyTarget{
+			{ModelID: "cotv21-pro", Path: copyPath},
+		},
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal(payload) error = %v", err)
+	}
+
+	jobSvc := &JobService{
+		store:   testStore,
+		gitSvc:  appgit.New(testStore),
+		running: make(map[string]context.CancelFunc),
+	}
+
+	_, err = jobSvc.executeQuestionBankMaterialize(context.Background(), "job-qb-materialize-failure", SubmitJobRequest{
+		JobType:      "question_bank_materialize",
+		InputPayload: string(payloadJSON),
+	})
+	if err == nil {
+		t.Fatalf("executeQuestionBankMaterialize() error = nil, want failure")
+	}
+
+	for _, path := range []string{
+		targetSourcePath,
+		targetSourcePath + "._pinru_tmp",
+		copyPath,
+		copyPath + "._pinru_tmp",
+	} {
+		if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+			t.Fatalf("expected %s to be cleaned up after failure, stat err = %v", path, statErr)
+		}
+	}
+}
+
 func TestExecuteAiReviewIncrementsReviewRoundAcrossSubmissions(t *testing.T) {
 	testStore := testutil.OpenTestStore(t)
 

@@ -2,6 +2,8 @@ import {
   buildManagedSourceFolderPathWithSequence,
   buildManagedTaskFolderPathWithSequence,
 } from '../../../shared/lib/sourceFolders';
+import { isLocalSyntheticProjectId } from '../../../shared/lib/taskId';
+import type { QuestionBankItem } from '../../../api/git';
 import type { ClaimResult, ModelEntry } from '../types';
 
 export function formatProjectName(value: string) {
@@ -144,6 +146,96 @@ export function getModelStatusBarClassName(status: ModelEntry['status']): string
     default:
       return 'w-0';
   }
+}
+
+/* ─── Question Bank Helpers ─── */
+
+export function parseQuestionBankProjectIds(raw: string): number[] {
+  const trimmed = raw.trim();
+  if (!trimmed) {
+    return [];
+  }
+  try {
+    const parsed = JSON.parse(trimmed);
+    const values = Array.isArray(parsed) ? parsed : [];
+    const normalized = values
+      .map((value) => String(value).trim())
+      .filter(Boolean)
+      .map((value) => Number.parseInt(value, 10))
+      .filter((value) => Number.isFinite(value) && value > 0);
+    return [...new Set(normalized)];
+  } catch {
+    return [];
+  }
+}
+
+export function getQuestionBankSourceKindLabel(sourceKind: string) {
+  switch (sourceKind) {
+    case 'gitlab':
+      return 'GitLab';
+    case 'local_archive':
+      return '本地压缩包';
+    case 'local_directory':
+      return '本地目录';
+    default:
+      return sourceKind || '未知来源';
+  }
+}
+
+export function getQuestionBankStatusMeta(status: string) {
+  switch (status) {
+    case 'ready':
+      return {
+        label: '可建题',
+        className:
+          'bg-emerald-50 dark:bg-emerald-500/10 text-emerald-700 dark:text-emerald-400',
+      };
+    case 'error':
+      return {
+        label: '异常',
+        className: 'bg-red-50 dark:bg-red-900/20 text-red-600 dark:text-red-400',
+      };
+    default:
+      return {
+        label: status || '未知状态',
+        className:
+          'bg-stone-100 dark:bg-stone-800/60 text-stone-500 dark:text-stone-400',
+      };
+  }
+}
+
+export function isLocalQuestionBankItem(item: Pick<QuestionBankItem, 'sourceKind' | 'questionId'>) {
+  return (
+    item.sourceKind === 'local_archive' ||
+    item.sourceKind === 'local_directory' ||
+    isLocalSyntheticProjectId(item.questionId)
+  );
+}
+
+export function buildQuestionBankLimitKey(
+  item: Pick<QuestionBankItem, 'questionId' | 'displayName' | 'sourceKind'>,
+) {
+  if (isLocalQuestionBankItem(item)) {
+    return `local:${item.displayName.trim().toLowerCase()}`;
+  }
+  return `gitlab:${String(item.questionId).trim()}`;
+}
+
+export function buildTaskLimitKey(projectId: string, projectName: string) {
+  if (isLocalSyntheticProjectId(projectId) && projectName.trim()) {
+    return `local:${projectName.trim().toLowerCase()}`;
+  }
+  return `gitlab:${projectId.trim()}`;
+}
+
+export function getQuestionBankDisplayProjectId(
+  item: Pick<QuestionBankItem, 'questionId' | 'displayName' | 'sourceKind'>,
+  sequence: number,
+) {
+  if (isLocalQuestionBankItem(item)) {
+    return `${item.displayName}${sequence > 0 ? `-${sequence}` : ''}`;
+  }
+  return formatClaimProjectId(String(item.questionId), sequence);
 }
 
 export function getResultStatusMeta(status: ClaimResult['status']): {

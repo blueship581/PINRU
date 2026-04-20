@@ -64,6 +64,13 @@ export interface GitCloneResult {
   failedModels: GitCloneFailure[];
 }
 
+export interface QuestionBankMaterializePayload {
+  bankSourcePath: string;
+  targetSourcePath: string;
+  sourceModelId: string;
+  copyTargets: GitCloneCopyTarget[];
+}
+
 export async function submitJob(req: SubmitJobRequest): Promise<BackgroundJob> {
   return callService('JobService', 'SubmitJob', req);
 }

@@ -31,3 +31,5 @@ export type ClonePlanResult = {
 };
 
 export type Phase = 'input' | 'review' | 'running' | 'done';
+
+export type ClaimMode = 'bank' | 'gitlab';

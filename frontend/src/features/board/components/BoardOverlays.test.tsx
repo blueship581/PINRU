@@ -170,6 +170,36 @@ describe('TaskCardContextMenu', () => {
     expect(onTaskTypeChange).toHaveBeenCalledWith('Feature迭代');
   });
 
+  it('shows prompt generation tips in the flyout', () => {
+    render(
+      <TaskCardContextMenu
+        menuRef={createRef<HTMLDivElement>()}
+        task={createTask()}
+        position={{ x: 32, y: 32 }}
+        statusOptions={['Claimed', 'Downloading', 'Downloaded', 'PromptReady', 'Submitted', 'Error']}
+        availableTaskTypes={['Bug修复', 'Feature迭代']}
+        statusChanging={false}
+        taskTypeChanging={false}
+        localFolderOpening={false}
+        childDirectories={[]}
+        childDirectoriesLoading={false}
+        quickActionLoadingPath={null}
+        actionError=""
+        onOpenLocalFolder={() => {}}
+        onStatusChange={() => {}}
+        onTaskTypeChange={() => {}}
+        onGeneratePrompt={() => {}}
+        onQuickAiReview={() => {}}
+      />,
+    );
+
+    fireEvent.click(screen.getByText('生成提示词'));
+
+    expect(screen.getByText('小贴士')).toBeInTheDocument();
+    expect(screen.getByText('1. Bug修复类型建议自己确认是否准确。')).toBeInTheDocument();
+    expect(screen.getByText('2. 生成多套提示词时，记得确认是否与之前雷同。')).toBeInTheDocument();
+  });
+
   it('shows action errors near the menu header', () => {
     render(
       <TaskCardContextMenu
@@ -203,7 +233,7 @@ describe('TaskCardContextMenu', () => {
     render(
       <TaskCardContextMenu
         menuRef={createRef<HTMLDivElement>()}
-        task={createTask()}
+        task={createTask({ taskType: '代码测试' })}
         position={{ x: 32, y: 32 }}
         statusOptions={['Claimed', 'Downloading', 'Downloaded', 'PromptReady', 'Submitted', 'Error']}
         availableTaskTypes={['Bug修复', 'Feature迭代']}
@@ -234,7 +264,7 @@ describe('TaskCardContextMenu', () => {
     render(
       <TaskCardContextMenu
         menuRef={createRef<HTMLDivElement>()}
-        task={createTask()}
+        task={createTask({ taskType: '代码理解' })}
         position={{ x: 32, y: 32 }}
         statusOptions={['Claimed', 'Downloading', 'Downloaded', 'PromptReady', 'Submitted', 'Error']}
         availableTaskTypes={['Bug修复', 'Feature迭代']}
@@ -269,7 +299,7 @@ describe('TaskCardContextMenu', () => {
     render(
       <TaskCardContextMenu
         menuRef={createRef<HTMLDivElement>()}
-        task={createTask()}
+        task={createTask({ taskType: '工程化' })}
         position={{ x: 32, y: 32 }}
         statusOptions={['Claimed', 'Downloading', 'Downloaded', 'PromptReady', 'Submitted', 'Error']}
         availableTaskTypes={['Bug修复', 'Feature迭代']}
@@ -291,5 +321,32 @@ describe('TaskCardContextMenu', () => {
     fireEvent.click(screen.getByText('快捷执行'));
 
     expect(screen.getByText('当前题卡目录下没有可用子文件夹。先完成领题 Clone，或检查任务目录是否存在。')).toBeInTheDocument();
+  });
+
+  it('hides quick AI review for unsupported task types', () => {
+    render(
+      <TaskCardContextMenu
+        menuRef={createRef<HTMLDivElement>()}
+        task={createTask({ taskType: 'Bug修复' })}
+        position={{ x: 32, y: 32 }}
+        statusOptions={['Claimed', 'Downloading', 'Downloaded', 'PromptReady', 'Submitted', 'Error']}
+        availableTaskTypes={['Bug修复', 'Feature迭代']}
+        statusChanging={false}
+        taskTypeChanging={false}
+        localFolderOpening={false}
+        childDirectories={[createChildDirectory()]}
+        childDirectoriesLoading={false}
+        quickActionLoadingPath={null}
+        actionError=""
+        onOpenLocalFolder={() => {}}
+        onStatusChange={() => {}}
+        onTaskTypeChange={() => {}}
+        onGeneratePrompt={() => {}}
+        onQuickAiReview={() => {}}
+      />,
+    );
+
+    expect(screen.queryByText('快捷执行')).not.toBeInTheDocument();
+    expect(screen.queryByText(/AI 复审 ·/)).not.toBeInTheDocument();
   });
 });

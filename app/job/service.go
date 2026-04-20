@@ -388,6 +388,8 @@ func (s *JobService) executeJob(id string, req SubmitJobRequest) {
 		execResult, execErr = s.executeSessionSync(ctx, id, req)
 	case "git_clone":
 		execResult, execErr = s.executeGitClone(ctx, id, req)
+	case "question_bank_materialize":
+		execResult, execErr = s.executeQuestionBankMaterialize(ctx, id, req)
 	case "pr_submit":
 		execResult, execErr = s.executePrSubmit(ctx, id, req)
 	case "ai_review":
@@ -636,6 +638,13 @@ type GitCloneResult struct {
 	FailedModels     []GitCloneFailure `json:"failedModels"`
 }
 
+type QuestionBankMaterializePayload struct {
+	BankSourcePath string               `json:"bankSourcePath"`
+	TargetSourcePath string             `json:"targetSourcePath"`
+	SourceModelID string                `json:"sourceModelId"`
+	CopyTargets   []GitCloneCopyTarget  `json:"copyTargets"`
+}
+
 func (s *JobService) executeGitClone(
 	ctx context.Context,
 	jobID string,
@@ -708,6 +717,89 @@ func (s *JobService) executeGitClone(
 		lastErr = errors.Join(lastErr, fmt.Errorf(errs.FmtJobCleanFailedDirFail, cleanupErr))
 	}
 	return jobExecutionResult{}, fmt.Errorf(errs.FmtJobGitCloneRetriesFailed, gitCloneRetryAttempts, lastErr)
+}
+
+func (s *JobService) executeQuestionBankMaterialize(
+	ctx context.Context,
+	jobID string,
+	req SubmitJobRequest,
+) (jobExecutionResult, error) {
+	var payload QuestionBankMaterializePayload
+	if err := json.Unmarshal([]byte(req.InputPayload), &payload); err != nil {
+		return jobExecutionResult{}, fmt.Errorf(errs.FmtJobParseGitCloneParam, err)
+	}
+
+	sourceModelID := payload.SourceModelID
+	if sourceModelID == "" {
+		sourceModelID = "ORIGIN"
+	}
+
+	targetPaths := targetPathsFromSourceAndCopies(payload.TargetSourcePath, payload.CopyTargets)
+	if err := s.ensureTargetPathsAvailable(targetPaths); err != nil {
+		return jobExecutionResult{}, err
+	}
+
+	s.emitProgress(jobID, req.JobType, req.TaskID, "running", 5, strPtr("等待空闲复制槽位…"), nil)
+	release, err := s.acquireGitCloneSlot(ctx)
+	if err != nil {
+		return jobExecutionResult{}, err
+	}
+	defer release()
+
+	s.emitProgress(jobID, req.JobType, req.TaskID, "running", 20, strPtr("正在从 question_bank 复制源码…"), nil)
+	if err := s.gitSvc.CopyProjectDirectory(ctx, payload.BankSourcePath, payload.TargetSourcePath); err != nil {
+		if cleanupErr := cleanupTargetPaths(targetPaths); cleanupErr != nil {
+			return jobExecutionResult{}, errors.Join(err, fmt.Errorf(errs.FmtJobCleanFailedDirFail, cleanupErr))
+		}
+		return jobExecutionResult{}, err
+	}
+
+	resultPayload := GitCloneResult{
+		SourcePath:       payload.TargetSourcePath,
+		SuccessfulModels: []string{sourceModelID},
+		FailedModels:     make([]GitCloneFailure, 0),
+	}
+
+	total := len(payload.CopyTargets)
+	for i, target := range payload.CopyTargets {
+		if contextErr := gitCloneContextErr(ctx); contextErr != nil {
+			return jobExecutionResult{}, cleanupTargetPathsAfterAbort(targetPaths, contextErr)
+		}
+		progress := 55 + (i+1)*40/(total+1)
+		s.emitProgress(
+			jobID,
+			req.JobType,
+			req.TaskID,
+			"running",
+			progress,
+			strPtr(fmt.Sprintf("正在复制到 %s（%d/%d）…", target.ModelID, i+1, total)),
+			nil,
+		)
+		if err := s.gitSvc.CopyProjectDirectory(ctx, payload.TargetSourcePath, target.Path); err != nil {
+			resultPayload.FailedModels = append(resultPayload.FailedModels, GitCloneFailure{
+				ModelID: target.ModelID,
+				Message: err.Error(),
+			})
+			continue
+		}
+		resultPayload.SuccessfulModels = append(resultPayload.SuccessfulModels, target.ModelID)
+	}
+
+	outputJSON, _ := json.Marshal(resultPayload)
+	outputStr := string(outputJSON)
+	totalModels := len(payload.CopyTargets) + 1
+	if len(resultPayload.FailedModels) > 0 {
+		return jobExecutionResult{
+			outputPayload: &outputStr,
+			finalMessage: strPtr(
+				fmt.Sprintf("部分完成：成功 %d/%d", len(resultPayload.SuccessfulModels), totalModels),
+			),
+		}, nil
+	}
+	return jobExecutionResult{
+		outputPayload: &outputStr,
+		finalMessage:  strPtr(fmt.Sprintf("题库复制完成：共 %d 个副本", totalModels)),
+	}, nil
 }
 
 // PrSubmitPayload 描述一次 pr_submit 任务的参数，与 appsubmit.SubmitAllRequest 对应。
@@ -1443,7 +1535,10 @@ func newGitCloneProgressContext(
 }
 
 func (s *JobService) ensureGitCloneTargetsAvailable(payload GitClonePayload) error {
-	paths := gitCloneTargetPaths(payload)
+	return s.ensureTargetPathsAvailable(gitCloneTargetPaths(payload))
+}
+
+func (s *JobService) ensureTargetPathsAvailable(paths []string) error {
 	if len(paths) == 0 {
 		return errors.New(errs.MsgJobMissingCloneTarget)
 	}
@@ -1461,7 +1556,10 @@ func (s *JobService) ensureGitCloneTargetsAvailable(payload GitClonePayload) err
 }
 
 func cleanupGitCloneTargets(payload GitClonePayload) error {
-	paths := gitCloneTargetPaths(payload)
+	return cleanupTargetPaths(gitCloneTargetPaths(payload))
+}
+
+func cleanupTargetPaths(paths []string) error {
 	sort.Slice(paths, func(i, j int) bool {
 		return len(paths[i]) > len(paths[j])
 	})
@@ -1478,7 +1576,7 @@ func cleanupGitCloneTargets(payload GitClonePayload) error {
 }
 
 func cleanupGitCloneTargetsAfterAbort(payload GitClonePayload, abortErr error) error {
-	if err := cleanupGitCloneTargets(payload); err != nil {
+	if err := cleanupTargetPaths(gitCloneTargetPaths(payload)); err != nil {
 		slog.Error("git clone cleanup after abort failed",
 			"source_path", payload.SourcePath,
 			"error", err,
@@ -1489,8 +1587,19 @@ func cleanupGitCloneTargetsAfterAbort(payload GitClonePayload, abortErr error) e
 }
 
 func gitCloneTargetPaths(payload GitClonePayload) []string {
-	seen := make(map[string]struct{}, len(payload.CopyTargets)+1)
-	paths := make([]string, 0, len(payload.CopyTargets)+1)
+	return targetPathsFromSourceAndCopies(payload.SourcePath, payload.CopyTargets)
+}
+
+func cleanupTargetPathsAfterAbort(paths []string, abortErr error) error {
+	if err := cleanupTargetPaths(paths); err != nil {
+		return errors.Join(abortErr, fmt.Errorf(errs.FmtJobCleanAbortResidualFail, err))
+	}
+	return abortErr
+}
+
+func targetPathsFromSourceAndCopies(sourcePath string, copyTargets []GitCloneCopyTarget) []string {
+	seen := make(map[string]struct{}, len(copyTargets)+1)
+	paths := make([]string, 0, len(copyTargets)+1)
 	appendPath := func(path string) {
 		normalized := util.NormalizePath(path)
 		if normalized == "" {
@@ -1503,8 +1612,8 @@ func gitCloneTargetPaths(payload GitClonePayload) []string {
 		paths = append(paths, normalized)
 	}
 
-	appendPath(payload.SourcePath)
-	for _, target := range payload.CopyTargets {
+	appendPath(sourcePath)
+	for _, target := range copyTargets {
 		appendPath(target.Path)
 	}
 	return paths

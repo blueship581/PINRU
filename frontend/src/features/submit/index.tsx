@@ -34,6 +34,8 @@ export default function Submit() {
   const [selectedModels, setSelectedModels] = useState<Set<string>>(new Set());
   // 追踪当前提交 job 的 ID，用于在 job 完成时刷新结果
   const pendingJobId = useRef<string | null>(null);
+  // 记录上次已写入 URL 的 taskId，避免 searchParams 引用抖动引起的重复 replaceState
+  const lastSyncedTaskId = useRef<string | null>(null);
 
   const requestedTaskId = searchParams.get('taskId') ?? '';
   const task = tasks.find((t) => t.id === taskId) ?? null;
@@ -104,11 +106,22 @@ export default function Submit() {
   }, [requestedTaskId, taskId, tasks]);
 
   useEffect(() => {
-    if (!taskId || requestedTaskId === taskId) return;
-    const next = new URLSearchParams(searchParams);
-    next.set('taskId', taskId);
-    setSearchParams(next, { replace: true });
-  }, [requestedTaskId, searchParams, setSearchParams, taskId]);
+    if (!taskId) return;
+    if (requestedTaskId === taskId) {
+      lastSyncedTaskId.current = taskId;
+      return;
+    }
+    if (lastSyncedTaskId.current === taskId) return;
+    lastSyncedTaskId.current = taskId;
+    setSearchParams(
+      (prev) => {
+        const next = new URLSearchParams(prev);
+        next.set('taskId', taskId);
+        return next;
+      },
+      { replace: true },
+    );
+  }, [requestedTaskId, setSearchParams, taskId]);
 
   useEffect(() => {
     if (!accounts.length) { setAccountId(''); return; }

@@ -10,6 +10,7 @@ const {
   mockSubmitJob,
   mockListJobs,
   mockGetTask,
+  mockGetTaskReadme,
   mockListModelRuns,
   mockListAiReviewNodes,
   mockListAiReviewRounds,
@@ -19,6 +20,7 @@ const {
   mockSubmitJob: vi.fn(),
   mockListJobs: vi.fn(),
   mockGetTask: vi.fn(),
+  mockGetTaskReadme: vi.fn(),
   mockListModelRuns: vi.fn(),
   mockListAiReviewNodes: vi.fn(),
   mockListAiReviewRounds: vi.fn(),
@@ -53,6 +55,7 @@ vi.mock('../../../api/task', async () => {
   return {
     ...actual,
     getTask: mockGetTask,
+    getTaskReadme: mockGetTaskReadme,
     listModelRuns: mockListModelRuns,
     listAiReviewNodes: mockListAiReviewNodes,
     listAiReviewRounds: mockListAiReviewRounds,
@@ -109,6 +112,7 @@ describe('useBoardTaskDetail prompt generation', () => {
     mockSubmitJob.mockResolvedValue({ id: 'job-1' });
     mockListJobs.mockResolvedValue([]);
     mockListModelRuns.mockResolvedValue([]);
+    mockGetTaskReadme.mockResolvedValue(null);
     mockListAiReviewNodes.mockResolvedValue([]);
     mockListAiReviewRounds.mockResolvedValue([]);
     useAppStore.setState({ tasks: [] });
@@ -142,6 +146,7 @@ describe('useBoardTaskDetail prompt generation', () => {
       taskTypes: '',
       taskTypeQuotas: '',
       taskTypeTotals: '',
+      questionBankProjectIds: '[]',
       overviewMarkdown: '',
       createdAt: 1,
       updatedAt: 1,
@@ -232,6 +237,7 @@ describe('useBoardTaskDetail prompt generation', () => {
       taskTypes: '',
       taskTypeQuotas: '',
       taskTypeTotals: '',
+      questionBankProjectIds: '[]',
       overviewMarkdown: '',
       createdAt: 1,
       updatedAt: 1,
@@ -305,6 +311,7 @@ describe('useBoardTaskDetail prompt generation', () => {
       taskTypes: '',
       taskTypeQuotas: '',
       taskTypeTotals: '',
+      questionBankProjectIds: '[]',
       overviewMarkdown: '',
       createdAt: 1,
       updatedAt: 1,
@@ -375,6 +382,7 @@ describe('useBoardTaskDetail prompt generation', () => {
       taskTypes: 'Bug修复\nFeature迭代',
       taskTypeQuotas: '{"Bug修复":1,"Feature迭代":2}',
       taskTypeTotals: '',
+      questionBankProjectIds: '[]',
       overviewMarkdown: '',
       createdAt: 1,
       updatedAt: 1,

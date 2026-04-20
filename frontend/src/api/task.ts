@@ -162,6 +162,11 @@ export interface TaskChildDirectory {
   isSource: boolean;
 }
 
+export interface TaskReadme {
+  path: string;
+  content: string;
+}
+
 export interface CreateTaskRequest {
   gitlabProjectId: number;
   projectName: string;
@@ -210,6 +215,10 @@ export async function saveAiReviewRoundNotes(roundID: string, reviewNotes: strin
 
 export async function listTaskChildDirectories(taskId: string): Promise<TaskChildDirectory[]> {
   return callService('TaskService', 'ListTaskChildDirectories', taskId);
+}
+
+export async function getTaskReadme(taskId: string): Promise<TaskReadme | null> {
+  return callService('TaskService', 'GetTaskReadme', taskId);
 }
 
 export async function createTask(task: CreateTaskRequest): Promise<TaskFromDB> {

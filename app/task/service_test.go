@@ -194,6 +194,68 @@ func TestCreateTaskEnforcesPerProjectTaskTypeUpperLimit(t *testing.T) {
 	}
 }
 
+func TestCreateTaskEnforcesPerProjectTaskTypeUpperLimitForLegacyLocalTasks(t *testing.T) {
+	testStore := testutil.OpenTestStore(t)
+	defer testStore.Close()
+
+	project := store.Project{
+		ID:             "project-local-limit",
+		Name:           "Demo",
+		GitLabURL:      "https://gitlab.example.com",
+		GitLabToken:    "glpat-demo",
+		CloneBasePath:  t.TempDir(),
+		Models:         "ORIGIN",
+		TaskTypes:      `["代码生成"]`,
+		TaskTypeQuotas: `{"代码生成":2}`,
+		TaskTypeTotals: `{"代码生成":10}`,
+	}
+	if err := testStore.CreateProject(project); err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+
+	s := &TaskService{store: testStore}
+	projectName := "B-715"
+	legacyLocalID := appgit.BuildLegacyDirectorySyntheticProjectID(projectName)
+	newQuestionBankID := appgit.BuildQuestionBankLocalSyntheticProjectID(projectName)
+
+	if _, err := s.CreateTask(CreateTaskRequest{
+		GitLabProjectID: legacyLocalID,
+		ProjectName:     projectName,
+		TaskType:        "代码生成",
+		ClaimSequence:   intPtr(1),
+		Models:          []string{"ORIGIN"},
+		ProjectConfigID: &project.ID,
+	}); err != nil {
+		t.Fatalf("CreateTask(legacy local) error = %v", err)
+	}
+
+	if _, err := s.CreateTask(CreateTaskRequest{
+		GitLabProjectID: newQuestionBankID,
+		ProjectName:     projectName,
+		TaskType:        "代码生成",
+		ClaimSequence:   intPtr(2),
+		Models:          []string{"ORIGIN"},
+		ProjectConfigID: &project.ID,
+	}); err != nil {
+		t.Fatalf("CreateTask(question bank local seq2) error = %v", err)
+	}
+
+	_, err := s.CreateTask(CreateTaskRequest{
+		GitLabProjectID: newQuestionBankID,
+		ProjectName:     projectName,
+		TaskType:        "代码生成",
+		ClaimSequence:   intPtr(3),
+		Models:          []string{"ORIGIN"},
+		ProjectConfigID: &project.ID,
+	})
+	if err == nil {
+		t.Fatalf("expected upper-limit error for legacy local compatibility")
+	}
+	if !strings.Contains(err.Error(), "已达上限 2") {
+		t.Fatalf("unexpected upper-limit error = %q", err.Error())
+	}
+}
+
 func TestUpdateTaskTypeEnforcesPerProjectTaskTypeUpperLimit(t *testing.T) {
 	testStore := testutil.OpenTestStore(t)
 	defer testStore.Close()
@@ -949,5 +1011,181 @@ func TestUpdateTaskTypePreservesClaimSequenceInManagedPaths(t *testing.T) {
 	}
 	if sourceRun == nil || sourceRun.LocalPath == nil || !util.SamePath(*sourceRun.LocalPath, newSourcePath) {
 		t.Fatalf("ORIGIN local path = %v, want %q", sourceRun, newSourcePath)
+	}
+}
+
+func TestGetTaskReadmeReturnsRootReadmeUsingPriorityOrder(t *testing.T) {
+	testStore := testutil.OpenTestStore(t)
+	defer testStore.Close()
+
+	project := store.Project{
+		ID:                "project-readme",
+		Name:              "Demo",
+		GitLabURL:         "https://gitlab.example.com",
+		GitLabToken:       "glpat-demo",
+		CloneBasePath:     t.TempDir(),
+		Models:            "ORIGIN,model-a",
+		SourceModelFolder: "ORIGIN",
+	}
+	if err := testStore.CreateProject(project); err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+
+	taskPath := filepath.Join(project.CloneBasePath, "task-readme")
+	sourcePath := filepath.Join(taskPath, "01849-未归类")
+	if err := os.MkdirAll(sourcePath, 0o755); err != nil {
+		t.Fatalf("MkdirAll(sourcePath) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sourcePath, "readme.markdown"), []byte("fallback"), 0o644); err != nil {
+		t.Fatalf("WriteFile(readme.markdown) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sourcePath, "README.md"), []byte("# Preferred\r\n\r\ncontent"), 0o644); err != nil {
+		t.Fatalf("WriteFile(README.md) error = %v", err)
+	}
+
+	task := store.Task{
+		ID:              "task-readme",
+		GitLabProjectID: 1849,
+		ProjectName:     "demo",
+		TaskType:        "未归类",
+		LocalPath:       &taskPath,
+		ProjectConfigID: &project.ID,
+	}
+	if err := testStore.CreateTask(task); err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+	if err := testStore.CreateModelRun(store.ModelRun{
+		ID:        "run-origin-readme",
+		TaskID:    task.ID,
+		ModelName: "ORIGIN",
+		LocalPath: &sourcePath,
+	}); err != nil {
+		t.Fatalf("CreateModelRun() error = %v", err)
+	}
+
+	s := &TaskService{store: testStore}
+	readme, err := s.GetTaskReadme(task.ID)
+	if err != nil {
+		t.Fatalf("GetTaskReadme() error = %v", err)
+	}
+	if readme == nil {
+		t.Fatalf("expected readme")
+	}
+	if !strings.HasSuffix(readme.Path, "README.md") {
+		t.Fatalf("Path = %q, want README.md", readme.Path)
+	}
+	if readme.Content != "# Preferred\n\ncontent" {
+		t.Fatalf("Content = %q", readme.Content)
+	}
+}
+
+func TestGetTaskReadmeReturnsNilWhenSourceRootHasNoReadme(t *testing.T) {
+	testStore := testutil.OpenTestStore(t)
+	defer testStore.Close()
+
+	project := store.Project{
+		ID:                "project-readme-empty",
+		Name:              "Demo",
+		GitLabURL:         "https://gitlab.example.com",
+		GitLabToken:       "glpat-demo",
+		CloneBasePath:     t.TempDir(),
+		Models:            "ORIGIN",
+		SourceModelFolder: "ORIGIN",
+	}
+	if err := testStore.CreateProject(project); err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+
+	taskPath := filepath.Join(project.CloneBasePath, "task-readme-empty")
+	sourcePath := filepath.Join(taskPath, "01850-未归类")
+	nestedPath := filepath.Join(sourcePath, "docs")
+	if err := os.MkdirAll(nestedPath, 0o755); err != nil {
+		t.Fatalf("MkdirAll(nestedPath) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(nestedPath, "README.md"), []byte("nested only"), 0o644); err != nil {
+		t.Fatalf("WriteFile(nested README) error = %v", err)
+	}
+
+	task := store.Task{
+		ID:              "task-readme-empty",
+		GitLabProjectID: 1850,
+		ProjectName:     "demo-empty",
+		TaskType:        "未归类",
+		LocalPath:       &taskPath,
+		ProjectConfigID: &project.ID,
+	}
+	if err := testStore.CreateTask(task); err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+	if err := testStore.CreateModelRun(store.ModelRun{
+		ID:        "run-origin-readme-empty",
+		TaskID:    task.ID,
+		ModelName: "ORIGIN",
+		LocalPath: &sourcePath,
+	}); err != nil {
+		t.Fatalf("CreateModelRun() error = %v", err)
+	}
+
+	s := &TaskService{store: testStore}
+	readme, err := s.GetTaskReadme(task.ID)
+	if err != nil {
+		t.Fatalf("GetTaskReadme() error = %v", err)
+	}
+	if readme != nil {
+		t.Fatalf("expected nil readme, got %+v", readme)
+	}
+}
+
+func TestGetTaskReadmeFallsBackToManagedSourceFolderNamedLikeParent(t *testing.T) {
+	testStore := testutil.OpenTestStore(t)
+	defer testStore.Close()
+
+	project := store.Project{
+		ID:                "project-readme-parent-source",
+		Name:              "Demo",
+		GitLabURL:         "https://gitlab.example.com",
+		GitLabToken:       "glpat-demo",
+		CloneBasePath:     t.TempDir(),
+		Models:            "ORIGIN",
+		SourceModelFolder: "ORIGIN",
+	}
+	if err := testStore.CreateProject(project); err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+
+	taskPath := filepath.Join(project.CloneBasePath, "B-35-代码生成-1")
+	sourcePath := filepath.Join(taskPath, "B-35-代码生成-1")
+	if err := os.MkdirAll(sourcePath, 0o755); err != nil {
+		t.Fatalf("MkdirAll(sourcePath) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sourcePath, "README.md"), []byte("same-name source"), 0o644); err != nil {
+		t.Fatalf("WriteFile(README.md) error = %v", err)
+	}
+
+	task := store.Task{
+		ID:              "task-readme-parent-source",
+		GitLabProjectID: 8_530_362_474_967_007,
+		ProjectName:     "B-35",
+		TaskType:        "代码生成",
+		LocalPath:       &taskPath,
+		ProjectConfigID: &project.ID,
+	}
+	if err := testStore.CreateTask(task); err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+
+	s := &TaskService{store: testStore}
+	readme, err := s.GetTaskReadme(task.ID)
+	if err != nil {
+		t.Fatalf("GetTaskReadme() error = %v", err)
+	}
+	if readme == nil {
+		t.Fatalf("expected readme")
+	}
+	if !util.SamePath(filepath.Dir(readme.Path), sourcePath) {
+		t.Fatalf("readme path = %q, want under %q", readme.Path, sourcePath)
+	}
+	if readme.Content != "same-name source" {
+		t.Fatalf("Content = %q", readme.Content)
 	}
 }

@@ -2,10 +2,14 @@ package main
 
 import (
 	"embed"
+	"io/fs"
 	"log"
 	"log/slog"
+	"net/http"
 	"os"
+	"path"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/lmittmann/tint"
@@ -70,7 +74,7 @@ func main() {
 			application.NewService(jobSvc),
 		},
 		Assets: application.AssetOptions{
-			Handler: application.AssetFileServerFS(assets),
+			Handler: spaFallbackHandler(assets, application.AssetFileServerFS(assets)),
 		},
 		Mac: application.MacOptions{
 			ApplicationShouldTerminateAfterLastWindowClosed: true,
@@ -87,4 +91,33 @@ func main() {
 	if err := app.Run(); err != nil {
 		log.Fatal(err)
 	}
+}
+
+// spaFallbackHandler 让按下 Cmd+R 在子路由下刷新时回退到 index.html,
+// 避免 React Router 路径(如 /claim、/settings)因资源服务器 404 导致白屏。
+func spaFallbackHandler(assets embed.FS, next http.Handler) http.Handler {
+	sub, err := fs.Sub(assets, "frontend/dist")
+	if err != nil {
+		sub = assets
+	}
+	return http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
+		urlPath := req.URL.Path
+		if req.Method == http.MethodGet &&
+			!strings.HasPrefix(urlPath, "/wails/") &&
+			!strings.HasPrefix(urlPath, "/assets/") &&
+			path.Ext(urlPath) == "" {
+			cleaned := path.Clean(strings.TrimPrefix(urlPath, "/"))
+			if cleaned == "." || cleaned == "" {
+				next.ServeHTTP(rw, req)
+				return
+			}
+			if _, err := fs.Stat(sub, cleaned); err != nil {
+				req2 := req.Clone(req.Context())
+				req2.URL.Path = "/"
+				next.ServeHTTP(rw, req2)
+				return
+			}
+		}
+		next.ServeHTTP(rw, req)
+	})
 }

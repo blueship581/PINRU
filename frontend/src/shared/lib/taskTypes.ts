@@ -33,6 +33,13 @@ export const DEFAULT_TASK_TYPES = [
   '代码测试',
 ] as const;
 
+export const QUICK_AI_REVIEW_TASK_TYPES = [
+  '代码测试',
+  '代码重构',
+  '工程化',
+  '代码理解',
+] as const;
+
 export type QuotaPreset = {
   id: string;
   label: string;
@@ -166,6 +173,10 @@ function taskTypeIdentity(value: string) {
   return normalizeTaskTypeName(value).toLowerCase();
 }
 
+const QUICK_AI_REVIEW_TASK_TYPE_SET = new Set(
+  QUICK_AI_REVIEW_TASK_TYPES.map((taskType) => taskTypeIdentity(taskType)),
+);
+
 export function normalizeTaskTypeName(value: string) {
   const trimmed = value.trim();
   if (!trimmed) return '';
@@ -177,6 +188,12 @@ export function normalizeTaskTypeName(value: string) {
 export function getTaskTypeDisplayLabel(value: string) {
   const normalized = normalizeTaskTypeName(value);
   return TASK_TYPE_LABELS[normalized] ?? normalized;
+}
+
+export function supportsQuickAiReviewTaskType(value: string) {
+  const normalized = normalizeTaskTypeName(value);
+  if (!normalized) return false;
+  return QUICK_AI_REVIEW_TASK_TYPE_SET.has(taskTypeIdentity(normalized));
 }
 
 export function buildTaskTypeChangeConfirmMessage(currentTaskType: string, nextTaskType: string) {

@@ -1,8 +1,9 @@
 import { Outlet, NavLink, useLocation, useNavigate } from 'react-router-dom';
 import {
+  AlertCircle,
+  BarChart3,
   Check,
   ChevronDown,
-  FileSpreadsheet,
   FolderDown,
   FolderOpen,
   GitPullRequest,
@@ -50,8 +51,8 @@ import {
 const NAV_ITEMS: Array<{ to: string; label: string; icon: typeof FolderDown; end?: boolean }> = [
   { to: '/', icon: Home, label: '主页', end: true },
   { to: '/claim', icon: FolderDown, label: '领题' },
+  { to: '/overview', icon: BarChart3, label: '项目查看' },
   { to: '/submit', icon: GitPullRequest, label: '提交' },
-  { to: '/report', icon: FileSpreadsheet, label: '报表' },
 ];
 
 type ModelEntry = {
@@ -125,8 +126,6 @@ async function ensureEmptyProjectDirectory(path: string) {
 
 export default function Layout() {
   const theme = useAppStore((s) => s.theme);
-  const aiReviewVisible = useAppStore((s) => s.aiReviewVisible);
-  const unlockAiReview = useAppStore((s) => s.unlockAiReview);
   const activeProject = useAppStore((s) => s.activeProject);
   const loadActiveProject = useAppStore((s) => s.loadActiveProject);
   const resetForNewProject = useAppStore((s) => s.resetForNewProject);
@@ -160,8 +159,6 @@ export default function Layout() {
   const projectMenuRef = useRef<HTMLDivElement>(null);
   const sidebarRef = useRef<HTMLElement>(null);
   const sidebarResizeStateRef = useRef<{ startX: number; startWidth: number } | null>(null);
-  const prLogoClickCountRef = useRef(0);
-  const prLogoLastClickAtRef = useRef(0);
 
   const inputCls =
     'w-full bg-stone-50 dark:bg-[#171B22] border border-stone-200 dark:border-[#232834] rounded-2xl px-4 py-2.5 text-sm font-medium focus:outline-none focus:ring-2 focus:ring-slate-400/30 transition-shadow placeholder:text-stone-400';
@@ -293,9 +290,8 @@ export default function Layout() {
       const routeMap: Record<string, string> = {
         '1': '/',
         '2': '/claim',
-        '3': '/prompt',
+        '3': '/overview',
         '4': '/submit',
-        '5': '/report',
       };
 
       const nextRoute = routeMap[event.key];
@@ -401,22 +397,6 @@ export default function Layout() {
 
   const handlePrLogoClick = () => {
     navigate('/');
-    if (aiReviewVisible) {
-      return;
-    }
-
-    const now = Date.now();
-    prLogoClickCountRef.current =
-      now - prLogoLastClickAtRef.current <= 900
-        ? prLogoClickCountRef.current + 1
-        : 1;
-    prLogoLastClickAtRef.current = now;
-
-    if (prLogoClickCountRef.current >= 5) {
-      unlockAiReview();
-      prLogoClickCountRef.current = 0;
-      prLogoLastClickAtRef.current = 0;
-    }
   };
 
   const handleSidebarResizeStart = (event: ReactPointerEvent<HTMLDivElement>) => {
@@ -584,6 +564,7 @@ export default function Layout() {
         models: serializeProjectModels(normalizedModels),
         sourceModelFolder,
         defaultSubmitRepo: projectForm.defaultSubmitRepo.trim(),
+        questionBankProjectIds: '[]',
         overviewMarkdown: projectForm.overviewMarkdown,
         ...serializedTaskSettings,
         createdAt: 0,
@@ -1003,27 +984,39 @@ export default function Layout() {
                 </div>
               </div>
 
-              {projectError && <p className="mt-5 text-sm text-red-500">{projectError}</p>}
             </div>
 
-            <div className="flex justify-end gap-3 border-t border-stone-100 px-6 py-4 dark:border-stone-800">
-              <button
-                onClick={() => {
-                  if (creatingProject) return;
-                  setShowProjectModal(false);
-                  resetProjectForm();
-                }}
-                className="rounded-2xl bg-stone-100 px-4 py-2.5 text-sm font-semibold text-stone-700 dark:bg-stone-800 dark:text-stone-300"
-              >
-                取消
-              </button>
-              <button
-                onClick={handleCreateProject}
-                disabled={creatingProject}
-                className="rounded-2xl bg-[#111827] px-4 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-[#1F2937] disabled:opacity-50 dark:bg-[#E5EAF2] dark:text-[#0D1117] dark:hover:bg-[#F3F6FB]"
-              >
-                {creatingProject ? '创建中...' : '创建项目'}
-              </button>
+            <div className="border-t border-stone-100 px-6 py-4 dark:border-stone-800">
+              {projectError && (
+                <div
+                  role="alert"
+                  aria-live="polite"
+                  className="mb-4 flex items-start gap-3 rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-600 dark:border-red-500/30 dark:bg-red-500/10 dark:text-red-200"
+                >
+                  <AlertCircle className="mt-0.5 h-4 w-4 flex-shrink-0" />
+                  <p>{projectError}</p>
+                </div>
+              )}
+
+              <div className="flex justify-end gap-3">
+                <button
+                  onClick={() => {
+                    if (creatingProject) return;
+                    setShowProjectModal(false);
+                    resetProjectForm();
+                  }}
+                  className="rounded-2xl bg-stone-100 px-4 py-2.5 text-sm font-semibold text-stone-700 dark:bg-stone-800 dark:text-stone-300"
+                >
+                  取消
+                </button>
+                <button
+                  onClick={handleCreateProject}
+                  disabled={creatingProject}
+                  className="rounded-2xl bg-[#111827] px-4 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-[#1F2937] disabled:opacity-50 dark:bg-[#E5EAF2] dark:text-[#0D1117] dark:hover:bg-[#F3F6FB]"
+                >
+                  {creatingProject ? '创建中...' : '创建项目'}
+                </button>
+              </div>
             </div>
           </div>
         </div>

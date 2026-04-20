@@ -44,6 +44,7 @@ vi.mock('./hooks/useBoardTaskDetail', () => ({
     selected: null,
     setSelected: vi.fn(),
     selectedTaskDetail: null,
+    selectedTaskReadme: null,
     selectedModelRuns: [],
     selectedSessionModelName: '',
     setSelectedSessionModelName: vi.fn(),

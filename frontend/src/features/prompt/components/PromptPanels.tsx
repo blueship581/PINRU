@@ -12,6 +12,7 @@ import {
 import type { ExecMode, ThinkingDepth } from '../../../api/cli';
 import type { ChatSession } from '../../../api/chat';
 import type { PromptGenerationStatus } from '../../../api/task';
+import { formatTaskDisplayId } from '../../../shared/lib/taskId';
 import type { Task } from '../../../store';
 import { formatWorkspaceOptionLabel } from '../utils/promptUtils';
 import type { TaskWorkspaceOption } from '../types';
@@ -78,8 +79,11 @@ export function PromptSidebar({
           className="w-full flex items-center gap-2 px-2.5 py-2 rounded-xl bg-stone-50 dark:bg-stone-800 hover:bg-stone-100 dark:hover:bg-stone-700 transition-colors cursor-default"
         >
           <Terminal className="w-3.5 h-3.5 text-stone-400 flex-shrink-0" />
-          <span className="flex-1 text-left text-xs font-medium text-stone-600 dark:text-stone-300 truncate">
-            {selectedTask?.id ?? '选择任务'}
+          <span
+            className="flex-1 text-left text-xs font-medium text-stone-600 dark:text-stone-300 truncate"
+            title={selectedTask?.id ?? undefined}
+          >
+            {selectedTask ? formatTaskDisplayId(selectedTask) : '选择任务'}
           </span>
           <ChevronDown className="w-3 h-3 text-stone-400 flex-shrink-0" />
         </button>
@@ -100,7 +104,9 @@ export function PromptSidebar({
                   }`}
                 >
                   <div className="flex items-center justify-between gap-2">
-                    <span className="block truncate">{task.id}</span>
+                    <span className="block truncate" title={task.id}>
+                      {formatTaskDisplayId(task)}
+                    </span>
                     {task.promptGenerationStatus === 'running' && (
                       <span className="flex-shrink-0 rounded-full bg-amber-50 px-1.5 py-0.5 text-[9px] font-semibold text-amber-700 dark:bg-amber-500/10 dark:text-amber-400">
                         生成中

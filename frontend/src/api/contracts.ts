@@ -16,8 +16,11 @@ import type {
   DirectoryInspectionResult,
   GitLabProject,
   GitLabProjectLookupResult,
+  ImportLocalSourcesResult,
   ManagedClaimPathPlan,
   NormalizeManagedSourceFoldersResult,
+  QuestionBankItem,
+  QuestionBankSyncResult,
 } from './git';
 import type {
   BackgroundJob,
@@ -50,6 +53,7 @@ import type {
   ModelRunFromDB,
   TaskChildDirectory,
   TaskFromDB,
+  TaskReadme,
   UpdateModelRunRequest,
   UpdateModelRunSessionRequest,
   UpdateTaskReportFieldsRequest,
@@ -143,6 +147,23 @@ export type WailsServiceContract = {
       [projectId: string],
       NormalizeManagedSourceFoldersResult
     >;
+    ListQuestionBankItems: ServiceMethod<[projectId: string], QuestionBankItem[]>;
+    ScanLocalQuestionBank: ServiceMethod<[projectId: string], ImportLocalSourcesResult>;
+    SyncGitLabQuestionBank: ServiceMethod<
+      [projectId: string, questionIds: number[]],
+      QuestionBankSyncResult
+    >;
+    RefreshQuestionBankItem: ServiceMethod<
+      [projectId: string, questionId: number],
+      QuestionBankSyncResult
+    >;
+    DeleteQuestionBankItem: ServiceMethod<[projectId: string, questionId: number], void>;
+    ImportLocalSources: ServiceMethod<[projectId: string], ImportLocalSourcesResult>;
+    PickQuestionBankArchives: ServiceMethod<[], string[]>;
+    ImportQuestionBankArchives: ServiceMethod<
+      [projectId: string, archivePaths: string[]],
+      ImportLocalSourcesResult
+    >;
   };
   PromptService: {
     TestLLMProvider: ServiceMethod<[provider: LlmProviderConfig], boolean>;
@@ -170,6 +191,7 @@ export type WailsServiceContract = {
     ListAiReviewNodes: ServiceMethod<[taskId: string], AiReviewNodeFromDB[]>;
     ListAiReviewRounds: ServiceMethod<[taskId: string], AiReviewRoundFromDB[]>;
     ListTaskChildDirectories: ServiceMethod<[taskId: string], TaskChildDirectory[]>;
+    GetTaskReadme: ServiceMethod<[taskId: string], TaskReadme | null>;
     CreateTask: ServiceMethod<[task: CreateTaskRequest], TaskFromDB>;
     UpdateTaskStatus: ServiceMethod<[id: string, status: string], void>;
     UpdateTaskType: ServiceMethod<[id: string, taskType: string], void>;

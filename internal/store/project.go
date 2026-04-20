@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -16,6 +17,7 @@ const (
 	defaultProjectQuotas     = "{}"
 	defaultProjectTotals     = "{}"
 	defaultProjectOverview   = ""
+	defaultQuestionBankIDs   = "[]"
 )
 
 type Project struct {
@@ -31,6 +33,7 @@ type Project struct {
 	TaskTypes         string `json:"taskTypes"`
 	TaskTypeQuotas    string `json:"taskTypeQuotas"`
 	TaskTypeTotals    string `json:"taskTypeTotals"`
+	QuestionBankProjectIDs string `json:"questionBankProjectIds"`
 	OverviewMarkdown  string `json:"overviewMarkdown"`
 	CreatedAt         int64  `json:"createdAt"`
 	UpdatedAt         int64  `json:"updatedAt"`
@@ -46,6 +49,7 @@ type projectColumnSet struct {
 	TaskTypes         bool
 	TaskTypeQuotas    bool
 	TaskTypeTotals    bool
+	QuestionBankProjectIDs bool
 	OverviewMarkdown  bool
 }
 
@@ -66,6 +70,9 @@ func (s *Store) loadProjectColumnSet() (projectColumnSet, error) {
 		return columns, err
 	}
 	if columns.TaskTypeTotals, err = s.columnExists("projects", "task_type_totals"); err != nil {
+		return columns, err
+	}
+	if columns.QuestionBankProjectIDs, err = s.columnExists("projects", "question_bank_project_ids"); err != nil {
 		return columns, err
 	}
 	if columns.OverviewMarkdown, err = s.columnExists("projects", "overview_markdown"); err != nil {
@@ -89,12 +96,13 @@ func (s *Store) projectSelectQuery(suffix string) (string, error) {
 	}
 
 	query := fmt.Sprintf(
-		"SELECT id, name, gitlab_url, gitlab_token, clone_base_path, models, %s, %s, %s, %s, %s, %s, created_at, updated_at FROM projects",
+		"SELECT id, name, gitlab_url, gitlab_token, clone_base_path, models, %s, %s, %s, %s, %s, %s, %s, created_at, updated_at FROM projects",
 		projectSelectExpr(columns.SourceModelFolder, "source_model_folder", "'"+defaultSourceModelFolder+"'"),
 		projectSelectExpr(columns.DefaultSubmitRepo, "default_submit_repo", "''"),
 		projectSelectExpr(columns.TaskTypes, "task_types", "'"+defaultProjectTaskTypes+"'"),
 		projectSelectExpr(columns.TaskTypeQuotas, "task_type_quotas", "'"+defaultProjectQuotas+"'"),
 		projectSelectExpr(columns.TaskTypeTotals, "task_type_totals", "'"+defaultProjectTotals+"'"),
+		projectSelectExpr(columns.QuestionBankProjectIDs, "question_bank_project_ids", "'"+defaultQuestionBankIDs+"'"),
 		projectSelectExpr(columns.OverviewMarkdown, "overview_markdown", "'"+defaultProjectOverview+"'"),
 	)
 	if suffix != "" {
@@ -117,6 +125,7 @@ func scanProject(scanner projectScanner) (*Project, error) {
 		&p.TaskTypes,
 		&p.TaskTypeQuotas,
 		&p.TaskTypeTotals,
+		&p.QuestionBankProjectIDs,
 		&p.OverviewMarkdown,
 		&p.CreatedAt,
 		&p.UpdatedAt,
@@ -126,7 +135,63 @@ func scanProject(scanner projectScanner) (*Project, error) {
 	return &p, nil
 }
 
-func normalizeProjectPayload(p Project) (string, string, string, string, string, error) {
+func normalizeQuestionBankProjectIDs(raw string) (string, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" || trimmed == "[]" {
+		return defaultQuestionBankIDs, nil
+	}
+
+	var numericIDs []int64
+	if err := json.Unmarshal([]byte(trimmed), &numericIDs); err == nil {
+		normalized := make([]int64, 0, len(numericIDs))
+		seen := make(map[int64]struct{}, len(numericIDs))
+		for _, id := range numericIDs {
+			if id <= 0 {
+				continue
+			}
+			if _, exists := seen[id]; exists {
+				continue
+			}
+			seen[id] = struct{}{}
+			normalized = append(normalized, id)
+		}
+		payload, err := json.Marshal(normalized)
+		if err != nil {
+			return "", err
+		}
+		return string(payload), nil
+	}
+
+	var stringIDs []string
+	if err := json.Unmarshal([]byte(trimmed), &stringIDs); err == nil {
+		normalized := make([]int64, 0, len(stringIDs))
+		seen := make(map[int64]struct{}, len(stringIDs))
+		for _, rawID := range stringIDs {
+			value := strings.TrimSpace(rawID)
+			if value == "" {
+				continue
+			}
+			id, err := strconv.ParseInt(value, 10, 64)
+			if err != nil || id <= 0 {
+				return "", fmt.Errorf(errs.FmtStoreInvalidQuestionBankIDsJSON, err)
+			}
+			if _, exists := seen[id]; exists {
+				continue
+			}
+			seen[id] = struct{}{}
+			normalized = append(normalized, id)
+		}
+		payload, err := json.Marshal(normalized)
+		if err != nil {
+			return "", err
+		}
+		return string(payload), nil
+	}
+
+	return "", fmt.Errorf(errs.FmtStoreInvalidQuestionBankIDsJSON, fmt.Errorf("invalid payload"))
+}
+
+func normalizeProjectPayload(p Project) (string, string, string, string, string, string, error) {
 	sourceModelFolder := strings.TrimSpace(p.SourceModelFolder)
 	if sourceModelFolder == "" {
 		sourceModelFolder = defaultSourceModelFolder
@@ -134,18 +199,22 @@ func normalizeProjectPayload(p Project) (string, string, string, string, string,
 
 	taskConfig, err := parseProjectTaskConfig(p.TaskTypes, p.TaskTypeQuotas, p.TaskTypeTotals)
 	if err != nil {
-		return "", "", "", "", "", err
+		return "", "", "", "", "", "", err
 	}
 
 	taskTypes, quotas, totals, err := taskConfig.Serialize()
 	if err != nil {
-		return "", "", "", "", "", err
+		return "", "", "", "", "", "", err
 	}
 
 	overviewMarkdown := strings.ReplaceAll(p.OverviewMarkdown, "\r\n", "\n")
 	overviewMarkdown = strings.ReplaceAll(overviewMarkdown, "\r", "\n")
+	questionBankProjectIDs, err := normalizeQuestionBankProjectIDs(p.QuestionBankProjectIDs)
+	if err != nil {
+		return "", "", "", "", "", "", err
+	}
 
-	return sourceModelFolder, taskTypes, quotas, totals, overviewMarkdown, nil
+	return sourceModelFolder, taskTypes, quotas, totals, questionBankProjectIDs, overviewMarkdown, nil
 }
 
 func parseTaskTypeCountMap(raw string) (map[string]int, error) {
@@ -300,7 +369,7 @@ func (s *Store) GetProject(id string) (*Project, error) {
 
 func (s *Store) CreateProject(p Project) error {
 	now := time.Now().Unix()
-	sourceModelFolder, taskTypes, quotas, totals, overviewMarkdown, err := normalizeProjectPayload(p)
+	sourceModelFolder, taskTypes, quotas, totals, questionBankProjectIDs, overviewMarkdown, err := normalizeProjectPayload(p)
 	if err != nil {
 		return err
 	}
@@ -347,6 +416,10 @@ func (s *Store) CreateProject(p Project) error {
 		columnNames = append(columnNames, "task_type_totals")
 		values = append(values, totals)
 	}
+	if columns.QuestionBankProjectIDs {
+		columnNames = append(columnNames, "question_bank_project_ids")
+		values = append(values, questionBankProjectIDs)
+	}
 	if columns.OverviewMarkdown {
 		columnNames = append(columnNames, "overview_markdown")
 		values = append(values, overviewMarkdown)
@@ -371,7 +444,7 @@ func (s *Store) CreateProject(p Project) error {
 
 func (s *Store) UpdateProject(p Project) error {
 	now := time.Now().Unix()
-	sourceModelFolder, taskTypes, quotas, totals, overviewMarkdown, err := normalizeProjectPayload(p)
+	sourceModelFolder, taskTypes, quotas, totals, questionBankProjectIDs, overviewMarkdown, err := normalizeProjectPayload(p)
 	if err != nil {
 		return err
 	}
@@ -415,6 +488,10 @@ func (s *Store) UpdateProject(p Project) error {
 	if columns.TaskTypeTotals {
 		assignments = append(assignments, "task_type_totals=?")
 		values = append(values, totals)
+	}
+	if columns.QuestionBankProjectIDs {
+		assignments = append(assignments, "question_bank_project_ids=?")
+		values = append(values, questionBankProjectIDs)
 	}
 	if columns.OverviewMarkdown {
 		assignments = append(assignments, "overview_markdown=?")

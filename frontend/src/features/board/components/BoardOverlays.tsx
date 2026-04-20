@@ -6,6 +6,7 @@ import type { Task, TaskStatus } from '../../../store';
 import {
   getTaskTypePresentation,
   normalizeTaskTypeName,
+  supportsQuickAiReviewTaskType,
 } from '../../../api/config';
 import type {
   ExtractTaskSessionCandidate,
@@ -21,7 +22,9 @@ import {
   SCOPE_TYPES,
   LS_KEY_CONSTRAINTS,
   LS_KEY_SCOPE,
+  PROMPT_GEN_TIPS,
 } from '../../../shared/lib/promptConstants';
+import { formatTaskDisplayId } from '../../../shared/lib/taskId';
 import { STATUS } from './BoardPresentation';
 
 type ContextMenuPanel = 'status' | 'taskType' | 'promptGen' | 'quickExecute';
@@ -225,6 +228,7 @@ export function TaskCardContextMenu({
     try { localStorage.setItem(LS_KEY_SCOPE, value); } catch {}
   };
   const currentTaskType = normalizeTaskTypeName(task.taskType) || task.taskType;
+  const quickAiReviewVisible = Boolean(onQuickAiReview) && supportsQuickAiReviewTaskType(currentTaskType);
   const currentStatusMeta = STATUS[task.status];
   const currentTaskTypePresentation = getTaskTypePresentation(currentTaskType);
   const menuSurfaceClass =
@@ -262,8 +266,11 @@ export function TaskCardContextMenu({
               #{task.projectId}
             </span>
           </div>
-          <p className="mt-1 font-mono text-[10px] text-stone-400 dark:text-stone-500 truncate">
-            {task.id}
+          <p
+            className="mt-1 font-mono text-[10px] text-stone-400 dark:text-stone-500 truncate"
+            title={task.id}
+          >
+            {formatTaskDisplayId(task)}
           </p>
         </div>
 
@@ -452,7 +459,7 @@ export function TaskCardContextMenu({
             )}
           </AnimatePresence>
 
-          {onQuickAiReview && (
+          {quickAiReviewVisible && onQuickAiReview && (
             <>
               <div className={`mx-3.5 my-1 border-t ${dividerClass}`} />
 
@@ -588,14 +595,15 @@ export function TaskCardContextMenu({
             createPortal(
               (() => {
                 const flyW = 256;
-                const flyH = 364;
                 const mainMenuW = 280;
                 const gap = 8;
+                const viewportH = window.innerHeight;
+                const flyMaxH = Math.max(240, viewportH - 24);
                 const leftX = position.x - flyW - gap;
                 const flyX = leftX >= 12 ? leftX : position.x + mainMenuW + gap;
                 const flyY = Math.min(
                   Math.max(12, position.y),
-                  window.innerHeight - flyH - 12,
+                  viewportH - flyMaxH - 12,
                 );
                 return (
                   <AnimatePresence>
@@ -606,11 +614,12 @@ export function TaskCardContextMenu({
                       exit={{ opacity: 0, x: leftX >= 12 ? 8 : -8, scale: 0.97 }}
                       transition={{ duration: 0.15, ease: [0.16, 1, 0.3, 1] }}
                       data-prompt-gen-flyout=""
-                      style={{ left: flyX, top: flyY, width: flyW }}
-                      className="fixed z-50 rounded-2xl border border-stone-300/75 bg-[linear-gradient(180deg,rgba(252,250,247,0.985)_0%,rgba(244,241,236,0.985)_100%)] shadow-[0_24px_48px_-26px_rgba(120,113,108,0.55),0_16px_30px_-18px_rgba(15,23,42,0.28)] ring-1 ring-white/70 backdrop-blur-xl dark:border-stone-600/70 dark:bg-[linear-gradient(180deg,rgba(39,37,34,0.97)_0%,rgba(24,24,23,0.985)_100%)] dark:shadow-[0_24px_48px_-26px_rgba(0,0,0,0.72),0_16px_30px_-18px_rgba(0,0,0,0.42)] dark:ring-stone-500/20"
+                      style={{ left: flyX, top: flyY, width: flyW, maxHeight: flyMaxH }}
+                      className="fixed z-50 flex flex-col rounded-2xl border border-stone-300/75 bg-[linear-gradient(180deg,rgba(252,250,247,0.985)_0%,rgba(244,241,236,0.985)_100%)] shadow-[0_24px_48px_-26px_rgba(120,113,108,0.55),0_16px_30px_-18px_rgba(15,23,42,0.28)] ring-1 ring-white/70 backdrop-blur-xl dark:border-stone-600/70 dark:bg-[linear-gradient(180deg,rgba(39,37,34,0.97)_0%,rgba(24,24,23,0.985)_100%)] dark:shadow-[0_24px_48px_-26px_rgba(0,0,0,0.72),0_16px_30px_-18px_rgba(0,0,0,0.42)] dark:ring-stone-500/20"
                     >
                       <div className="pointer-events-none absolute inset-x-3 top-0 h-px bg-gradient-to-r from-indigo-300/60 via-stone-200/50 to-sky-200/50 dark:from-indigo-400/20 dark:via-stone-500/15 dark:to-sky-300/20" />
-                      <div className="px-3.5 pt-3 pb-2.5">
+                      <div className="flex min-h-0 flex-1 flex-col px-3.5 pt-3 pb-2.5">
+                        <div className="min-h-0 flex-1 overflow-y-auto pr-0.5 -mr-0.5">
                         <p className="text-[11px] font-semibold text-stone-500 dark:text-stone-400 mb-2">
                           生成配置
                         </p>
@@ -675,12 +684,31 @@ export function TaskCardContextMenu({
                           </div>
                         </div>
 
+                        <div className="rounded-xl border border-amber-200/80 bg-amber-50/90 px-3 py-2.5 dark:border-amber-500/20 dark:bg-amber-500/10">
+                          <div className="flex items-start gap-2">
+                            <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-700 dark:text-amber-300" />
+                            <div className="min-w-0">
+                              <p className="text-[10px] font-semibold text-amber-700 dark:text-amber-200">
+                                小贴士
+                              </p>
+                              <div className="mt-1 space-y-1 text-[11px] leading-4 text-amber-700/90 dark:text-amber-100/90">
+                                {PROMPT_GEN_TIPS.map((tip, index) => (
+                                  <p key={tip}>
+                                    {index + 1}. {tip}
+                                  </p>
+                                ))}
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                        </div>
+
                         {/* Generate button */}
                         <button
                           type="button"
                           disabled={!menuScope}
                           onClick={() => onGeneratePrompt(menuConstraints, menuScope)}
-                          className="w-full py-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 disabled:opacity-40 text-white text-[12px] font-semibold transition-colors cursor-default"
+                          className="mt-3 w-full shrink-0 py-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 disabled:opacity-40 text-white text-[12px] font-semibold transition-colors cursor-default"
                         >
                           开始生成
                         </button>

@@ -75,14 +75,25 @@ export function buildManagedSourceFolderPath(basePath: string, projectId: number
   return buildManagedSourceFolderPathWithSequence(basePath, projectId, taskType, 0);
 }
 
+export function buildManagedSourceFolderNameFromTaskPath(taskPath: string): string {
+  const trimmedPath = taskPath.trim().replace(/[\\/]+$/, '');
+  if (!trimmedPath) return DEFAULT_MANAGED_SOURCE_FOLDER_NAME;
+
+  const parts = trimmedPath.split(/[\\/]+/).filter(Boolean);
+  return parts[parts.length - 1] || DEFAULT_MANAGED_SOURCE_FOLDER_NAME;
+}
+
 export function buildManagedSourceFolderPathWithSequence(
   basePath: string,
   projectId: number | string,
   taskType: string,
   sequence: number,
 ): string {
+  void projectId;
+  void taskType;
+  void sequence;
   const trimmedBase = basePath.trim().replace(/[\\/]+$/, '');
-  const folderName = buildManagedSourceFolderNameWithSequence(projectId, taskType, sequence);
+  const folderName = buildManagedSourceFolderNameFromTaskPath(trimmedBase);
   return trimmedBase ? `${trimmedBase}/${folderName}` : folderName;
 }
 

@@ -32,7 +32,7 @@ export function fmtClaimSearchFail(detail: string): string {
 // ---------- 目录选择 ----------
 export const MsgDirNotExist = '所选目录不存在';
 export const MsgPathNotDir = '所选路径不是文件夹';
-export const MsgDirNotEmpty = '请选择空文件夹，当前目录中已有内容';
+export const MsgDirNotEmpty = '所选文件夹不是空文件夹，无法创建项目，请改选空文件夹';
 
 // ---------- 项目设置 ----------
 export const MsgSourceRepoFormat = '源码仓库格式应为 owner/repo';

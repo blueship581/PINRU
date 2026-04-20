@@ -24,6 +24,7 @@ import {
 import {
   extractTaskSessions,
   getTask,
+  getTaskReadme,
   listAiReviewRounds,
   listModelRuns,
   updateTaskSessionList,
@@ -34,6 +35,7 @@ import {
   type ModelRunFromDB,
   type PromptGenerationStatus,
   type TaskFromDB,
+  type TaskReadme,
   type TaskSession as TaskSessionRecord,
 } from '../../../api/task';
 import {
@@ -73,6 +75,15 @@ function normalizeLlmProviderList(
   providers: LlmProviderConfig[] | null | undefined,
 ): LlmProviderConfig[] {
   return Array.isArray(providers) ? providers : [];
+}
+
+function normalizeTaskReadme(
+  readme: TaskReadme | null | undefined,
+): TaskReadme | null {
+  if (!readme || typeof readme.content !== 'string') {
+    return null;
+  }
+  return readme;
 }
 
 function getDefaultTaskDetailTab(status?: TaskStatus | null): TaskDetailDrawerTab {
@@ -155,6 +166,7 @@ export function useBoardTaskDetail({
 }: UseBoardTaskDetailArgs) {
   const [selected, setSelected] = useState<Task | null>(null);
   const [selectedTaskDetail, setSelectedTaskDetail] = useState<TaskFromDB | null>(null);
+  const [selectedTaskReadme, setSelectedTaskReadme] = useState<TaskReadme | null>(null);
   const [selectedModelRuns, setSelectedModelRuns] = useState<ModelRunFromDB[]>([]);
   const [selectedAiReviewRounds, setSelectedAiReviewRounds] = useState<AiReviewRoundFromDB[]>([]);
   const [selectedSessionModelName, setSelectedSessionModelName] = useState('');
@@ -313,13 +325,15 @@ export function useBoardTaskDetail({
   };
 
   const refreshTaskSessionSyncState = async (taskId: string) => {
-    const [taskDetail, modelRuns, aiReviewRounds] = await Promise.all([
+    const [taskDetail, taskReadme, modelRuns, aiReviewRounds] = await Promise.all([
       getTask(taskId),
+      getTaskReadme(taskId),
       listModelRuns(taskId),
       listAiReviewRounds(taskId),
     ]);
     const normalizedModelRuns = normalizeModelRunList(modelRuns);
     const normalizedAiReviewRounds = normalizeAiReviewRoundList(aiReviewRounds);
+    const normalizedTaskReadme = normalizeTaskReadme(taskReadme);
 
     if (selectedTaskIdRef.current !== taskId) {
       return;
@@ -335,6 +349,7 @@ export function useBoardTaskDetail({
     }
 
     setSelectedTaskDetail(taskDetail);
+    setSelectedTaskReadme(normalizedTaskReadme);
     setSelectedModelRuns(normalizedModelRuns);
     setSelectedAiReviewRounds(normalizedAiReviewRounds);
     const nextSessionModelName =
@@ -373,6 +388,7 @@ export function useBoardTaskDetail({
     if (!selected?.id) {
       sessionDraftVersionRef.current = 0;
       setSelectedTaskDetail(null);
+      setSelectedTaskReadme(null);
       setSelectedModelRuns([]);
       setSelectedAiReviewRounds([]);
       setSelectedSessionModelName('');
@@ -395,18 +411,21 @@ export function useBoardTaskDetail({
     setSessionExtracting(false);
 
     (async () => {
-      const [taskDetail, modelRuns, aiReviewRounds] = await Promise.all([
+      const [taskDetail, taskReadme, modelRuns, aiReviewRounds] = await Promise.all([
         getTask(selected.id),
+        getTaskReadme(selected.id),
         listModelRuns(selected.id),
         listAiReviewRounds(selected.id),
       ]);
       const normalizedModelRuns = normalizeModelRunList(modelRuns);
       const normalizedAiReviewRounds = normalizeAiReviewRoundList(aiReviewRounds);
+      const normalizedTaskReadme = normalizeTaskReadme(taskReadme);
       if (cancelled) {
         return;
       }
 
       setSelectedTaskDetail(taskDetail);
+      setSelectedTaskReadme(normalizedTaskReadme);
       setPromptDraft(taskDetail?.promptText ?? '');
       setPromptCopied(false);
       setSelectedModelRuns(normalizedModelRuns);
@@ -521,15 +540,17 @@ export function useBoardTaskDetail({
       return;
     }
 
-    const [_, __, taskDetail, modelRuns, aiReviewRounds] = await Promise.all([
+    const [_, __, taskDetail, taskReadme, modelRuns, aiReviewRounds] = await Promise.all([
       loadActiveProject(),
       loadTasks(),
       getTask(taskId),
+      getTaskReadme(taskId),
       listModelRuns(taskId),
       listAiReviewRounds(taskId),
     ]);
     const normalizedModelRuns = normalizeModelRunList(modelRuns);
     const normalizedAiReviewRounds = normalizeAiReviewRoundList(aiReviewRounds);
+    const normalizedTaskReadme = normalizeTaskReadme(taskReadme);
 
     const latestTask =
       useAppStore.getState().tasks.find((task) => task.id === taskId) ?? null;
@@ -538,6 +559,7 @@ export function useBoardTaskDetail({
     }
 
     setSelectedTaskDetail(taskDetail);
+    setSelectedTaskReadme(normalizedTaskReadme);
     setSelectedModelRuns(normalizedModelRuns);
     setSelectedAiReviewRounds(normalizedAiReviewRounds);
     const nextSessionModelName =
@@ -1260,6 +1282,7 @@ export function useBoardTaskDetail({
     selected,
     setSelected,
     selectedTaskDetail,
+    selectedTaskReadme,
     selectedModelRuns,
     selectedAiReviewRounds,
     drawerLoading,

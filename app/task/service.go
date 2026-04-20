@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 
 	appgit "github.com/blueship581/pinru/app/git"
@@ -728,6 +729,31 @@ func (s *TaskService) enforceTaskTypeUpperLimit(req CreateTaskRequest) error {
 		return err
 	}
 
+	// 兼容旧本地导入流程：
+	// 历史任务的 synthetic gitlab_project_id 生成规则与 question_bank 新规则不同，
+	// 但 display name（project_name）保持稳定。对本地题按 project_name + task_type 聚合，
+	// 确保“同题多次创建”的上限判断与旧数据保持连续。
+	if appgit.IsLocalSyntheticProjectID(req.GitLabProjectID) && strings.TrimSpace(req.ProjectName) != "" {
+		tasks, listErr := s.store.ListTasks(req.ProjectConfigID)
+		if listErr != nil {
+			return listErr
+		}
+		count = 0
+		targetName := strings.TrimSpace(req.ProjectName)
+		for _, task := range tasks {
+			if !appgit.IsLocalSyntheticProjectID(task.GitLabProjectID) {
+				continue
+			}
+			if !strings.EqualFold(strings.TrimSpace(task.ProjectName), targetName) {
+				continue
+			}
+			if internalprompt.NormalizeTaskType(task.TaskType) != taskType {
+				continue
+			}
+			count++
+		}
+	}
+
 	if count >= limit {
 		return fmt.Errorf(errs.FmtGitLabQuotaReached, req.GitLabProjectID, taskType, limit)
 	}
@@ -890,6 +916,9 @@ func claimSequenceForRequest(req CreateTaskRequest) int {
 		if sequence, ok := util.ParseManagedSourceFolderSequence(baseName, req.GitLabProjectID, req.TaskType); ok {
 			return sequence
 		}
+		if sequence, ok := parseTrailingClaimSequence(baseName); ok {
+			return sequence
+		}
 	}
 
 	return 0
@@ -902,6 +931,20 @@ func parseManagedTaskClaimSequence(pathValue, projectName, taskType string) (int
 	}
 	baseName := filepath.Base(util.ExpandTilde(trimmedPath))
 	return util.ParseManagedTaskFolderSequence(baseName, projectName, taskType)
+}
+
+func parseTrailingClaimSequence(name string) (int, bool) {
+	trimmedName := strings.TrimSpace(name)
+	lastDash := strings.LastIndex(trimmedName, "-")
+	if lastDash < 0 || lastDash >= len(trimmedName)-1 {
+		return 0, false
+	}
+
+	sequence, err := strconv.Atoi(trimmedName[lastDash+1:])
+	if err != nil || sequence <= 0 {
+		return 0, false
+	}
+	return sequence, true
 }
 
 func normalizeTaskIdentityToken(value string) string {

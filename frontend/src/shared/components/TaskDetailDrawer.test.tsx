@@ -8,6 +8,7 @@ import type {
   ModelRunFromDB,
   PromptGenerationStatus,
   TaskFromDB,
+  TaskReadme,
 } from '../../api/task';
 
 vi.mock('../../api/llm', async () => {
@@ -97,6 +98,13 @@ function createTaskDetail(overrides: Partial<TaskFromDB> = {}): TaskFromDB {
   };
 }
 
+function createTaskReadme(overrides: Partial<TaskReadme> = {}): TaskReadme {
+  return {
+    path: overrides.path ?? '/tmp/task-1/README.md',
+    content: overrides.content ?? '# 项目说明\n\n这是 README 内容。',
+  };
+}
+
 function renderDrawer() {
   const draft = createSessionDraft('Bug修复', {
     sessionId: 'session-1234567890',
@@ -113,6 +121,7 @@ function renderDrawer() {
     <TaskDetailDrawer
       selected={createTask({ sessionList: [draft] })}
       selectedTaskDetail={createTaskDetail({ sessionList: [draft] })}
+      selectedTaskReadme={null}
       selectedModelRuns={[]}
       drawerLoading={false}
       drawerError=""
@@ -266,6 +275,7 @@ function renderTaskDetailDrawer(
     <TaskDetailDrawer
       selected={createTask()}
       selectedTaskDetail={createTaskDetail()}
+      selectedTaskReadme={null}
       selectedModelRuns={[]}
       drawerLoading={false}
       drawerError=""
@@ -333,7 +343,7 @@ function renderTaskDetailDrawer(
 }
 
 beforeEach(() => {
-  useAppStore.setState({ backgroundJobs: [], aiReviewVisible: false });
+  useAppStore.setState({ backgroundJobs: [], aiReviewVisible: true });
   vi.restoreAllMocks();
   cliMock.reset();
   cliMock.startClaude.mockResolvedValue({ sessionId: 'mock-session' });
@@ -386,11 +396,14 @@ describe('TaskDetailDrawer session copy affordance', () => {
     expect(screen.getByRole('button', { name: 'Bug 修复' })).toBeInTheDocument();
   });
 
-  it('hides AI review entry points by default', () => {
+  it('hides AI review entry points when ai review is manually disabled', () => {
+    useAppStore.setState({ aiReviewVisible: false });
+
     render(
       <TaskDetailDrawer
         selected={createTask()}
         selectedTaskDetail={createTaskDetail()}
+        selectedTaskReadme={null}
         selectedModelRuns={[createModelRun()]}
         drawerLoading={false}
         drawerError=""
@@ -462,13 +475,13 @@ describe('TaskDetailDrawer session copy affordance', () => {
   });
 
   it('shows a visible AI review button in the model runs tab', () => {
-    useAppStore.setState({ aiReviewVisible: true });
     const onAiReview = vi.fn();
 
     render(
       <TaskDetailDrawer
         selected={createTask()}
         selectedTaskDetail={createTaskDetail()}
+        selectedTaskReadme={null}
         selectedModelRuns={[createModelRun()]}
         drawerLoading={false}
         drawerError=""
@@ -539,11 +552,28 @@ describe('TaskDetailDrawer session copy affordance', () => {
     expect(onAiReview).toHaveBeenCalledTimes(1);
   });
 
+  it('hides the model-run right-click ai review entry for unsupported task types', () => {
+    renderTaskDetailDrawer({
+      selected: createTask({ taskType: 'Bug修复' }),
+      selectedTaskDetail: createTaskDetail({ taskType: 'Bug修复' }),
+      activeDrawerTab: 'model-runs',
+      selectedModelRuns: [createModelRun()],
+      onAiReview: () => {},
+    });
+
+    expect(screen.getAllByText('AI 复审')).toHaveLength(1);
+
+    fireEvent.contextMenu(screen.getByText('model-a'));
+
+    expect(screen.getAllByText('AI 复审')).toHaveLength(1);
+  });
+
   it('shows the managed source folder name for origin runs in the model runs tab', () => {
     render(
       <TaskDetailDrawer
         selected={createTask()}
         selectedTaskDetail={createTaskDetail()}
+        selectedTaskReadme={null}
         selectedModelRuns={[createModelRun({ modelName: 'ORIGIN', localPath: '/tmp/task-1/01849-bug修复' })]}
         drawerLoading={false}
         drawerError=""
@@ -613,7 +643,6 @@ describe('TaskDetailDrawer session copy affordance', () => {
   });
 
   it('renders the ai review tab with rounds instead of legacy nodes', () => {
-    useAppStore.setState({ aiReviewVisible: true });
     useAppStore.setState({
       backgroundJobs: [createBackgroundJob({
         inputPayload: JSON.stringify({
@@ -643,7 +672,6 @@ describe('TaskDetailDrawer session copy affordance', () => {
   });
 
   it('uses polishedText result for ai review notes', async () => {
-    useAppStore.setState({ aiReviewVisible: true });
     polishTextMock.mockResolvedValue({
       polishedText: '这是润色后的复审结论，表达更自然，也更适合直接给同事阅读，能够把问题背景、缺少的错误提示以及后续需要补齐的处理逻辑完整说清楚。',
       providerName: 'Claude Code CLI',
@@ -669,5 +697,26 @@ describe('TaskDetailDrawer session copy affordance', () => {
     expect(polishTextMock).toHaveBeenCalledWith({ text: '导出逻辑还缺异常处理，需要补上错误提示。' });
     expect(await screen.findByRole('button', { name: '恢复原文' })).toBeInTheDocument();
     expect(screen.getByText((content) => content.includes('这是润色后的复审结论，表达更自然'))).toBeInTheDocument();
+  });
+});
+
+describe('TaskDetailDrawer README tab', () => {
+  it('shows the README tab and renders markdown content when readme exists', () => {
+    renderTaskDetailDrawer({
+      activeDrawerTab: 'readme',
+      selectedTaskReadme: createTaskReadme({ content: '# 本地题源\n\n支持 **Markdown**。' }),
+    });
+
+    expect(screen.getByRole('button', { name: 'README' })).toBeInTheDocument();
+    expect(screen.getByText('本地题源')).toBeInTheDocument();
+    expect(screen.getByText('Markdown')).toBeInTheDocument();
+  });
+
+  it('hides the README tab when readme content is empty', () => {
+    renderTaskDetailDrawer({
+      selectedTaskReadme: createTaskReadme({ content: '   ' }),
+    });
+
+    expect(screen.queryByRole('button', { name: 'README' })).not.toBeInTheDocument();
   });
 });

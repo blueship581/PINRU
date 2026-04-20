@@ -24,8 +24,11 @@ func TestManagedFolderSequenceHelpers(t *testing.T) {
 	}
 
 	sourcePath := BuildManagedSourceFolderPathWithSequence(taskPath, 1849, "Bug修复", 2)
-	if want := filepath.Join("/tmp/workspace", "label-01849-bug修复-2", "01849-bug修复-2"); sourcePath != want {
+	if want := filepath.Join("/tmp/workspace", "label-01849-bug修复-2", "label-01849-bug修复-2"); sourcePath != want {
 		t.Fatalf("BuildManagedSourceFolderPathWithSequence() = %q, want %q", sourcePath, want)
+	}
+	if got := BuildManagedSourceFolderNameFromTaskPath(taskPath); got != "label-01849-bug修复-2" {
+		t.Fatalf("BuildManagedSourceFolderNameFromTaskPath() = %q, want %q", got, "label-01849-bug修复-2")
 	}
 
 	if sequence, ok := ParseManagedTaskFolderSequence("label-01849-bug修复-2", "label-01849", "Bug修复"); !ok || sequence != 2 {

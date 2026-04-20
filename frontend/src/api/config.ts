@@ -17,10 +17,12 @@ import {
   normalizeTaskTypeName,
   parseProjectTaskTypes,
   parseTaskTypeQuotas,
+  QUICK_AI_REVIEW_TASK_TYPES,
   QUOTA_PRESETS,
   serializeProjectTaskSettings,
   serializeProjectTaskTypes,
   serializeTaskTypeQuotas,
+  supportsQuickAiReviewTaskType,
   type ProjectTaskSettings,
   type QuotaPreset,
   type SerializedProjectTaskSettings,
@@ -52,10 +54,12 @@ export {
   normalizeTaskTypeName,
   parseProjectTaskTypes,
   parseTaskTypeQuotas,
+  QUICK_AI_REVIEW_TASK_TYPES,
   QUOTA_PRESETS,
   serializeProjectTaskSettings,
   serializeProjectTaskTypes,
   serializeTaskTypeQuotas,
+  supportsQuickAiReviewTaskType,
 };
 
 export interface ProjectConfig {
@@ -71,6 +75,7 @@ export interface ProjectConfig {
   taskTypes: string;
   taskTypeQuotas: string;
   taskTypeTotals: string;
+  questionBankProjectIds: string;
   overviewMarkdown: string;
   createdAt: number;
   updatedAt: number;

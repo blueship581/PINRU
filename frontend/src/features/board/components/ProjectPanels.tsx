@@ -1,13 +1,11 @@
-import { Fragment, useEffect, useMemo, useState, type MouseEvent } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { motion } from 'motion/react';
-import { Plus, RefreshCw, X } from 'lucide-react';
+import { Loader2, Plus, RefreshCw, X } from 'lucide-react';
 import TaskTypeQuotaEditor from '../../../shared/components/TaskTypeQuotaEditor';
 import MarkdownPreview from '../../../shared/components/MarkdownPreview';
-import type { Task } from '../../../store';
-import type { TaskTypeOverviewSummary } from '../../../shared/lib/taskTypeOverview';
 import {
-  getProjectTaskSettings,
   getProjects,
+  getProjectTaskSettings,
   normalizeProjectModels,
   serializeProjectModels,
   serializeProjectTaskSettings,
@@ -19,9 +17,8 @@ import {
   normalizeManagedSourceFolders,
   type NormalizeManagedSourceFoldersResult,
 } from '../../../api/git';
-import { InfoCard, TaskTypeOverviewCard } from './BoardPresentation';
-
-type TaskTypeSummary = TaskTypeOverviewSummary;
+import { parseQuestionBankProjectIds } from '../../claim/utils/claimUtils';
+import { InfoCard } from './BoardPresentation';
 
 function isOriginModel(name: string) {
   return name.trim().toUpperCase() === 'ORIGIN';
@@ -62,26 +59,21 @@ export function EmptyProjectAside({
 
 export function ProjectOverviewPanel({
   project,
-  summaries,
   taskCount,
   onClose,
   onNormalized,
-  onSelectTask,
-  onOpenTaskContextMenu,
 }: {
   project: ProjectConfig;
-  summaries: TaskTypeSummary[];
   taskCount: number;
   onClose: () => void;
   onNormalized: () => Promise<void>;
-  onSelectTask: (task: Task) => void;
-  onOpenTaskContextMenu: (event: MouseEvent, task: Task) => void;
 }) {
   const modelList = normalizeProjectModels(project.models);
-  const totalInFlight = summaries.reduce(
-    (count, summary) => count + summary.waitingTasks.length + summary.processingTasks.length,
-    0,
+  const configuredGitLabQuestionIds = useMemo(
+    () => parseQuestionBankProjectIds(project.questionBankProjectIds || ''),
+    [project.questionBankProjectIds],
   );
+
   const [normalizing, setNormalizing] = useState(false);
   const [normalizeError, setNormalizeError] = useState('');
   const [normalizeResult, setNormalizeResult] =
@@ -107,7 +99,7 @@ export function ProjectOverviewPanel({
       animate={{ x: 0 }}
       exit={{ x: '100%' }}
       transition={{ type: 'spring', damping: 26, stiffness: 220 }}
-      className="fixed top-0 right-0 bottom-0 w-[560px] bg-white dark:bg-stone-900 border-l border-stone-200 dark:border-stone-800 shadow-2xl z-30 flex flex-col rounded-l-3xl"
+      className="fixed top-0 right-0 bottom-0 w-[480px] bg-white dark:bg-stone-900 border-l border-stone-200 dark:border-stone-800 shadow-2xl z-30 flex flex-col rounded-l-3xl"
     >
       <div className="px-7 py-6 border-b border-stone-100 dark:border-stone-800 flex items-start justify-between gap-4">
         <div>
@@ -118,7 +110,7 @@ export function ProjectOverviewPanel({
             {project.name}
           </h2>
           <p className="mt-1 text-xs text-stone-500 dark:text-stone-400">
-            主页恢复为题目卡片视图，项目信息集中在这里查看。
+            题库和批量建题已迁移到 “领题” 页面，这里只保留项目维度的信息与归一工具。
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -159,7 +151,14 @@ export function ProjectOverviewPanel({
               disabled={normalizing}
               className="px-3 py-2 rounded-2xl bg-white dark:bg-stone-800 border border-stone-200 dark:border-stone-700 text-xs font-semibold text-stone-700 dark:text-stone-300 disabled:opacity-50 cursor-default"
             >
-              {normalizing ? '处理中…' : '执行归一'}
+              {normalizing ? (
+                <span className="flex items-center gap-1.5">
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  处理中…
+                </span>
+              ) : (
+                '执行归一'
+              )}
             </button>
           </div>
           {normalizeError && <p className="mt-3 text-sm text-red-500">{normalizeError}</p>}
@@ -191,11 +190,10 @@ export function ProjectOverviewPanel({
           <InfoCard label="题卡总数" value={String(taskCount)} />
           <InfoCard label="模型数量" value={String(modelList.length)} />
           <InfoCard label="源码模型" value={project.sourceModelFolder || 'ORIGIN'} mono />
-          <InfoCard label="源码目录名" value="项目ID-任务类型" />
+          <InfoCard label="GitLab 题库 ID" value={String(configuredGitLabQuestionIds.length)} />
           <InfoCard label="源码仓库" value={project.defaultSubmitRepo || '未配置'} mono />
+          <InfoCard label="本地克隆根目录" value={project.cloneBasePath} mono />
         </div>
-
-        <InfoCard label="本地克隆根目录" value={project.cloneBasePath} mono />
 
         <div className="rounded-3xl border border-stone-200 dark:border-stone-800 bg-stone-50/80 dark:bg-stone-900/80 p-5">
           <div className="flex items-center justify-between gap-3">
@@ -218,35 +216,6 @@ export function ProjectOverviewPanel({
             />
           </div>
         </div>
-
-        {summaries.length > 0 && (
-          <div>
-            <div className="flex items-center justify-between gap-3 mb-3">
-              <div>
-                <h3 className="text-sm font-semibold text-stone-900 dark:text-stone-50">
-                  试题分配
-                </h3>
-                <p className="mt-1 text-xs text-stone-500 dark:text-stone-400">
-                  只展示当前有分配额度或已有流转记录的任务分类。
-                </p>
-              </div>
-              <span className="rounded-2xl bg-stone-100 dark:bg-stone-800 px-3 py-2 text-xs text-stone-500 dark:text-stone-400">
-                在途 {totalInFlight}
-              </span>
-            </div>
-            <div className="grid gap-3">
-              {summaries.map((summary) => (
-                <Fragment key={summary.taskType}>
-                  <TaskTypeOverviewCard
-                    summary={summary}
-                    onSelectTask={onSelectTask}
-                    onOpenTaskContextMenu={onOpenTaskContextMenu}
-                  />
-                </Fragment>
-              ))}
-            </div>
-          </div>
-        )}
       </div>
     </motion.aside>
   );

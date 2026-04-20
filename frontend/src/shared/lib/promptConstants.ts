@@ -17,6 +17,11 @@ export const SCOPE_TYPES = [
   { value: '跨系统多模块', label: '跨系统多模块', desc: '30%' },
 ] as const;
 
+export const PROMPT_GEN_TIPS = [
+  'Bug修复类型建议自己确认是否准确。',
+  '生成多套提示词时，记得确认是否与之前雷同。',
+] as const;
+
 export type ConstraintOption = (typeof CONSTRAINT_TYPES)[number];
 export type ScopeOption = (typeof SCOPE_TYPES)[number];
 

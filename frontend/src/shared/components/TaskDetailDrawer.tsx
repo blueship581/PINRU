@@ -34,6 +34,7 @@ import { polishText as polishTextApi } from '../../api/llm';
 import {
   getTaskTypePresentation,
   normalizeTaskTypeName,
+  supportsQuickAiReviewTaskType,
 } from '../../api/config';
 import {
   getSessionDecisionValue,
@@ -42,11 +43,15 @@ import {
   summarizeCountedRounds,
   type EditableTaskSession,
 } from '../lib/sessionUtils';
-import { matchKindLabel } from '../lib/sessionCandidateUtils';
+import { formatTaskDisplayId } from '../lib/taskId';
+import {
+  matchKindLabel,
+} from '../lib/sessionCandidateUtils';
 import { formatModelRunDisplayLabel } from '../lib/sourceFolders';
 import { CopyIconButton } from './CopyIconButton';
+import MarkdownPreview from './MarkdownPreview';
 
-export type TaskDetailDrawerTab = 'sessions' | 'prompt' | 'model-runs' | 'ai-review';
+export type TaskDetailDrawerTab = 'sessions' | 'prompt' | 'model-runs' | 'ai-review' | 'readme';
 export type TaskDetailDrawerModelOption = {
   modelName: string;
   localPath: string | null;
@@ -101,6 +106,7 @@ type SessionPatch = Partial<Pick<EditableTaskSession, 'sessionId' | 'taskType' |
 interface TaskDetailDrawerProps {
   selected: Task;
   selectedTaskDetail: TaskFromDB | null;
+  selectedTaskReadme: import('../../api/task').TaskReadme | null;
   selectedModelRuns: ModelRunFromDB[];
   selectedAiReviewRounds?: AiReviewRoundFromDB[];
   drawerLoading: boolean;
@@ -160,12 +166,14 @@ const TAB_ITEMS: Array<{ id: TaskDetailDrawerTab; label: string; icon: React.Com
   { id: 'sessions', label: 'Session 视图', icon: LayoutDashboard },
   { id: 'prompt', label: '提示词', icon: Terminal },
   { id: 'model-runs', label: '执行概况', icon: FileText },
+  { id: 'readme', label: 'README', icon: HelpCircle },
   { id: 'ai-review', label: 'AI复审', icon: CheckCircle2 },
 ];
 
 export default function TaskDetailDrawer({
   selected,
   selectedTaskDetail,
+  selectedTaskReadme,
   selectedModelRuns,
   drawerLoading,
   drawerError,
@@ -273,6 +281,10 @@ export default function TaskDetailDrawer({
   const promptLlmProviders = useMemo(
     () => safeLlmProviders.filter((provider) => provider.providerType === 'claude_code_acp'),
     [safeLlmProviders],
+  );
+  const quickAiReviewEnabledForTaskType = useMemo(
+    () => supportsQuickAiReviewTaskType(selected.taskType),
+    [selected.taskType],
   );
 
   useEffect(() => {
@@ -577,13 +589,27 @@ export default function TaskDetailDrawer({
 
     return entries;
   }, [latestAiReviewJobByKey, safeSelectedModelRuns, sourceModelName]);
+  const hasTaskReadme = !!selectedTaskReadme?.content.trim();
   const availableTabItems = useMemo(
-    () => TAB_ITEMS.filter((tab) => aiReviewVisible || tab.id !== 'ai-review'),
-    [aiReviewVisible],
+    () =>
+      TAB_ITEMS.filter((tab) => {
+        if (!aiReviewVisible && tab.id === 'ai-review') {
+          return false;
+        }
+        if (!hasTaskReadme && tab.id === 'readme') {
+          return false;
+        }
+        return true;
+      }),
+    [aiReviewVisible, hasTaskReadme],
   );
   const effectiveActiveDrawerTab =
     !aiReviewVisible && activeDrawerTab === 'ai-review'
       ? 'model-runs'
+      : !hasTaskReadme && activeDrawerTab === 'readme'
+        ? (selected.status === 'Submitted' || selected.status === 'ExecutionCompleted'
+            ? 'sessions'
+            : 'prompt')
       : activeDrawerTab;
   const createdAtText = new Date(selected.createdAt * 1000).toLocaleString('zh-CN');
 
@@ -658,6 +684,16 @@ export default function TaskDetailDrawer({
     activeSession,
     onCopySessionId,
   ]);
+
+  useEffect(() => {
+    if (!hasTaskReadme && activeDrawerTab === 'readme') {
+      onTabChange(
+        selected.status === 'Submitted' || selected.status === 'ExecutionCompleted'
+          ? 'sessions'
+          : 'prompt',
+      );
+    }
+  }, [activeDrawerTab, hasTaskReadme, onTabChange, selected.status]);
 
   const renderSessionsWorkspace = () => {
     if (!activeSession || !activeSessionPresentation) {
@@ -1234,6 +1270,37 @@ export default function TaskDetailDrawer({
     </div>
   );
 
+  const renderReadmeWorkspace = () => {
+    if (!hasTaskReadme || !selectedTaskReadme) {
+      return (
+        <div className="flex h-full items-center justify-center px-6 text-sm text-zinc-500">
+          当前题目没有 README
+        </div>
+      );
+    }
+
+    return (
+      <div className="h-full overflow-y-auto px-4 py-5 sm:px-6 lg:px-8">
+        <div className="mx-auto max-w-3xl space-y-4 pb-6">
+          <div className="rounded-3xl border border-stone-200 bg-white px-5 py-5 dark:border-zinc-800/70 dark:bg-[#0c0c0f]">
+            <div className="mb-4">
+              <p className="text-[11px] font-semibold uppercase tracking-[0.24em] text-stone-500 dark:text-zinc-500">
+                README
+              </p>
+              <p className="mt-1 break-all text-xs text-stone-500 dark:text-zinc-400">
+                {selectedTaskReadme.path}
+              </p>
+            </div>
+            <MarkdownPreview
+              content={selectedTaskReadme.content}
+              emptyMessage="README 内容为空"
+            />
+          </div>
+        </div>
+      </div>
+    );
+  };
+
   const hasPromptText = !!(selectedTaskDetail?.promptText || promptDraft.trim());
 
   const renderPromptWorkspace = () => (
@@ -1423,6 +1490,7 @@ export default function TaskDetailDrawer({
                     key={run.id}
                     className="rounded-2xl border border-zinc-800/70 bg-zinc-900/35 px-4 py-4 select-none"
                     onContextMenu={(e) => {
+                      if (!quickAiReviewEnabledForTaskType) return;
                       e.preventDefault();
                       setRunContextMenu({ run, x: e.clientX, y: e.clientY });
                     }}
@@ -1501,7 +1569,7 @@ export default function TaskDetailDrawer({
           )}
 
           {/* Model run right-click context menu */}
-          {runContextMenu && aiReviewVisible && (
+          {runContextMenu && aiReviewVisible && quickAiReviewEnabledForTaskType && (
             <>
               <div
                 className="fixed inset-0 z-40"
@@ -2070,7 +2138,9 @@ export default function TaskDetailDrawer({
                     <Hash className="h-3.5 w-3.5" />
                     #{selected.projectId}
                   </span>
-                  <span className="font-mono text-zinc-600">{selected.id}</span>
+                  <span className="font-mono text-zinc-600" title={selected.id}>
+                    {formatTaskDisplayId(selected)}
+                  </span>
                   <span>{createdAtText}</span>
                 </div>
               </div>
@@ -2131,6 +2201,7 @@ export default function TaskDetailDrawer({
                 {effectiveActiveDrawerTab === 'sessions' && renderSessionsWorkspace()}
                 {effectiveActiveDrawerTab === 'prompt' && renderPromptWorkspace()}
                 {effectiveActiveDrawerTab === 'model-runs' && renderModelRunsWorkspace()}
+                {effectiveActiveDrawerTab === 'readme' && renderReadmeWorkspace()}
                 {effectiveActiveDrawerTab === 'ai-review' && aiReviewVisible && renderAiReviewWorkspace()}
               </>
             )}

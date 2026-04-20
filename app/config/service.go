@@ -1,9 +1,13 @@
 package config
 
 import (
+	"encoding/json"
+	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 
+	"github.com/blueship581/pinru/internal/errs"
 	"github.com/blueship581/pinru/internal/github"
 	"github.com/blueship581/pinru/internal/gitlab"
 	"github.com/blueship581/pinru/internal/store"
@@ -164,6 +168,9 @@ func (s *ConfigService) ListProjects() ([]store.Project, error) {
 
 func (s *ConfigService) CreateProject(p store.Project) error {
 	p.CloneBasePath = util.NormalizePath(p.CloneBasePath)
+	if err := s.validateQuestionBankProjectIDs(p); err != nil {
+		return err
+	}
 	return s.store.CreateProject(p)
 }
 
@@ -177,6 +184,9 @@ func (s *ConfigService) UpdateProject(p store.Project) error {
 		if existing != nil {
 			p.GitLabToken = existing.GitLabToken
 		}
+	}
+	if err := s.validateQuestionBankProjectIDs(p); err != nil {
+		return err
 	}
 	return s.store.UpdateProject(p)
 }
@@ -266,6 +276,91 @@ func (s *ConfigService) UpdateGitHubAccount(a store.GitHubAccount) error {
 
 func (s *ConfigService) DeleteGitHubAccount(id string) error {
 	return s.store.DeleteGitHubAccount(id)
+}
+
+func parseQuestionBankProjectIDs(raw string) ([]int64, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" || trimmed == "[]" {
+		return []int64{}, nil
+	}
+
+	var numericIDs []int64
+	if err := json.Unmarshal([]byte(trimmed), &numericIDs); err == nil {
+		seen := make(map[int64]struct{}, len(numericIDs))
+		ids := make([]int64, 0, len(numericIDs))
+		for _, id := range numericIDs {
+			if id <= 0 {
+				return nil, fmt.Errorf(errs.FmtQuestionBankProjectIDInvalid, strconv.FormatInt(id, 10))
+			}
+			if _, exists := seen[id]; exists {
+				continue
+			}
+			seen[id] = struct{}{}
+			ids = append(ids, id)
+		}
+		return ids, nil
+	}
+
+	var stringIDs []string
+	if err := json.Unmarshal([]byte(trimmed), &stringIDs); err == nil {
+		seen := make(map[int64]struct{}, len(stringIDs))
+		ids := make([]int64, 0, len(stringIDs))
+		for _, rawID := range stringIDs {
+			value := strings.TrimSpace(rawID)
+			id, parseErr := strconv.ParseInt(value, 10, 64)
+			if parseErr != nil || id <= 0 {
+				return nil, fmt.Errorf(errs.FmtQuestionBankProjectIDInvalid, value)
+			}
+			if _, exists := seen[id]; exists {
+				continue
+			}
+			seen[id] = struct{}{}
+			ids = append(ids, id)
+		}
+		return ids, nil
+	}
+
+	return nil, errors.New(errs.MsgQuestionBankProjectIDsInvalid)
+}
+
+func (s *ConfigService) validateQuestionBankProjectIDs(p store.Project) error {
+	questionIDs, err := parseQuestionBankProjectIDs(p.QuestionBankProjectIDs)
+	if err != nil || len(questionIDs) == 0 {
+		return err
+	}
+
+	url := strings.TrimSpace(p.GitLabURL)
+	if url == "" {
+		configuredURL, configErr := s.store.GetConfig("gitlab_url")
+		if configErr != nil {
+			return configErr
+		}
+		url = strings.TrimSpace(configuredURL)
+	}
+
+	token := strings.TrimSpace(p.GitLabToken)
+	if token == "" {
+		configuredToken, configErr := s.store.GetConfig("gitlab_token")
+		if configErr != nil {
+			return configErr
+		}
+		token = strings.TrimSpace(configuredToken)
+	}
+
+	if url == "" || token == "" {
+		return errors.New(errs.MsgGitLabSettingsMissing)
+	}
+	skipTLSVerify, err := s.getGitLabSkipTLSVerify()
+	if err != nil {
+		return err
+	}
+
+	for _, questionID := range questionIDs {
+		if _, err := gitlab.FetchProject(strconv.FormatInt(questionID, 10), url, token, skipTLSVerify); err != nil {
+			return fmt.Errorf(errs.FmtQuestionBankProjectIDNotFound, strconv.FormatInt(questionID, 10))
+		}
+	}
+	return nil
 }
 
 // GetTraeSettings returns the stored Trae IDE path overrides and the

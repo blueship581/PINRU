@@ -1,9 +1,8 @@
-import type { MouseEvent, RefObject } from 'react';
+import type { RefObject } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
 import TaskDetailDrawer from '../../../shared/components/TaskDetailDrawer';
 import type { Task, TaskStatus } from '../../../store';
 import type { ProjectConfig } from '../../../api/config';
-import type { TaskTypeOverviewSummary } from '../../../shared/lib/taskTypeOverview';
 import {
   SessionExtractCandidateModal,
   TaskCardContextMenu,
@@ -42,12 +41,9 @@ export function BoardLayerStack({
   onTaskCardQuickAiReview,
   showProjectOverview,
   activeProject,
-  visibleProjectTaskSummaries,
   taskCount,
   onCloseProjectOverview,
   onNormalizeProjectOverview,
-  onOpenTaskContextMenu,
-  onSelectTaskFromOverview,
   pendingDelete,
   deleting,
   deleteError,
@@ -82,12 +78,9 @@ export function BoardLayerStack({
   onTaskCardQuickAiReview?: (directory: import('../../../api/task').TaskChildDirectory) => void;
   showProjectOverview: boolean;
   activeProject: ProjectConfig | null;
-  visibleProjectTaskSummaries: TaskTypeOverviewSummary[];
   taskCount: number;
   onCloseProjectOverview: () => void;
   onNormalizeProjectOverview: () => Promise<void>;
-  onOpenTaskContextMenu: (event: MouseEvent, task: Task) => void;
-  onSelectTaskFromOverview: (task: Task) => void;
   pendingDelete: Task | null;
   deleting: boolean;
   deleteError: string;
@@ -141,12 +134,9 @@ export function BoardLayerStack({
           />
           <ProjectOverviewPanel
             project={activeProject}
-            summaries={visibleProjectTaskSummaries}
             taskCount={taskCount}
             onClose={onCloseProjectOverview}
             onNormalized={onNormalizeProjectOverview}
-            onOpenTaskContextMenu={onOpenTaskContextMenu}
-            onSelectTask={onSelectTaskFromOverview}
           />
         </>
       )}
@@ -182,6 +172,7 @@ export function BoardLayerStack({
         <TaskDetailDrawer
           selected={detail.selected}
           selectedTaskDetail={detail.selectedTaskDetail}
+          selectedTaskReadme={detail.selectedTaskReadme}
           selectedModelRuns={detail.selectedModelRuns}
           selectedAiReviewRounds={detail.selectedAiReviewRounds}
           drawerLoading={detail.drawerLoading}

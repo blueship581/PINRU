@@ -45,6 +45,7 @@ const (
 const (
 	FmtTaskNotFound        = "任务不存在：%s"
 	FmtCardNotFound        = "题卡 %q 不存在"
+	FmtQuestionBankItemNotFound = "题库条目不存在：%d"
 	FmtTaskTypeQuotaUsedUp = "任务类型 %q 的配额已用尽"
 	FmtTaskTypeNoQuota     = "任务类型 %q 未配置配额"
 	FmtProjectTaskExists   = "当前项目下题卡已存在：%s"
@@ -60,6 +61,7 @@ const (
 	MsgTaskNoLocalDir       = "当前题目还没有可打开的本地目录"
 	MsgTaskNoReviewSubdir   = "当前题目还没有可供复审的子文件夹"
 	MsgTaskMissingWorkDir   = "当前任务没有本地代码目录，请先完成领题 Clone"
+	MsgQuestionBankRefreshOnlyGitLab = "只有 GitLab 题库条目支持刷新源码"
 )
 
 // ---------- 会话 / 消息 ----------
@@ -173,6 +175,7 @@ const (
 	FmtRemoteURLFail         = "获取 remote URL 失败：%w"
 	FmtRefuseCleanOutside    = "拒绝清理受管范围外的工作目录：%s"
 	FmtRefuseDeleteOutsideDir = "拒绝删除受管范围外的工作目录：%s"
+	FmtQuestionBankSyncFail   = "同步题库源码失败：%w"
 )
 
 // ---------- GitHub ----------
@@ -219,10 +222,13 @@ const (
 	MsgGitLabURLFormat      = "GitLab 服务器地址格式错误，请填写完整地址，例如 https://gitlab.example.com"
 	MsgGitLabURLScheme      = "GitLab 服务器地址必须以 http:// 或 https:// 开头"
 	MsgGitLabSettingsMissing = "请先在设置页面配置 GitLab URL 和 Token"
+	MsgQuestionBankProjectIDsInvalid = "GitLab 题库 ID 列表只能包含正整数项目 ID"
 
 	FmtGitLabAPIStatus  = "GitLab API %d：%s"
 	FmtGitLabDownloadFail = "下载失败 %d：%s"
 	FmtGitLabTargetExist = "目标目录已存在：%s"
+	FmtQuestionBankProjectIDInvalid = "无效的 GitLab 题库项目 ID：%s"
+	FmtQuestionBankProjectIDNotFound = "GitLab 题库项目不存在或不可访问：%s"
 )
 
 // ---------- CLI（Claude / Codex） ----------
@@ -299,6 +305,7 @@ const (
 	FmtStoreInvalidTaskTypeJSON  = "任务类型配置数据损坏：%w"
 	FmtStoreInvalidSessionListJSON = "session_list 数据损坏：%w"
 	FmtStoreInvalidTaskTypeCountJSON = "任务类型计数数据损坏：%w"
+	FmtStoreInvalidQuestionBankIDsJSON = "题库项目 ID 配置损坏：%w"
 	FmtStoreBackfillQuotas    = "回填项目 %s 配额失败：%w"
 	FmtStoreBackfillUsage     = "回填项目 %s 用量失败：%w"
 	FmtStoreBackfillTotals    = "回填项目 %s 合计失败：%w"

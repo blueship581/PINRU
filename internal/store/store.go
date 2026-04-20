@@ -358,6 +358,7 @@ func (s *Store) ensureSchema() error {
 		{table: "projects", column: "source_model_folder", definition: "TEXT NOT NULL DEFAULT 'ORIGIN'"},
 		{table: "projects", column: "default_submit_repo", definition: "TEXT NOT NULL DEFAULT ''"},
 		{table: "projects", column: "task_types", definition: "TEXT NOT NULL DEFAULT '[]'"},
+		{table: "projects", column: "question_bank_project_ids", definition: "TEXT NOT NULL DEFAULT '[]'"},
 		{table: "projects", column: "overview_markdown", definition: "TEXT NOT NULL DEFAULT ''"},
 		{table: "tasks", column: "project_type", definition: "TEXT NOT NULL DEFAULT ''"},
 		{table: "tasks", column: "change_scope", definition: "TEXT NOT NULL DEFAULT ''"},

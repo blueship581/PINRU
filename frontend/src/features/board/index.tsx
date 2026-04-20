@@ -798,15 +798,9 @@ export default function Board() {
         onTaskCardQuickAiReview={aiReviewVisible ? handleTaskCardAiReview : undefined}
         showProjectOverview={showProjectOverview}
         activeProject={activeProject}
-        visibleProjectTaskSummaries={visibleProjectTaskSummaries}
         taskCount={tasks.length}
         onCloseProjectOverview={() => setShowProjectOverview(false)}
         onNormalizeProjectOverview={loadTasks}
-        onOpenTaskContextMenu={openTaskCardContextMenu}
-        onSelectTaskFromOverview={(task) => {
-          setShowProjectOverview(false);
-          detail.setSelected(task);
-        }}
         pendingDelete={pendingDelete}
         deleting={deleting}
         deleteError={deleteError}
