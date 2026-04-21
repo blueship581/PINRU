@@ -27,6 +27,17 @@ describe('taskId helpers', () => {
     ).toBe('1849-Bug修复');
   });
 
+  it('uses gitlab project id even when project name contains a label prefix', () => {
+    expect(
+      formatTaskDisplayId({
+        id: 'pproject-1710000000001__bug__label-02493-2',
+        projectId: '1791',
+        projectName: 'label-02493-comparison',
+        taskType: 'Bug修复',
+      }),
+    ).toBe('1791-Bug修复-2');
+  });
+
   it('uses project name plus sequence for local synthetic tasks', () => {
     expect(
       formatTaskDisplayId({
