@@ -223,7 +223,7 @@ func TestBuildSkillPrompt(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			result := buildSkillPrompt(tc.req)
+			result := buildSkillPrompt(tc.req, nil)
 			for _, want := range tc.contains {
 				if !strings.Contains(result, want) {
 					t.Errorf("buildSkillPrompt() missing %q in:\n%s", want, result)
@@ -236,9 +236,28 @@ func TestBuildSkillPrompt(t *testing.T) {
 	noScopeResult := buildSkillPrompt(GeneratePromptRequest{
 		TaskType:    "Feature迭代",
 		Constraints: []string{"技术栈或依赖约束"},
-	})
+	}, nil)
 	if strings.Contains(noScopeResult, "scope:") {
 		t.Errorf("buildSkillPrompt() should not contain scope line when scopes are empty, got:\n%s", noScopeResult)
+	}
+
+	// Sibling prompts should be rendered with a de-duplication instruction.
+	withSiblings := buildSkillPrompt(GeneratePromptRequest{
+		TaskType: "Bug修复",
+	}, []siblingPrompt{
+		{TaskID: "label-00035", TaskType: "Bug修复", PromptText: "已有题目 1 的正文"},
+		{TaskID: "label-00035-2", TaskType: "Feature迭代", PromptText: "已有题目 2 的正文"},
+	})
+	for _, want := range []string{
+		"同题源已有提示词",
+		"【已有提示词 1】taskId=label-00035 taskType=Bug修复",
+		"已有题目 1 的正文",
+		"【已有提示词 2】taskId=label-00035-2 taskType=Feature迭代",
+		"已有题目 2 的正文",
+	} {
+		if !strings.Contains(withSiblings, want) {
+			t.Errorf("buildSkillPrompt(with siblings) missing %q in:\n%s", want, withSiblings)
+		}
 	}
 }
 

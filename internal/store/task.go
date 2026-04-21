@@ -363,6 +363,57 @@ func (s *Store) FindTaskByProjectConfigAndGitLabProjectID(projectConfigID string
 	return &t, nil
 }
 
+// ListSiblingTasksWithPrompt 返回同题源（相同 project_config_id + gitlab_project_id）
+// 下、排除指定任务本身、且已生成非空提示词的兄弟任务，按创建时间升序返回。
+// 用于在生成提示词时把兄弟题的已有提示词作为"避免重复"的上下文传给大模型。
+func (s *Store) ListSiblingTasksWithPrompt(projectConfigID string, gitLabProjectID int64, excludeTaskID string) ([]Task, error) {
+	projectConfigID = strings.TrimSpace(projectConfigID)
+	excludeTaskID = strings.TrimSpace(excludeTaskID)
+	if projectConfigID == "" {
+		return nil, fmt.Errorf(errs.MsgProjectConfigIDReq)
+	}
+
+	query := fmt.Sprintf(
+		`SELECT id, gitlab_project_id, project_name, status, task_type, session_list, local_path, prompt_text,
+		        prompt_generation_status, prompt_generation_error, %s, %s,
+		        notes, project_config_id, project_type, change_scope, %s, %s
+		   FROM tasks
+		  WHERE project_config_id = ? AND gitlab_project_id = ?
+		    AND id <> ?
+		    AND prompt_text IS NOT NULL AND TRIM(prompt_text) <> ''
+		  ORDER BY created_at ASC`,
+		nullableUnixTimestampExpr("prompt_generation_started_at"),
+		nullableUnixTimestampExpr("prompt_generation_finished_at"),
+		unixTimestampExpr("created_at"),
+		unixTimestampExpr("updated_at"),
+	)
+
+	rows, err := s.DB.Query(query, projectConfigID, gitLabProjectID, excludeTaskID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var tasks []Task
+	for rows.Next() {
+		var t Task
+		var rawSessionList string
+		if err := rows.Scan(
+			&t.ID, &t.GitLabProjectID, &t.ProjectName, &t.Status, &t.TaskType, &rawSessionList, &t.LocalPath, &t.PromptText,
+			&t.PromptGenerationStatus, &t.PromptGenerationError, &t.PromptGenerationStartedAt, &t.PromptGenerationFinishedAt,
+			&t.Notes, &t.ProjectConfigID, &t.ProjectType, &t.ChangeScope, &t.CreatedAt, &t.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		t.SessionList, err = parseTaskSessionList(rawSessionList, t.TaskType)
+		if err != nil {
+			return nil, err
+		}
+		tasks = append(tasks, t)
+	}
+	return tasks, rows.Err()
+}
+
 func (s *Store) CreateTask(t Task) error {
 	now := time.Now().Unix()
 	taskType := t.TaskType

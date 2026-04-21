@@ -109,13 +109,25 @@ func (s *PromptService) GenerateTaskPromptWithContext(ctx context.Context, req G
 		return nil, err
 	}
 
+	// 查询同题源下已有提示词的兄弟任务（B-35-1 的提示词要在 B-35-2 生成时传入，
+	// 用于去重约束）。GitLab 和压缩包来源都通过 GitLabProjectID 聚合，无需区分。
+	var siblingPrompts []siblingPrompt
+	if task.ProjectConfigID != nil && strings.TrimSpace(*task.ProjectConfigID) != "" {
+		siblings, err := s.store.ListSiblingTasksWithPrompt(*task.ProjectConfigID, task.GitLabProjectID, task.ID)
+		if err != nil {
+			slog.Warn("list sibling prompts failed", "task_id", task.ID, "error", err)
+		} else {
+			siblingPrompts = collectSiblingPrompts(siblings)
+		}
+	}
+
 	startedAt := time.Now().Unix()
 	if err := s.store.StartTaskPromptGeneration(task.ID, startedAt); err != nil {
 		return nil, err
 	}
 
 	// Build the [PINRU] skill prompt
-	skillPrompt := buildSkillPrompt(req)
+	skillPrompt := buildSkillPrompt(req, siblingPrompts)
 
 	// Execute CLI Agent with one automatic retry on failure
 	workDir := util.NormalizePath(*task.LocalPath)
@@ -307,7 +319,7 @@ func (s *PromptService) waitForCliCompletion(ctx context.Context, sessionID stri
 // 使用 "/技能名 参数" 格式，这是 claude -p 模式下唯一能正确触发
 // skill 加载（展开 SKILL.md 完整内容到上下文）的方式。
 // XML 标签格式（<command-name>）在非交互模式下不会触发 skill 展开。
-func buildSkillPrompt(req GeneratePromptRequest) string {
+func buildSkillPrompt(req GeneratePromptRequest, siblingPrompts []siblingPrompt) string {
 	const skillName = "评审项目提示词生成"
 	var sb strings.Builder
 	sb.WriteString("/")
@@ -336,7 +348,44 @@ func buildSkillPrompt(req GeneratePromptRequest) string {
 		sb.WriteString("\n")
 	}
 
+	if len(siblingPrompts) > 0 {
+		sb.WriteString("\n---\n")
+		sb.WriteString("同题源已有提示词（来自同一代码仓库的其他试题）：\n")
+		sb.WriteString(`要求：新生成的提示词必须在"考察点、切入角度、改动范围、描述措辞"上都与下列已有提示词明显不同，不得出现题目雷同或换皮重复；如果下列提示词已覆盖了该仓库最典型的考察方向，请改从次要的切入点切入。`)
+		sb.WriteString("\n\n")
+		for i, sp := range siblingPrompts {
+			fmt.Fprintf(&sb, "【已有提示词 %d】taskId=%s taskType=%s\n", i+1, sp.TaskID, sp.TaskType)
+			sb.WriteString(sp.PromptText)
+			sb.WriteString("\n\n")
+		}
+	}
+
 	return sb.String()
+}
+
+type siblingPrompt struct {
+	TaskID     string
+	TaskType   string
+	PromptText string
+}
+
+func collectSiblingPrompts(tasks []store.Task) []siblingPrompt {
+	result := make([]siblingPrompt, 0, len(tasks))
+	for _, t := range tasks {
+		if t.PromptText == nil {
+			continue
+		}
+		text := strings.TrimSpace(*t.PromptText)
+		if text == "" {
+			continue
+		}
+		result = append(result, siblingPrompt{
+			TaskID:     t.ID,
+			TaskType:   t.TaskType,
+			PromptText: text,
+		})
+	}
+	return result
 }
 
 type promptProviderSelection struct {
