@@ -925,10 +925,16 @@ func (s *GitService) syncGitLabQuestionBank(projectID string, questionIDs []int6
 	for _, questionID := range targetIDs {
 		existing := existingByID[questionID]
 		targetSourcePath := util.NormalizePath(util.BuildQuestionBankSourcePath(project.CloneBasePath, questionID))
+		displayName := buildGitLabQuestionBankDisplayName(questionID)
 		if !force && strings.TrimSpace(existing.SourceKind) == "gitlab" && managedDirectoryExists(existing.SourcePath) {
+			if strings.TrimSpace(existing.DisplayName) != displayName {
+				updated := existing
+				updated.DisplayName = displayName
+				_ = s.store.UpsertQuestionBankItem(updated)
+			}
 			result.Details = append(result.Details, QuestionBankSyncDetail{
 				QuestionID:  questionID,
-				DisplayName: firstNonEmpty(existing.DisplayName, fmt.Sprintf("%d", questionID)),
+				DisplayName: displayName,
 				Status:      "skipped",
 				Message:     "题库源码已存在，跳过同步",
 			})
@@ -936,11 +942,7 @@ func (s *GitService) syncGitLabQuestionBank(projectID string, questionIDs []int6
 			continue
 		}
 
-		displayName := fmt.Sprintf("%d", questionID)
-		projectInfo, fetchErr := gl.FetchProject(strconv.FormatInt(questionID, 10), url, token, skipTLSVerify)
-		if fetchErr == nil && projectInfo != nil && strings.TrimSpace(projectInfo.Name) != "" {
-			displayName = strings.TrimSpace(projectInfo.Name)
-		}
+		_, fetchErr := gl.FetchProject(strconv.FormatInt(questionID, 10), url, token, skipTLSVerify)
 
 		if fetchErr != nil {
 			if existing.QuestionID == 0 {
@@ -1168,11 +1170,6 @@ func (s *GitService) resolveProjectGitLabArchiveCredentials(project store.Projec
 	return url, token, skipTLSVerify, nil
 }
 
-func firstNonEmpty(values ...string) string {
-	for _, value := range values {
-		if trimmed := strings.TrimSpace(value); trimmed != "" {
-			return trimmed
-		}
-	}
-	return ""
+func buildGitLabQuestionBankDisplayName(questionID int64) string {
+	return fmt.Sprintf("label-%05d", questionID)
 }
