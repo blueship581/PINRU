@@ -243,7 +243,10 @@ func TestRunCodexReviewIncludesRecentCliOutputInError(t *testing.T) {
 		return mockPath, nil
 	})
 
-	_, err := svc.RunCodexReview(context.Background(), CodexReviewRequest{LocalPath: repoDir}, nil)
+	_, err := svc.RunCodexReview(context.Background(), CodexReviewRequest{
+		LocalPath:      repoDir,
+		OriginalPrompt: "stub prompt",
+	}, nil)
 	if err == nil {
 		t.Fatalf("RunCodexReview() error = nil, want failure")
 	}
@@ -265,11 +268,7 @@ func TestBuildCodexReviewPromptIncludesEvidenceGuardrails(t *testing.T) {
 		IssueTitle:        "奖励记录异常处理",
 		ModelName:         "cotv21-pro",
 	}, &pgCodeProjectContext{
-		ResolvedPath:     "/tmp/demo",
-		PromptCandidates: []string{"/tmp/demo/任务提示词.md"},
-		PromptSources: []pgCodePromptSource{
-			{Path: "/tmp/demo/任务提示词.md", Content: "实现每日任务与奖励记录"},
-		},
+		ResolvedPath: "/tmp/demo",
 		Git: pgCodeGitContext{
 			InGit:        true,
 			ChangedFiles: []string{"app/main.go"},
@@ -282,14 +281,14 @@ func TestBuildCodexReviewPromptIncludesEvidenceGuardrails(t *testing.T) {
 	if !strings.Contains(prompt, "只能基于任务提示词、git 变更、最近更新文件以及你实际读取过的文件下结论") {
 		t.Fatalf("prompt missing evidence guardrail: %q", prompt)
 	}
-	if !strings.Contains(prompt, "\"prompt_candidates\"") {
-		t.Fatalf("prompt missing serialized context: %q", prompt)
+	if !strings.Contains(prompt, "original_prompt/current_prompt 为唯一来源") {
+		t.Fatalf("prompt missing db-only prompt guidance: %q", prompt)
 	}
-	if !strings.Contains(prompt, "\"prompt_sources\"") {
-		t.Fatalf("prompt missing prompt sources: %q", prompt)
+	if strings.Contains(prompt, "prompt_sources") || strings.Contains(prompt, "prompt_candidates") {
+		t.Fatalf("prompt should not reference local prompt sources: %q", prompt)
 	}
 	if !strings.Contains(prompt, "实现每日任务与奖励记录") {
-		t.Fatalf("prompt missing prompt source content: %q", prompt)
+		t.Fatalf("prompt missing original prompt content: %q", prompt)
 	}
 	if !strings.Contains(prompt, "\"parent_review_notes\": \"奖励记录路径缺少空值保护\"") {
 		t.Fatalf("prompt missing parent review notes: %q", prompt)
@@ -299,45 +298,18 @@ func TestBuildCodexReviewPromptIncludesEvidenceGuardrails(t *testing.T) {
 	}
 }
 
-func TestEnrichPgCodeReviewContextLoadsSiblingAndParentPromptContents(t *testing.T) {
-	workspaceDir := t.TempDir()
-	projectDir := filepath.Join(workspaceDir, "01862-代码生成-2")
-	if err := os.MkdirAll(projectDir, 0o755); err != nil {
-		t.Fatalf("os.MkdirAll(projectDir) error = %v", err)
+func TestRunCodexReviewRejectsWhenPromptsMissing(t *testing.T) {
+	svc := New()
+	_, err := svc.RunCodexReview(context.Background(), CodexReviewRequest{
+		LocalPath:      t.TempDir(),
+		OriginalPrompt: "   ",
+		CurrentPrompt:  "",
+	}, nil)
+	if err == nil {
+		t.Fatalf("RunCodexReview() error = nil, want rejection when prompts missing")
 	}
-
-	siblingPrompt := filepath.Join(workspaceDir, "任务提示词.md")
-	projectPrompt := filepath.Join(projectDir, "任务提示词.md")
-	if err := os.WriteFile(siblingPrompt, []byte("同层提示词：实现首页每日任务\n"), 0o644); err != nil {
-		t.Fatalf("os.WriteFile(siblingPrompt) error = %v", err)
-	}
-	if err := os.WriteFile(projectPrompt, []byte("项目内提示词：接入奖励记录\n"), 0o644); err != nil {
-		t.Fatalf("os.WriteFile(projectPrompt) error = %v", err)
-	}
-
-	project := &pgCodeProjectContext{
-		ResolvedPath: projectDir,
-	}
-
-	enrichPgCodeReviewContext(projectDir, project)
-
-	if len(project.PromptCandidates) < 2 {
-		t.Fatalf("PromptCandidates = %#v, want both sibling and project prompt files", project.PromptCandidates)
-	}
-	if !containsString(project.PromptCandidates, siblingPrompt) {
-		t.Fatalf("PromptCandidates = %#v, want sibling prompt %q", project.PromptCandidates, siblingPrompt)
-	}
-	if !containsString(project.PromptCandidates, projectPrompt) {
-		t.Fatalf("PromptCandidates = %#v, want project prompt %q", project.PromptCandidates, projectPrompt)
-	}
-	if len(project.PromptSources) < 2 {
-		t.Fatalf("PromptSources = %#v, want prompt contents loaded", project.PromptSources)
-	}
-	if !containsPromptSource(project.PromptSources, siblingPrompt, "同层提示词：实现首页每日任务") {
-		t.Fatalf("PromptSources = %#v, want sibling prompt content", project.PromptSources)
-	}
-	if !containsPromptSource(project.PromptSources, projectPrompt, "项目内提示词：接入奖励记录") {
-		t.Fatalf("PromptSources = %#v, want project prompt content", project.PromptSources)
+	if !strings.Contains(err.Error(), "数据库中未保存该轮复审的提示词") {
+		t.Fatalf("RunCodexReview() error = %q, want missing-prompt rejection", err.Error())
 	}
 }
 
@@ -356,42 +328,6 @@ func TestCompactPromptForWindowsCommandLine(t *testing.T) {
 	}
 }
 
-func TestApplyCodexReviewEvidenceGuardsDowngradesWithoutPromptEvidence(t *testing.T) {
-	repoDir := t.TempDir()
-	filePath := filepath.Join(repoDir, "main.go")
-	if err := os.WriteFile(filePath, []byte("package main\nfunc main() {}\n"), 0o644); err != nil {
-		t.Fatalf("os.WriteFile(main.go) error = %v", err)
-	}
-
-	result := CodexReviewResult{
-		IsCompleted:  true,
-		IsSatisfied:  true,
-		ReviewNotes:  "无",
-		NextPrompt:   "无",
-		KeyLocations: "main.go:2",
-	}
-
-	applyCodexReviewEvidenceGuards(repoDir, &pgCodeProjectContext{
-		Exists:           true,
-		PromptCandidates: nil,
-		Git: pgCodeGitContext{
-			InGit:        true,
-			ChangedFiles: []string{"main.go"},
-		},
-	}, &result)
-
-	// Missing prompt candidates is now a soft guard: result booleans are preserved.
-	if !result.IsCompleted {
-		t.Fatalf("IsCompleted = false, want true (soft guard should not downgrade)")
-	}
-	if !result.IsSatisfied {
-		t.Fatalf("IsSatisfied = false, want true (soft guard should not downgrade)")
-	}
-	if !strings.Contains(result.ReviewNotes, "未找到任务提示词") {
-		t.Fatalf("ReviewNotes = %q, want missing prompt note", result.ReviewNotes)
-	}
-}
-
 func TestApplyCodexReviewEvidenceGuardsDowngradesInvalidKeyLocations(t *testing.T) {
 	repoDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(repoDir, "main.go"), []byte("package main\n"), 0o644); err != nil {
@@ -407,8 +343,7 @@ func TestApplyCodexReviewEvidenceGuardsDowngradesInvalidKeyLocations(t *testing.
 	}
 
 	applyCodexReviewEvidenceGuards(repoDir, &pgCodeProjectContext{
-		Exists:           true,
-		PromptCandidates: []string{filepath.Join(repoDir, "任务提示词.md")},
+		Exists: true,
 		Git: pgCodeGitContext{
 			InGit:        true,
 			ChangedFiles: []string{"main.go"},
@@ -422,22 +357,4 @@ func TestApplyCodexReviewEvidenceGuardsDowngradesInvalidKeyLocations(t *testing.
 	if !strings.Contains(result.ReviewNotes, "关键代码位置格式无效") {
 		t.Fatalf("ReviewNotes = %q, want invalid key location note", result.ReviewNotes)
 	}
-}
-
-func containsString(values []string, want string) bool {
-	for _, value := range values {
-		if value == want {
-			return true
-		}
-	}
-	return false
-}
-
-func containsPromptSource(sources []pgCodePromptSource, wantPath, wantContent string) bool {
-	for _, source := range sources {
-		if source.Path == wantPath && strings.Contains(source.Content, wantContent) {
-			return true
-		}
-	}
-	return false
 }

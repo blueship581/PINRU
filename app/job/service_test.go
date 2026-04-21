@@ -240,6 +240,22 @@ func TestExecuteAiReviewRunsSingleRoundPerSubmission(t *testing.T) {
 	testStore := testutil.OpenTestStore(t)
 
 	taskID := "task-1"
+	workDir := t.TempDir()
+	task := store.Task{
+		ID:              taskID,
+		GitLabProjectID: 1849,
+		ProjectName:     "label-01849",
+		TaskType:        "Bug修复",
+	}
+	modelRuns := []store.ModelRun{{
+		ID:        "run-task-1",
+		TaskID:    taskID,
+		ModelName: "cotv21-pro",
+		LocalPath: &workDir,
+	}}
+	if err := testStore.CreateTaskWithModelRuns(task, modelRuns); err != nil {
+		t.Fatalf("CreateTaskWithModelRuns() error = %v", err)
+	}
 	if err := testStore.CreateBackgroundJob(store.BackgroundJob{
 		ID:             "job-1",
 		JobType:        "ai_review",
@@ -254,7 +270,6 @@ func TestExecuteAiReviewRunsSingleRoundPerSubmission(t *testing.T) {
 		t.Fatalf("CreateBackgroundJob() error = %v", err)
 	}
 
-	workDir := t.TempDir()
 	countFile := filepath.Join(t.TempDir(), "count.txt")
 	mockPath := createMockCodexExecutable(t, "codex_single_round", map[string]string{
 		"GO_TEST_COUNT_FILE": countFile,
@@ -269,8 +284,9 @@ func TestExecuteAiReviewRunsSingleRoundPerSubmission(t *testing.T) {
 	jobSvc := &JobService{store: testStore, cliSvc: cliSvc}
 
 	payloadJSON, err := json.Marshal(AiReviewPayload{
-		ModelName: "cotv21-pro",
-		LocalPath: workDir,
+		ModelName:          "cotv21-pro",
+		LocalPath:          workDir,
+		NextPromptOverride: "实现每日任务与奖励记录",
 	})
 	if err != nil {
 		t.Fatalf("json.Marshal(payload) error = %v", err)
@@ -578,9 +594,10 @@ func TestExecuteAiReviewIncrementsReviewRoundAcrossSubmissions(t *testing.T) {
 	jobSvc := &JobService{store: testStore, cliSvc: cliSvc}
 
 	payloadJSON, err := json.Marshal(AiReviewPayload{
-		ModelRunID: strPtr("run-review-round"),
-		ModelName:  "cotv21-pro",
-		LocalPath:  workDir,
+		ModelRunID:         strPtr("run-review-round"),
+		ModelName:          "cotv21-pro",
+		LocalPath:          workDir,
+		NextPromptOverride: "修复奖励记录漏记问题",
 	})
 	if err != nil {
 		t.Fatalf("json.Marshal(payload) error = %v", err)

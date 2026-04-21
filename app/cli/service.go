@@ -18,7 +18,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-	"unicode/utf8"
 
 	"github.com/blueship581/pinru/internal/errs"
 	"github.com/blueship581/pinru/internal/util"
@@ -47,12 +46,6 @@ func defaultPgCodeContextScriptPath() string {
 	}
 	return filepath.Join(home, ".codex", "skills", "pg-code", "scripts", "collect_project_context.py")
 }
-
-const (
-	maxPgCodePromptCandidates   = 6
-	maxPgCodePromptSources      = 3
-	maxPgCodePromptContentRunes = 6000
-)
 
 type cliSession struct {
 	mu       sync.Mutex
@@ -588,21 +581,13 @@ type pgCodeContextEnvelope struct {
 }
 
 type pgCodeProjectContext struct {
-	InputPath        string               `json:"input_path"`
-	ResolvedPath     string               `json:"resolved_path"`
-	Exists           bool                 `json:"exists"`
-	ProjectIDGuess   string               `json:"project_id_guess"`
-	PromptCandidates []string             `json:"prompt_candidates"`
-	PromptSources    []pgCodePromptSource `json:"prompt_sources,omitempty"`
-	Git              pgCodeGitContext     `json:"git"`
-	RecentFiles      []pgCodeRecentFile   `json:"recent_files"`
-	Summary          pgCodeProjectSummary `json:"summary"`
-}
-
-type pgCodePromptSource struct {
-	Path      string `json:"path"`
-	Content   string `json:"content"`
-	Truncated bool   `json:"truncated,omitempty"`
+	InputPath      string               `json:"input_path"`
+	ResolvedPath   string               `json:"resolved_path"`
+	Exists         bool                 `json:"exists"`
+	ProjectIDGuess string               `json:"project_id_guess"`
+	Git            pgCodeGitContext     `json:"git"`
+	RecentFiles    []pgCodeRecentFile   `json:"recent_files"`
+	Summary        pgCodeProjectSummary `json:"summary"`
 }
 
 type pgCodeGitContext struct {
@@ -636,12 +621,14 @@ func (s *CliService) RunCodexReview(ctx context.Context, req CodexReviewRequest,
 	if localPath == "" {
 		return nil, fmt.Errorf(errs.MsgLocalPathRequired)
 	}
+	if strings.TrimSpace(req.OriginalPrompt) == "" && strings.TrimSpace(req.CurrentPrompt) == "" {
+		return nil, fmt.Errorf(errs.MsgReviewPromptMissing)
+	}
 
 	reviewContext, ctxErr := s.collectPgCodeReviewContext(ctx, localPath)
 	if ctxErr != nil {
 		slog.Warn("collectPgCodeReviewContext failed", "localPath", localPath, "error", ctxErr)
 	}
-	enrichPgCodeReviewContext(localPath, reviewContext)
 	reviewPrompt := buildCodexReviewPrompt(req, reviewContext)
 	if runtime.GOOS == "windows" {
 		reviewPrompt = compactPromptForWindowsCommandLine(reviewPrompt)
@@ -812,7 +799,7 @@ func buildCodexReviewPrompt(req CodexReviewRequest, project *pgCodeProjectContex
 4. 当主要功能实现度达到 80% 以上时，isCompleted 和 isSatisfied 均可填 true，允许存在少量非关键细节缺失或边缘情况未覆盖。
 5. 找不到任务提示词或有效改动时，reviewNotes 注明”依据不足”，isCompleted 和 isSatisfied 均填 false。
 6. projectType 和 changeScope 按最符合实际情况的选项填写。
-7. 预采集上下文里的 prompt_sources 已包含候选提示词正文，可能来自项目内、同层目录或上一级目录；若存在多份，请优先依据正文判断原始需求，prompt_candidates 仅作路径参考。
+7. 任务提示词以“当前复核节点上下文”里的 original_prompt/current_prompt 为唯一来源，不要再去读取本地提示词文件；若两者都缺失请在 reviewNotes 注明并终止评审。
 8. 当本轮发现多个独立问题时，必须通过 issues 数组分别列出；不要把多个问题揉成一条。
 9. issues[*].issueType 默认填“Bug修复”，除非证据明确表明是其他类型。
 10. 若本轮已通过，issues 返回空数组。
@@ -853,199 +840,6 @@ func compactPromptForWindowsCommandLine(prompt string) string {
 	return strings.Join(compacted, " ")
 }
 
-func enrichPgCodeReviewContext(localPath string, project *pgCodeProjectContext) {
-	if project == nil {
-		return
-	}
-
-	basePath := strings.TrimSpace(project.ResolvedPath)
-	if basePath == "" {
-		basePath = localPath
-	}
-
-	project.PromptCandidates = discoverPromptCandidates(basePath, project.PromptCandidates)
-	project.PromptSources = loadPromptSources(project.PromptCandidates)
-}
-
-func discoverPromptCandidates(localPath string, existing []string) []string {
-	start := resolvePromptSearchStart(localPath)
-	if start == "" {
-		return dedupePromptCandidatePaths(existing)
-	}
-
-	seen := make(map[string]struct{}, maxPgCodePromptCandidates)
-	candidates := make([]string, 0, maxPgCodePromptCandidates)
-	add := func(path string) {
-		if len(candidates) >= maxPgCodePromptCandidates {
-			return
-		}
-		resolved := resolveExistingPromptCandidate(path, start)
-		if resolved == "" {
-			return
-		}
-		if _, ok := seen[resolved]; ok {
-			return
-		}
-		seen[resolved] = struct{}{}
-		candidates = append(candidates, resolved)
-	}
-
-	for _, path := range existing {
-		add(path)
-	}
-
-	for _, directory := range promptExactSearchDirs(start, 4) {
-		add(filepath.Join(directory, "任务提示词.md"))
-	}
-
-	for _, directory := range promptExactSearchDirs(start, 3) {
-		entries, err := os.ReadDir(directory)
-		if err != nil {
-			continue
-		}
-		for _, entry := range entries {
-			if len(candidates) >= maxPgCodePromptCandidates {
-				break
-			}
-			if entry.IsDir() {
-				continue
-			}
-			name := entry.Name()
-			lower := strings.ToLower(name)
-			if filepath.Ext(lower) != ".md" {
-				continue
-			}
-			if !strings.Contains(name, "提示词") && !strings.Contains(lower, "prompt") {
-				continue
-			}
-			add(filepath.Join(directory, name))
-		}
-	}
-
-	return candidates
-}
-
-func loadPromptSources(candidates []string) []pgCodePromptSource {
-	sources := make([]pgCodePromptSource, 0, min(len(candidates), maxPgCodePromptSources))
-	for _, candidate := range candidates {
-		if len(sources) >= maxPgCodePromptSources {
-			break
-		}
-
-		data, err := os.ReadFile(candidate)
-		if err != nil {
-			continue
-		}
-		content := strings.TrimSpace(string(data))
-		if content == "" {
-			continue
-		}
-
-		truncated := false
-		if utf8.RuneCountInString(content) > maxPgCodePromptContentRunes {
-			content = truncateRunes(content, maxPgCodePromptContentRunes)
-			truncated = true
-		}
-
-		sources = append(sources, pgCodePromptSource{
-			Path:      candidate,
-			Content:   content,
-			Truncated: truncated,
-		})
-	}
-	return sources
-}
-
-func resolvePromptSearchStart(localPath string) string {
-	if strings.TrimSpace(localPath) == "" {
-		return ""
-	}
-	resolved, err := filepath.Abs(localPath)
-	if err != nil {
-		resolved = localPath
-	}
-	info, err := os.Stat(resolved)
-	if err == nil && !info.IsDir() {
-		return filepath.Dir(resolved)
-	}
-	return resolved
-}
-
-func promptExactSearchDirs(start string, levels int) []string {
-	if levels <= 0 || strings.TrimSpace(start) == "" {
-		return nil
-	}
-
-	result := make([]string, 0, levels)
-	seen := map[string]struct{}{}
-	current := start
-	for len(result) < levels && strings.TrimSpace(current) != "" {
-		if _, ok := seen[current]; !ok {
-			seen[current] = struct{}{}
-			result = append(result, current)
-		}
-		parent := filepath.Dir(current)
-		if parent == current {
-			break
-		}
-		current = parent
-	}
-	return result
-}
-
-func resolveExistingPromptCandidate(path string, baseDir string) string {
-	trimmed := strings.TrimSpace(path)
-	if trimmed == "" {
-		return ""
-	}
-
-	resolved := trimmed
-	if !filepath.IsAbs(resolved) {
-		resolved = filepath.Join(baseDir, resolved)
-	}
-	resolved = filepath.Clean(resolved)
-	info, err := os.Stat(resolved)
-	if err != nil || info.IsDir() {
-		return ""
-	}
-	return resolved
-}
-
-func dedupePromptCandidatePaths(paths []string) []string {
-	if len(paths) == 0 {
-		return nil
-	}
-
-	result := make([]string, 0, min(len(paths), maxPgCodePromptCandidates))
-	seen := make(map[string]struct{}, len(paths))
-	for _, path := range paths {
-		resolved := resolveExistingPromptCandidate(path, ".")
-		if resolved == "" {
-			continue
-		}
-		if _, ok := seen[resolved]; ok {
-			continue
-		}
-		seen[resolved] = struct{}{}
-		result = append(result, resolved)
-		if len(result) >= maxPgCodePromptCandidates {
-			break
-		}
-	}
-	return result
-}
-
-func truncateRunes(value string, limit int) string {
-	if limit <= 0 {
-		return ""
-	}
-	runes := []rune(value)
-	if len(runes) <= limit {
-		return value
-	}
-	return strings.TrimSpace(string(runes[:limit])) + "\n\n[已截断]"
-}
-
 func applyCodexReviewEvidenceGuards(localPath string, project *pgCodeProjectContext, result *CodexReviewResult) {
 	if result == nil {
 		return
@@ -1079,18 +873,10 @@ func applyCodexReviewEvidenceGuards(localPath string, project *pgCodeProjectCont
 		return
 	}
 
-	// Soft guard: missing prompt candidates or invalid key locations are noted
-	// but do not override the AI's pass/fail judgment.
-	var softReasons []string
-	if project != nil && len(project.PromptCandidates) == 0 {
-		softReasons = append(softReasons, "未找到任务提示词")
-	}
+	// Soft guard: invalid key locations are noted but do not override the
+	// AI's pass/fail judgment.
 	if countValidKeyLocations(localPath, result.KeyLocations) == 0 && strings.TrimSpace(result.KeyLocations) != "" {
-		softReasons = append(softReasons, "关键代码位置格式无效")
-	}
-
-	if len(softReasons) > 0 {
-		note := "注：" + strings.Join(softReasons, "；")
+		note := "注：关键代码位置格式无效"
 		if existing := strings.TrimSpace(result.ReviewNotes); existing == "" || existing == "无" {
 			result.ReviewNotes = note
 		} else {

@@ -26,6 +26,7 @@ const (
 	MsgLocalPathRequired     = "本地路径不能为空"
 	MsgPromptRequired        = "提示词不能为空"
 	MsgPromptContentRequired = "提示词内容不能为空"
+	MsgReviewPromptMissing   = "数据库中未保存该轮复审的提示词，已拒绝 AI 复审"
 	MsgTargetDirRequired     = "目标目录不能为空"
 	MsgDirRequired           = "目录不能为空"
 	MsgRootDirRequired       = "根目录不能为空"
