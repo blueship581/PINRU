@@ -1,7 +1,7 @@
 # Job System — 架构文档
 
 > 源文件：`app/job/service.go` / `internal/store/background_job.go`
-> 更新日期：2026-04-14
+> 更新日期：2026-04-20
 
 ---
 
@@ -88,7 +88,28 @@ type GitCloneFailure struct {
 
 ---
 
-### 2.4 `pr_submit` — GitHub PR 提交
+### 2.4 `question_bank_materialize` — 题库源码复制
+
+InputPayload 为 `QuestionBankMaterializePayload`，字段：
+- `bankSourcePath`：题库中的源码副本路径。
+- `targetSourcePath`：本次任务的源码目录。
+- `sourceModelId`：源码模型 ID，默认 `ORIGIN`。
+- `copyTargets[]`：其余模型目录列表，结构与 `git_clone.copyTargets` 相同。
+
+OutputPayload 复用 `GitCloneResult`：
+- `sourcePath`：本次任务的源码目录。
+- `successfulModels`：复制成功的模型 ID。
+- `failedModels`：复制失败的模型及原因。
+
+执行流程：
+- 先检查 `targetSourcePath` 与全部 `copyTargets` 不存在。
+- 通过 `GitService.CopyProjectDirectory` 先把 `bankSourcePath` 复制到 `targetSourcePath`。
+- 再逐个复制到其他模型目录。
+- 复制过程沿用 `._pinru_tmp` 原子目录与清理逻辑；失败或取消时不污染正式任务目录。
+
+---
+
+### 2.5 `pr_submit` — GitHub PR 提交
 
 **InputPayload — `PrSubmitPayload`**
 
@@ -108,7 +129,7 @@ type PrSubmitPayload struct {
 
 ---
 
-### 2.5 `ai_review` — AI 代码复审
+### 2.6 `ai_review` — AI 代码复审
 
 **InputPayload — `AiReviewPayload`**
 
@@ -207,6 +228,8 @@ cloneSem: make(chan struct{}, gitCloneConcurrencyLimit)
 ### 其他任务类型
 
 `prompt_generate`、`session_sync`、`pr_submit`、`ai_review` 均在独立 goroutine 中执行，无额外并发限制。
+
+`question_bank_materialize` 复用 `git_clone` 的同一组信号量限制，因为它本质上也是“源码复制 + 模型副本复制”型 IO 密集任务。
 
 ---
 

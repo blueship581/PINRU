@@ -183,6 +183,30 @@ interface JobProgressEvent {
 
 ---
 
+## 项目概况里的 question_bank 工作流
+
+项目概况侧栏新增“项目题库”区块。实现集中在 `frontend/src/features/board/components/ProjectPanels.tsx`。
+
+入口行为：
+- 打开项目概况时自动调用 `GitService.ScanLocalQuestionBank`。
+- 扫描结果文案是“已入题库”，不再显示“已创建题卡”。
+- 同一区块可手动触发 `SyncGitLabQuestionBank` 和单题 `RefreshQuestionBankItem`。
+
+批量建题：
+- 用户先在题库列表里多选题目，再选择任务类型和套数。
+- 前端先按项目总量预算切分，再按“同项目配置 + 单题 + 任务类型”上限切分；逻辑复用 Claim 页的 `partitionClaimsByProjectLimit`。
+- 可执行项提交 `question_bank_materialize` job；完成后再调用 `TaskService.CreateTask`。
+- 现有 Claim 页的手动 GitLab 输入流程保持不变。
+
+本地题显示：
+- 本地题在 UI 中优先显示 `project_name-claimSequence`，例如 `B-715-1`、`B-715-2`。
+- GitLab 题仍显示为 `gitlab_project_id-taskType-claimSequence`。
+- 该规则见 `frontend/src/shared/lib/taskId.ts` 和 `frontend/src/features/report/utils.ts`。
+
+本地题限额兼容：
+- 新 question_bank 本地题与旧本地导入遗留任务的 synthetic id 可能不同。
+- 前端预拦截时，对本地题按 `projectName + taskType` 聚合计数，而不是仅按 synthetic `projectId` 聚合。
+
 ## AI 审核工作区
 
 Board 详情抽屉里的 AI 审核页由 `frontend/src/shared/components/TaskDetailDrawer.tsx` 渲染，数据来自 `useBoardTaskDetail`：

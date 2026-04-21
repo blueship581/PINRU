@@ -1,6 +1,6 @@
 # Git 集成架构
 
-> 最后更新：2026-04-14（新增原子临时目录、ctx 传播修复）
+> 最后更新：2026-04-20（新增项目级 question_bank 工作流）
 
 ## 概述
 
@@ -52,9 +52,43 @@ CreateTask
 - 任务目录：`<basePath>/<NormalizeProjectName>-<taskType>-<seq>`（seq=1 时后缀可省略）
 - 源码目录：`<taskPath>/<label-NNNNN>-<taskType>-<seq>`（NNNNN 为 GitLab projectID，零填充 5 位）
 
+补充：
+- `PlanManagedClaimPaths` 同时服务 GitLab 领题和 question_bank 建题；序号规则完全一致。首套固定为 `claimSequence=1`，后续继续递增。实现见 `app/git/service.go`（`PlanManagedClaimPaths`）。
+- 本地题库项虽然使用 synthetic `question_id` 写入 `tasks.gitlab_project_id`，但它只承担“单题唯一键”职责；任务目录与源码目录仍以 `claimSequence` 决定第几套。
+
 ---
 
-## 三、Submit 完整流程
+## 三、项目级 question_bank
+
+每个项目的唯一题库根目录固定为 `<cloneBasePath>/question_bank`。实现见 `app/git/question_bank.go`、`app/git/local_import.go`、`internal/util/path.go`。
+
+固定子目录：
+- `question_bank/archives/`：仅保存本地压缩包原件。
+- `question_bank/sources/<question-id>/`：保存题目的唯一源码副本。
+
+本地扫描：
+- 入口是 `ScanLocalQuestionBank(projectID)`。
+- 只扫描 `cloneBasePath` 顶层。
+- 忽略隐藏目录、模型目录、受管任务目录、`question_bank` 自身、已被任务或题库占用的路径。
+- 本地目录直接迁入 `question_bank/sources/<question-id>/`。
+- 本地压缩包移动到 `question_bank/archives/`，再解压到 `question_bank/sources/<question-id>/`。
+- 入库后补本地 `.git` 基线；扫描只更新题库项，不创建 `Task`。
+
+GitLab 题库：
+- 项目配置中的 `questionBankProjectIDs` 保存 GitLab 题目 ID 列表。
+- `SyncGitLabQuestionBank(projectID, questionIDs?)` 首次把源码拉到 `question_bank/sources/<question-id>/`。
+- 后续再次建题只复制本地题库源码，不重复远端拉取。
+- `RefreshQuestionBankItem(projectID, questionID)` 仅允许刷新 `source_kind=gitlab` 的题库项。
+
+从题库建题：
+- 前端从项目概况的“项目题库”区块多选题目。
+- 先调用 `PlanManagedClaimPaths` 规划 `claimSequence` / 目录。
+- 再提交 `question_bank_materialize` job，把题库源码复制到本次任务的源码目录与模型目录。
+- 最后调用 `CreateTask` 落库；协议仍沿用 `task.LocalPath` / `modelRun.LocalPath`。
+
+---
+
+## 四、Submit 完整流程
 
 ```
 PublishSourceRepo（推源码到 GitHub main 分支）
@@ -90,7 +124,7 @@ SubmitModelRun（为单个模型副本创建 PR）
 
 ---
 
-## 四、GitOps 封装的 Git 命令
+## 五、GitOps 封装的 Git 命令
 
 | 函数 | 实际命令 | 关键参数 |
 |---|---|---|
@@ -105,7 +139,7 @@ SubmitModelRun（为单个模型副本创建 PR）
 
 ---
 
-## 五、Git 认证机制
+## 六、Git 认证机制
 
 所有网络 Git 操作（clone / push）均通过 `buildGitAuthEnv` 注入环境变量，**不修改全局 git config，不依赖 credential store**。
 
@@ -123,7 +157,7 @@ GIT_CONFIG_VALUE_0=Authorization: Basic base64(<username>:<token>)
 
 ---
 
-## 六、工作区隔离（pinru-github-pr 临时目录）
+## 七、工作区隔离（pinru-github-pr 临时目录）
 
 Submit 阶段使用独立临时工作区，与用户本地源码目录完全隔离：
 
@@ -138,7 +172,7 @@ WorkspacePath(targetRepo) = WorkspaceRoot()/<sanitized-targetRepo>
 
 ---
 
-## 七、NormalizeManagedSourceFolders 快速描述
+## 八、NormalizeManagedSourceFolders 快速描述
 
 对某个 project 下的全部 task，检查并修复本地目录命名是否符合当前规则：
 
@@ -154,7 +188,7 @@ WorkspacePath(targetRepo) = WorkspaceRoot()/<sanitized-targetRepo>
 
 ---
 
-## 八、原子临时目录（Atomic Staging）
+## 九、原子临时目录（Atomic Staging）
 
 `CloneWithProgress` 和 `CopyProjectDirectory` 均采用**先写临时目录、成功后 Rename** 的原子模式，消除了 clone/copy 失败后留下半成品目录的问题。
 
@@ -199,7 +233,7 @@ initializeSnapshotRepository(ctx, src, stagingDst)
 
 ---
 
-## 九、Context 传播与超时控制
+## 十、Context 传播与超时控制
 
 ### clone 阶段
 

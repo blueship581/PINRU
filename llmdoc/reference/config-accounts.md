@@ -50,6 +50,12 @@ func (s *ConfigService) ConsumeProjectQuota(projectID, taskType string) error
 
 `UpdateProject` 若传入 token 为空，自动保留数据库中已有的 token（防止前端编辑时清空）。
 
+`CreateProject` / `UpdateProject` 还会校验 `QuestionBankProjectIDs`：
+- 输入格式固定为 JSON 数组字符串。
+- 保存前会去重。
+- 每个 GitLab 题目 ID 都必须能通过当前项目级或全局 GitLab 凭据访问。
+- 任一 ID 校验失败都会阻止保存。
+
 ### LLM Provider CRUD
 
 ```go
@@ -121,6 +127,7 @@ type Project struct {
     TaskTypes         string `json:"taskTypes"`         // JSON 数组，任务类型名称列表
     TaskTypeQuotas    string `json:"taskTypeQuotas"`    // JSON map，各任务类型剩余配额
     TaskTypeTotals    string `json:"taskTypeTotals"`    // JSON map，各任务类型总配额
+    QuestionBankProjectIDs string `json:"questionBankProjectIds"` // JSON 数组，项目级 GitLab 题库 ID 列表
     OverviewMarkdown  string `json:"overviewMarkdown"`  // 项目简介 Markdown
     CreatedAt         int64  `json:"createdAt"`
     UpdatedAt         int64  `json:"updatedAt"`
@@ -134,6 +141,7 @@ type Project struct {
 - `TaskTypes`：JSON 数组如 `["feature", "bugfix", "refactor"]`，决定领题时可选的任务类型。
 - `TaskTypeQuotas`：JSON map 如 `{"feature": 10, "bugfix": 5}`，记录各类型的剩余可领数量；`ConsumeProjectQuota` 每次领题时将对应值减 1（允许负数以支持超额领取）。
 - `TaskTypeTotals`：JSON map，记录各类型的总配额，用于前端展示用量百分比；由 store 在 quota 首次写入时自动回填。
+- `QuestionBankProjectIDs`：JSON 数组，如 `[1849,2898,3001]`。用于项目概况中的 GitLab 题库同步入口；首次同步后源码沉淀到 `<cloneBasePath>/question_bank/sources/`。
 
 ---
 

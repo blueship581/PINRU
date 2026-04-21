@@ -87,6 +87,10 @@ Session 相关字段（`session_id`、`conversation_rounds`、`conversation_date
 | `created_at` | `CreatedAt` | INTEGER | 创建时间（Unix 秒） |
 | `updated_at` | `UpdatedAt` | INTEGER | 最后修改时间（Unix 秒） |
 
+补充：
+- question_bank 本地题也写入 `tasks.gitlab_project_id`，但值是 synthetic id，不是远端 GitLab ID。
+- 对本地题，前端展示 ID 与报表 repoId 优先使用 `project_name` 加 `claimSequence`，例如 `B-715-1`；底层存储仍保留 synthetic `gitlab_project_id` 作为单题键。
+
 ### model_runs 表
 
 | 列名 | Go 字段 | 类型 | 说明 |
@@ -201,7 +205,8 @@ CreateTask(req CreateTaskRequest)
 │
 ├── 4. enforceTaskTypeUpperLimit(req)
 │       读取 projects.task_type_quotas（JSON map[taskType]int）
-│       统计 tasks 表中同 projectConfigID + gitLabProjectID + taskType 的数量
+│       GitLab 题统计同 projectConfigID + gitLabProjectID + taskType 的数量
+│       本地题兼容统计同 projectConfigID + projectName + taskType 的数量
 │       超出上限则报错
 │
 ├── 5. 构造 store.Task 和 []store.ModelRun
