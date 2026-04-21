@@ -1,5 +1,5 @@
-import { useState, type FC } from 'react';
-import { ChevronDown, ChevronRight, RefreshCw, Search, Trash2 } from 'lucide-react';
+import { useEffect, useRef, useState, type FC } from 'react';
+import { Check, ChevronDown, ChevronRight, RefreshCw, Search, Trash2 } from 'lucide-react';
 import type { QuestionBankItem } from '../../../api/git';
 import {
   getQuestionBankSourceKindLabel,
@@ -163,9 +163,19 @@ const QuestionBankRow: FC<{
   deleting: boolean;
 }> = ({ item, checked, onToggleSelection, onRefresh, refreshing, onDelete, deleting }) => {
   const [expanded, setExpanded] = useState(false);
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const confirmTimerRef = useRef<number | null>(null);
   const statusMeta = getQuestionBankStatusMeta(item.status);
   const selectable = item.status === 'ready';
   const hasDetails = Boolean(item.sourcePath || item.archivePath || item.errorMessage);
+
+  useEffect(() => {
+    return () => {
+      if (confirmTimerRef.current !== null) {
+        window.clearTimeout(confirmTimerRef.current);
+      }
+    };
+  }, []);
 
   return (
     <li
@@ -253,17 +263,41 @@ const QuestionBankRow: FC<{
           event.preventDefault();
           event.stopPropagation();
           if (deleting) return;
-          const confirmed = window.confirm(
-            `确定移除题目「${item.displayName}」吗？\n此操作会同时清除对应的源码目录与归档压缩包。`,
-          );
-          if (!confirmed) return;
+          if (!confirmingDelete) {
+            setConfirmingDelete(true);
+            if (confirmTimerRef.current !== null) {
+              window.clearTimeout(confirmTimerRef.current);
+            }
+            confirmTimerRef.current = window.setTimeout(() => {
+              setConfirmingDelete(false);
+              confirmTimerRef.current = null;
+            }, 3000);
+            return;
+          }
+          if (confirmTimerRef.current !== null) {
+            window.clearTimeout(confirmTimerRef.current);
+            confirmTimerRef.current = null;
+          }
+          setConfirmingDelete(false);
           onDelete(item);
         }}
         disabled={deleting}
-        title="移除题库条目"
-        className="flex-none rounded p-1 text-stone-400 opacity-0 transition-opacity hover:bg-red-50 hover:text-red-600 disabled:opacity-50 group-hover:opacity-100 dark:hover:bg-red-500/10 dark:hover:text-red-400 cursor-default"
+        title={
+          confirmingDelete
+            ? '再次点击确认移除（将同时清除源码目录与归档压缩包）'
+            : '移除题库条目'
+        }
+        className={`flex-none rounded p-1 transition-opacity disabled:opacity-50 cursor-default ${
+          confirmingDelete
+            ? 'bg-red-50 text-red-600 opacity-100 dark:bg-red-500/10 dark:text-red-400'
+            : 'text-stone-400 opacity-0 hover:bg-red-50 hover:text-red-600 group-hover:opacity-100 dark:hover:bg-red-500/10 dark:hover:text-red-400'
+        }`}
       >
-        <Trash2 className={`h-3.5 w-3.5 ${deleting ? 'animate-pulse opacity-100' : ''}`} />
+        {confirmingDelete ? (
+          <Check className="h-3.5 w-3.5" />
+        ) : (
+          <Trash2 className={`h-3.5 w-3.5 ${deleting ? 'animate-pulse opacity-100' : ''}`} />
+        )}
       </button>
     </li>
   );
