@@ -140,3 +140,7 @@ export async function cancelJob(id: string): Promise<void> {
 export async function deleteAiReviewJob(id: string): Promise<void> {
   return callService('JobService', 'DeleteAiReviewJob', id);
 }
+
+export async function deleteAiReviewRound(roundId: string): Promise<void> {
+  return callService('JobService', 'DeleteAiReviewRound', roundId);
+}

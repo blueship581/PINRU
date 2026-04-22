@@ -1287,6 +1287,7 @@ export function useBoardTaskDetail({
     selectedAiReviewRounds,
     drawerLoading,
     drawerError,
+    setDrawerError,
     statusChanging,
     taskTypeChanging,
     sessionListDraft,

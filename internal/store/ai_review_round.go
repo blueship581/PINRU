@@ -2,6 +2,7 @@ package store
 
 import (
 	"database/sql"
+	"fmt"
 	"strings"
 
 	"github.com/blueship581/pinru/internal/errs"
@@ -147,6 +148,45 @@ func (s *Store) ListAiReviewRoundsByTask(taskID string) ([]AiReviewRound, error)
 	}
 	defer rows.Close()
 	return collectAiReviewRounds(rows)
+}
+
+func (s *Store) DeleteAiReviewRoundWithJob(roundID string) (*string, error) {
+	round, err := s.GetAiReviewRound(roundID)
+	if err != nil {
+		return nil, err
+	}
+	if round == nil {
+		return nil, fmt.Errorf(errs.FmtJobReviewRoundNotFound, roundID)
+	}
+
+	tx, err := s.DB.Begin()
+	if err != nil {
+		return nil, err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	if _, err = tx.Exec("DELETE FROM ai_review_rounds WHERE id = ?", roundID); err != nil {
+		return nil, err
+	}
+	if round.JobID != nil {
+		jobID := strings.TrimSpace(*round.JobID)
+		if jobID != "" {
+			// 影响 0 行不视为错误：历史数据中 job 行可能已被独立删除
+			if _, err = tx.Exec("DELETE FROM background_jobs WHERE id = ?", jobID); err != nil {
+				return nil, err
+			}
+		}
+	}
+	if err = tx.Commit(); err != nil {
+		return nil, err
+	}
+	committed = true
+	return round.ModelRunID, nil
 }
 
 func (s *Store) GetNextRoundNumber(modelRunID *string, localPath string) (int, error) {

@@ -358,3 +358,42 @@ func TestApplyCodexReviewEvidenceGuardsDowngradesInvalidKeyLocations(t *testing.
 		t.Fatalf("ReviewNotes = %q, want invalid key location note", result.ReviewNotes)
 	}
 }
+
+func TestCollectReviewContextRejectsWhenScriptMissing(t *testing.T) {
+	svc := New()
+	svc.SetReviewContextScriptPath(filepath.Join(t.TempDir(), "not-exist.py"))
+
+	_, err := svc.CollectReviewContext(context.Background(), t.TempDir())
+	if err == nil {
+		t.Fatalf("CollectReviewContext() error = nil, want script-missing rejection")
+	}
+	if !strings.Contains(err.Error(), "复审上下文采集脚本不存在") {
+		t.Fatalf("CollectReviewContext() error = %q, want script-missing message", err.Error())
+	}
+}
+
+func TestBuildCodexReviewPromptIncludesRoundHistory(t *testing.T) {
+	prompt := buildCodexReviewPrompt(CodexReviewRequest{
+		LocalPath:      "/tmp/demo",
+		OriginalPrompt: "实现每日任务",
+		CurrentPrompt:  "第二轮修复",
+		RoundHistory: []AiReviewHistoryEntry{
+			{
+				RoundNumber: 1,
+				PromptText:  "实现每日任务",
+				ReviewNotes: "奖励记录漏记",
+				NextPrompt:  "请补齐奖励记录空值保护",
+			},
+		},
+	}, nil)
+
+	if !strings.Contains(prompt, "round_history") {
+		t.Fatalf("prompt missing round_history key: %q", prompt)
+	}
+	if !strings.Contains(prompt, "奖励记录漏记") {
+		t.Fatalf("prompt missing history reviewNotes content: %q", prompt)
+	}
+	if !strings.Contains(prompt, "请补齐奖励记录空值保护") {
+		t.Fatalf("prompt missing history nextPrompt content: %q", prompt)
+	}
+}

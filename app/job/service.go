@@ -44,6 +44,17 @@ type JobService struct {
 	mu        sync.Mutex
 	running   map[string]context.CancelFunc
 	cloneSem  chan struct{}
+	// aiReviewMaterials 保存 SubmitJob 阶段预采集的 AI 复审素材，
+	// key 为 jobID。executeAiReview 取出后 Delete，避免内存泄漏。
+	// 进程重启或直接重试时可能未命中缓存，此时执行阶段会自行兜底采集。
+	aiReviewMaterials sync.Map
+}
+
+// aiReviewMaterials 聚合任务发起阶段预采集的 AI 复审素材。
+type aiReviewMaterials struct {
+	ReviewContext *appcli.PgCodeProjectContext
+	RoundHistory  []appcli.AiReviewHistoryEntry
+	ParentNotes   string
 }
 
 func New(
@@ -96,10 +107,30 @@ func (s *JobService) SubmitJob(req SubmitJobRequest) (*store.BackgroundJob, erro
 	if req.TimeoutSeconds <= 0 {
 		req.TimeoutSeconds = 300
 	}
+	// 先做 ai_review 去重（重复点击时短路返回已有 job）：避免无意义的素材采集
+	if req.JobType == "ai_review" {
+		s.mu.Lock()
+		existing, err := s.findActiveJobLocked(req)
+		s.mu.Unlock()
+		if err != nil {
+			return nil, err
+		}
+		if existing != nil {
+			return existing, nil
+		}
+	}
+
+	var preparedMaterials *aiReviewMaterials
 	if req.JobType == "ai_review" {
 		payload, ok := parseAiReviewPayloadForDedup(req.InputPayload)
 		if !ok {
 			return nil, errors.New(errs.MsgJobAiReviewParseFail)
+		}
+		// 前置校验：拉取任务原始提示词 / 多轮历史 / 项目上下文 / 代码变更；
+		// 任何一项缺失直接返回 error，不创建 round、不持久化 job。
+		materials, err := s.validateAndCollectAiReviewMaterials(context.Background(), req.TaskID, payload)
+		if err != nil {
+			return nil, err
 		}
 		preparedPayload, err := s.prepareAiReviewPayload(req.TaskID, payload)
 		if err != nil {
@@ -110,6 +141,7 @@ func (s *JobService) SubmitJob(req SubmitJobRequest) (*store.BackgroundJob, erro
 			return nil, fmt.Errorf(errs.FmtJobSerializeAiReview, err)
 		}
 		req.InputPayload = string(payloadJSON)
+		preparedMaterials = materials
 	}
 
 	id := uuid.New().String()
@@ -132,6 +164,7 @@ func (s *JobService) SubmitJob(req SubmitJobRequest) (*store.BackgroundJob, erro
 	}
 
 	s.mu.Lock()
+	// 二次 dedup：覆盖两次校验之间并发提交同一目标的竞态
 	existing, err := s.findActiveJobLocked(req)
 	if err != nil {
 		s.mu.Unlock()
@@ -146,6 +179,10 @@ func (s *JobService) SubmitJob(req SubmitJobRequest) (*store.BackgroundJob, erro
 		return nil, fmt.Errorf(errs.FmtJobCreateFail, err)
 	}
 	s.mu.Unlock()
+
+	if preparedMaterials != nil {
+		s.aiReviewMaterials.Store(id, preparedMaterials)
+	}
 
 	go s.executeJob(id, req)
 
@@ -292,6 +329,49 @@ func (s *JobService) DeleteAiReviewJob(id string) error {
 		return err
 	}
 
+	return nil
+}
+
+func (s *JobService) DeleteAiReviewRound(roundID string) error {
+	roundID = strings.TrimSpace(roundID)
+	if roundID == "" {
+		return errors.New(errs.MsgReviewRoundIDRequired)
+	}
+
+	round, err := s.store.GetAiReviewRound(roundID)
+	if err != nil {
+		return err
+	}
+	if round == nil {
+		return fmt.Errorf(errs.FmtJobReviewRoundNotFound, roundID)
+	}
+
+	if round.Status == "running" {
+		return errors.New(errs.MsgJobReviewStillRunning)
+	}
+	if round.JobID != nil {
+		jobID := strings.TrimSpace(*round.JobID)
+		if jobID != "" {
+			job, err := s.store.GetBackgroundJob(jobID)
+			if err != nil {
+				return err
+			}
+			if job != nil && (job.Status == "pending" || job.Status == "running") {
+				return errors.New(errs.MsgJobReviewStillRunning)
+			}
+		}
+	}
+
+	modelRunID, err := s.store.DeleteAiReviewRoundWithJob(roundID)
+	if err != nil {
+		return err
+	}
+	if modelRunID != nil {
+		runID := strings.TrimSpace(*modelRunID)
+		if runID != "" {
+			return s.syncModelRunAiReviewSummaryFromRounds(runID)
+		}
+	}
 	return nil
 }
 
@@ -935,6 +1015,9 @@ func (s *JobService) executeAiReview(
 		return jobExecutionResult{}, errors.New(errs.MsgJobCliUninitialized)
 	}
 
+	// 无论成功失败都释放 SubmitJob 阶段预采集缓存，避免内存泄漏。
+	defer s.aiReviewMaterials.Delete(jobID)
+
 	var payload AiReviewPayload
 	if err := json.Unmarshal([]byte(req.InputPayload), &payload); err != nil {
 		return jobExecutionResult{}, fmt.Errorf("%s：%w", errs.MsgJobAiReviewParseFail, err)
@@ -991,16 +1074,31 @@ func (s *JobService) executeAiReview(
 	}
 	ch := make(chan reviewOut, 1)
 
+	// 取出 SubmitJob 阶段预采集的素材；未命中（RetryJob / 进程重启）时
+	// RunCodexReview 会自行回退到实时采集路径（hard error）。
+	var cachedMaterials *aiReviewMaterials
+	if cached, ok := s.aiReviewMaterials.Load(jobID); ok {
+		if m, ok := cached.(*aiReviewMaterials); ok {
+			cachedMaterials = m
+		}
+	}
+
+	reviewReq := appcli.CodexReviewRequest{
+		LocalPath:      payload.LocalPath,
+		OriginalPrompt: strings.TrimSpace(round.OriginalPrompt),
+		CurrentPrompt:  strings.TrimSpace(round.PromptText),
+		IssueType:      "",
+		IssueTitle:     "",
+		ModelName:      strings.TrimSpace(round.ModelName),
+	}
+	if cachedMaterials != nil {
+		reviewReq.PreCollectedContext = cachedMaterials.ReviewContext
+		reviewReq.RoundHistory = cachedMaterials.RoundHistory
+		reviewReq.ParentReviewNotes = cachedMaterials.ParentNotes
+	}
+
 	go func() {
-		res, err := s.cliSvc.RunCodexReview(ctx, appcli.CodexReviewRequest{
-			LocalPath:         payload.LocalPath,
-			OriginalPrompt:    strings.TrimSpace(round.OriginalPrompt),
-			CurrentPrompt:     strings.TrimSpace(round.PromptText),
-			ParentReviewNotes: "", // 线性模型不再有父节点
-			IssueType:         "",
-			IssueTitle:        "",
-			ModelName:         strings.TrimSpace(round.ModelName),
-		}, func(line string) {
+		res, err := s.cliSvc.RunCodexReview(ctx, reviewReq, func(line string) {
 			if isStructuredAiReviewLine(line) {
 				return
 			}
@@ -1248,6 +1346,118 @@ func sameAiReviewTarget(left, right AiReviewPayload) bool {
 		}
 	}
 	return false
+}
+
+// validateAndCollectAiReviewMaterials 在 SubmitJob 阶段一次性完成：
+//  1. 校验任务提示词存在；
+//  2. 多轮时聚合历史轮次提示词规划与上一轮 review_notes；
+//  3. 调用 Codex pg-code 脚本采集项目上下文；
+//  4. 校验项目目录存在、代码有可核验的变更。
+//
+// 任一步骤失败直接返回 error，供 SubmitJob fail-fast。
+func (s *JobService) validateAndCollectAiReviewMaterials(
+	ctx context.Context,
+	taskID string,
+	payload AiReviewPayload,
+) (*aiReviewMaterials, error) {
+	normalizedTaskID := strings.TrimSpace(taskID)
+	if normalizedTaskID == "" {
+		return nil, errors.New(errs.MsgJobAiReviewNoTask)
+	}
+
+	// 1) 任务原始提示词
+	task, err := s.store.GetTask(normalizedTaskID)
+	if err != nil {
+		return nil, fmt.Errorf("读取任务失败：%w", err)
+	}
+	originalPrompt := ""
+	if task != nil && task.PromptText != nil {
+		originalPrompt = strings.TrimSpace(*task.PromptText)
+	}
+	if originalPrompt == "" {
+		return nil, errors.New(errs.MsgReviewTaskPromptMissing)
+	}
+
+	// 2) localPath：指定 ReviewRoundID 时从 round 读，否则取 payload
+	localPath := normalizeAiReviewPath(payload.LocalPath)
+	var modelRunIDForHistory *string
+	if payload.ReviewRoundID != nil && strings.TrimSpace(*payload.ReviewRoundID) != "" {
+		existing, err := s.store.GetAiReviewRound(strings.TrimSpace(*payload.ReviewRoundID))
+		if err != nil {
+			return nil, fmt.Errorf(errs.FmtJobReadReviewRound, err)
+		}
+		if existing == nil {
+			return nil, fmt.Errorf(errs.FmtJobReviewRoundNotFound, strings.TrimSpace(*payload.ReviewRoundID))
+		}
+		localPath = normalizeAiReviewPath(existing.LocalPath)
+		modelRunIDForHistory = existing.ModelRunID
+	} else {
+		modelRunIDForHistory = payload.ModelRunID
+	}
+	if localPath == "" {
+		return nil, errors.New(errs.MsgJobAiReviewNoLocalPath)
+	}
+
+	// 3) 多轮历史：仅 nextRound > 1 时聚合
+	nextRound, err := s.store.GetNextRoundNumber(modelRunIDForHistory, localPath)
+	if err != nil {
+		return nil, fmt.Errorf(errs.FmtJobNextRoundFail, err)
+	}
+	var history []appcli.AiReviewHistoryEntry
+	parentNotes := ""
+	if nextRound > 1 && modelRunIDForHistory != nil && strings.TrimSpace(*modelRunIDForHistory) != "" {
+		rounds, err := s.store.ListAiReviewRoundsByModelRun(strings.TrimSpace(*modelRunIDForHistory))
+		if err != nil {
+			return nil, fmt.Errorf(errs.FmtJobReadPrevReviewFail, err)
+		}
+		sort.Slice(rounds, func(i, j int) bool {
+			return rounds[i].RoundNumber < rounds[j].RoundNumber
+		})
+		for _, r := range rounds {
+			if r.RoundNumber >= nextRound {
+				continue
+			}
+			if strings.TrimSpace(r.PromptText) == "" {
+				continue
+			}
+			history = append(history, appcli.AiReviewHistoryEntry{
+				RoundNumber: r.RoundNumber,
+				PromptText:  strings.TrimSpace(r.PromptText),
+				ReviewNotes: strings.TrimSpace(r.ReviewNotes),
+				NextPrompt:  strings.TrimSpace(r.NextPrompt),
+			})
+			parentNotes = strings.TrimSpace(r.ReviewNotes) // 保留最后一条的 review_notes
+		}
+		if len(history) == 0 {
+			return nil, errors.New(errs.MsgReviewHistoryPromptMissing)
+		}
+	}
+
+	// 4) 项目上下文采集
+	project, err := s.cliSvc.CollectReviewContext(ctx, localPath)
+	if err != nil {
+		// 脚本缺失已经在 CollectReviewContext 里包裹成 MsgReviewContextScriptMissing；
+		// 其他错误统一归为 MsgReviewContextCollectFailed。
+		if strings.Contains(err.Error(), errs.MsgReviewContextScriptMissing) {
+			return nil, err
+		}
+		return nil, fmt.Errorf("%s：%w", errs.MsgReviewContextCollectFailed, err)
+	}
+	if project == nil {
+		return nil, errors.New(errs.MsgReviewContextCollectFailed)
+	}
+	if !project.Exists {
+		return nil, errors.New(errs.MsgReviewProjectDirNotExist)
+	}
+	if len(project.Git.ChangedFiles) == 0 && len(project.RecentFiles) == 0 {
+		return nil, errors.New(errs.MsgReviewNoCodeChanges)
+	}
+
+	return &aiReviewMaterials{
+		ReviewContext: project,
+		RoundHistory:  history,
+		ParentNotes:   parentNotes,
+	}, nil
 }
 
 func (s *JobService) ensureAiReviewRound(taskID string, payload AiReviewPayload) (*store.AiReviewRound, error) {

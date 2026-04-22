@@ -27,6 +27,13 @@ const (
 	MsgPromptRequired        = "提示词不能为空"
 	MsgPromptContentRequired = "提示词内容不能为空"
 	MsgReviewPromptMissing   = "数据库中未保存该轮复审的提示词，已拒绝 AI 复审"
+	// AI 复审前置校验（任务发起阶段 fail-fast）
+	MsgReviewTaskPromptMissing    = "当前任务尚未保存提示词，请先在任务详情页生成或填写提示词后再发起复审"
+	MsgReviewContextScriptMissing = "复审上下文采集脚本不存在，请检查 Codex Skills 安装（pg-code）"
+	MsgReviewContextCollectFailed = "复审上下文采集失败，无法发起复审，请确认项目目录可访问且 Python 环境正常"
+	MsgReviewProjectDirNotExist   = "项目目录不存在，无法发起复审，请先完成领题 Clone"
+	MsgReviewNoCodeChanges        = "未检测到代码变更（git 无改动且无最近更新文件），请提交代码后再发起复审"
+	MsgReviewHistoryPromptMissing = "多轮复审缺少历史轮次提示词，上下文不完整，已拒绝发起"
 	MsgTargetDirRequired     = "目标目录不能为空"
 	MsgDirRequired           = "目录不能为空"
 	MsgRootDirRequired       = "根目录不能为空"

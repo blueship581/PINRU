@@ -17,7 +17,7 @@ import {
   submitJob,
   submitSessionSyncJob,
   submitAiReviewJob,
-  deleteAiReviewJob,
+  deleteAiReviewRound,
   type JobProgressEvent,
 } from '../../api/job';
 import type { ModelRunFromDB, TaskChildDirectory } from '../../api/task';
@@ -501,7 +501,12 @@ export default function Board() {
           void detail.refreshModelRuns();
         }
       } catch (error) {
+        const message = error instanceof Error ? error.message : '提交 AI 复审失败';
         console.error('提交 AI 复审失败', error);
+        if (detail.selected?.id === taskId) {
+          detail.setDrawerError(message);
+          detail.setActiveDrawerTab('ai-review');
+        }
       }
     })();
     window.setTimeout(() => {
@@ -533,7 +538,10 @@ export default function Board() {
         detail.setActiveDrawerTab('ai-review');
         void detail.refreshModelRuns();
       } catch (error) {
+        const message = error instanceof Error ? error.message : '提交下一轮 AI 复审失败';
         console.error('提交下一轮 AI 复审失败', error);
+        detail.setDrawerError(message);
+        detail.setActiveDrawerTab('ai-review');
       }
     })();
 
@@ -585,8 +593,8 @@ export default function Board() {
     }, 600);
   };
 
-  const handleDeleteAiReviewRecord = async (jobId: string) => {
-    await deleteAiReviewJob(jobId);
+  const handleDeleteAiReviewRecord = async (roundId: string) => {
+    await deleteAiReviewRound(roundId);
     await Promise.all([
       loadTasks(),
       detail.refreshModelRuns(),

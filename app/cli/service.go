@@ -6,6 +6,7 @@ import (
 	"context"
 	"embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -33,10 +34,11 @@ var pgCodeReviewSchema []byte
 
 // Service executes the local claude CLI and streams output back via polling.
 type CliService struct {
-	mu                sync.Mutex
-	sessions          map[string]*cliSession
-	resolveCLI        func(name string) (string, error) // nil → util.ResolveCLI
-	reviewContextPath string
+	mu                    sync.Mutex
+	sessions              map[string]*cliSession
+	resolveCLI            func(name string) (string, error) // nil → util.ResolveCLI
+	reviewContextPath     string
+	reviewContextOverride func(ctx context.Context, localPath string) (*pgCodeProjectContext, error)
 }
 
 func defaultPgCodeContextScriptPath() string {
@@ -98,6 +100,22 @@ func NewWithResolver(fn func(name string) (string, error)) *CliService {
 	}
 	go svc.cleanupLoop()
 	return svc
+}
+
+// SetReviewContextScriptPath overrides the pg-code context collection script path.
+// Intended for tests; empty string restores the default lookup.
+func (s *CliService) SetReviewContextScriptPath(path string) {
+	s.reviewContextPath = path
+}
+
+// SetReviewContextOverride installs a stub used in place of the real python
+// context-collection script. Pass nil to restore default behaviour. Test-only.
+func (s *CliService) SetReviewContextOverride(fn func(ctx context.Context, localPath string) (*PgCodeProjectContext, error)) {
+	if fn == nil {
+		s.reviewContextOverride = nil
+		return
+	}
+	s.reviewContextOverride = fn
 }
 
 // lookupCLI resolves the named binary using the configured resolver, or falls
@@ -573,7 +591,26 @@ type CodexReviewRequest struct {
 	IssueType         string `json:"issueType"`
 	IssueTitle        string `json:"issueTitle"`
 	ModelName         string `json:"modelName"`
+
+	// PreCollectedContext 为 job 层在任务发起阶段预采集好的项目上下文；
+	// 非 nil 时 RunCodexReview 跳过二次采集，直接使用。
+	PreCollectedContext *PgCodeProjectContext `json:"-"`
+	// RoundHistory 为多轮复审的历史提示词规划，按 round_number 升序。
+	RoundHistory []AiReviewHistoryEntry `json:"roundHistory,omitempty"`
 }
+
+// AiReviewHistoryEntry 描述多轮复审中某一历史轮次的关键提示词/结论，
+// 用于第二轮及以后构造完整的复审上下文。
+type AiReviewHistoryEntry struct {
+	RoundNumber int    `json:"roundNumber"`
+	PromptText  string `json:"promptText"`
+	ReviewNotes string `json:"reviewNotes"`
+	NextPrompt  string `json:"nextPrompt"`
+}
+
+// PgCodeProjectContext 是 pgCodeProjectContext 的导出别名，
+// 供 job 层持有预采集结果并把引用传入 RunCodexReview。
+type PgCodeProjectContext = pgCodeProjectContext
 
 type pgCodeContextEnvelope struct {
 	BaseDir  string                 `json:"base_dir"`
@@ -625,9 +662,13 @@ func (s *CliService) RunCodexReview(ctx context.Context, req CodexReviewRequest,
 		return nil, fmt.Errorf(errs.MsgReviewPromptMissing)
 	}
 
-	reviewContext, ctxErr := s.collectPgCodeReviewContext(ctx, localPath)
-	if ctxErr != nil {
-		slog.Warn("collectPgCodeReviewContext failed", "localPath", localPath, "error", ctxErr)
+	reviewContext := req.PreCollectedContext
+	if reviewContext == nil {
+		collected, ctxErr := s.collectPgCodeReviewContext(ctx, localPath)
+		if ctxErr != nil {
+			return nil, fmt.Errorf("%s：%w", errs.MsgReviewContextCollectFailed, ctxErr)
+		}
+		reviewContext = collected
 	}
 	reviewPrompt := buildCodexReviewPrompt(req, reviewContext)
 	if runtime.GOOS == "windows" {
@@ -762,13 +803,23 @@ func (s *CliService) reviewContextScriptPath() string {
 	return defaultPgCodeContextScriptPath()
 }
 
+// CollectReviewContext 在任务发起阶段由 job 层调用，负责采集一次项目上下文
+// 并作为 hard error 反馈脚本缺失 / 执行失败。返回值传入 RunCodexReview 的
+// CodexReviewRequest.PreCollectedContext 后可避免二次采集。
+func (s *CliService) CollectReviewContext(ctx context.Context, localPath string) (*PgCodeProjectContext, error) {
+	return s.collectPgCodeReviewContext(ctx, localPath)
+}
+
 func (s *CliService) collectPgCodeReviewContext(ctx context.Context, localPath string) (*pgCodeProjectContext, error) {
+	if s.reviewContextOverride != nil {
+		return s.reviewContextOverride(ctx, localPath)
+	}
 	scriptPath := strings.TrimSpace(s.reviewContextScriptPath())
 	if scriptPath == "" {
-		return nil, nil
+		return nil, errors.New(errs.MsgReviewContextScriptMissing)
 	}
 	if _, err := os.Stat(scriptPath); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%s：%w", errs.MsgReviewContextScriptMissing, err)
 	}
 
 	cmd := exec.CommandContext(ctx, "python3", scriptPath, localPath)
@@ -803,9 +854,11 @@ func buildCodexReviewPrompt(req CodexReviewRequest, project *pgCodeProjectContex
 8. 当本轮发现多个独立问题时，必须通过 issues 数组分别列出；不要把多个问题揉成一条。
 9. issues[*].issueType 默认填“Bug修复”，除非证据明确表明是其他类型。
 10. 若本轮已通过，issues 返回空数组。
+11. 【文风要求 - reviewNotes / nextPrompt / issues[*].description】像人一样说话：短句为主，先说问题再说位置。禁止使用以下 AI 腔套话：“此外”“综上”“值得注意的是”“深入探讨”“至关重要”“凸显”“格局”“不仅……还”“作为……的体现”“……的证明”“不仅仅是”；不要三段式铺陈、不要 -ing 结尾的肤浅总结、不要否定式排比、不要金句式收尾。
+12. 【业务视角】从用户看到的业务行为和功能点描述问题，例如“领奖弹窗打开后奖励列表空白”，而不是堆砌类名/回调链等代码术语。代码位置放到 keyLocations，不要写进 reviewNotes；nextPrompt 直接说要做什么功能改动，不要重复复审结论。
 `))
 
-	reviewInput := map[string]string{
+	reviewInput := map[string]any{
 		"issue_title":         strings.TrimSpace(req.IssueTitle),
 		"issue_type":          strings.TrimSpace(req.IssueType),
 		"model_name":          strings.TrimSpace(req.ModelName),
@@ -813,8 +866,11 @@ func buildCodexReviewPrompt(req CodexReviewRequest, project *pgCodeProjectContex
 		"current_prompt":      strings.TrimSpace(req.CurrentPrompt),
 		"parent_review_notes": strings.TrimSpace(req.ParentReviewNotes),
 	}
+	if len(req.RoundHistory) > 0 {
+		reviewInput["round_history"] = req.RoundHistory
+	}
 	if contextJSON, err := json.MarshalIndent(reviewInput, "", "  "); err == nil {
-		parts = append(parts, "当前复核节点上下文如下，请明确区分“原始任务提示词”“当前节点提示词”“父节点不满意结论”：\n"+string(contextJSON))
+		parts = append(parts, "当前复核节点上下文如下，请明确区分“原始任务提示词”“当前节点提示词”“父节点不满意结论”“历史轮次提示词规划（round_history，按轮次升序）”：\n"+string(contextJSON))
 	}
 
 	if project != nil {

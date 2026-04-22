@@ -158,7 +158,7 @@ interface TaskDetailDrawerProps {
   promptGenerating: boolean;
   onGeneratePrompt: (config: Omit<GeneratePromptRequest, 'taskId'>) => void | Promise<void>;
   onAiReview?: (run: ModelRunFromDB) => void;
-  onDeleteAiReviewRecord?: (jobId: string) => void | Promise<void>;
+  onDeleteAiReviewRecord?: (roundId: string) => void | Promise<void>;
   onSubmitNextAiReviewRound?: (modelRunId: string, modelName: string, localPath: string, nextPromptOverride?: string) => void | Promise<void>;
 }
 
@@ -256,7 +256,7 @@ export default function TaskDetailDrawer({
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [showRegenForm, setShowRegenForm] = useState(false);
   const [submitToast, setSubmitToast] = useState(false);
-  const [deletingAiReviewJobId, setDeletingAiReviewJobId] = useState<string | null>(null);
+  const [deletingAiReviewRoundId, setDeletingAiReviewRoundId] = useState<string | null>(null);
   const [deleteAiReviewError, setDeleteAiReviewError] = useState('');
   const [nextRoundPromptDrafts, setNextRoundPromptDrafts] = useState<Record<string, string>>({});
   const [expandedRoundPrompts, setExpandedRoundPrompts] = useState<Set<string>>(new Set());
@@ -317,7 +317,7 @@ export default function TaskDetailDrawer({
   }, [sessionTaskTypeOptions, selected.taskType]);
 
   useEffect(() => {
-    setDeletingAiReviewJobId(null);
+    setDeletingAiReviewRoundId(null);
     setDeleteAiReviewError('');
   }, [selected.id]);
 
@@ -637,24 +637,24 @@ export default function TaskDetailDrawer({
     setActiveSessionLocalId(localId);
   };
 
-  const handleDeleteAiReviewRecord = async (entry: ParsedAiReviewJob) => {
+  const handleDeleteAiReviewRecord = async (round: AiReviewRoundFromDB) => {
     if (!onDeleteAiReviewRecord) {
       return;
     }
 
-    const label = entry.displayName || '当前记录';
-    if (!window.confirm(`确定删除“${label}”的这条复审记录吗？`)) {
+    const label = round.modelName || round.localPath || '当前记录';
+    if (!window.confirm(`确定删除“${label}”第 ${round.roundNumber} 轮复审记录吗？`)) {
       return;
     }
 
     setDeleteAiReviewError('');
-    setDeletingAiReviewJobId(entry.job.id);
+    setDeletingAiReviewRoundId(round.id);
     try {
-      await onDeleteAiReviewRecord(entry.job.id);
+      await onDeleteAiReviewRecord(round.id);
     } catch (error) {
       setDeleteAiReviewError(error instanceof Error ? error.message : '删除复审记录失败');
     } finally {
-      setDeletingAiReviewJobId((current) => (current === entry.job.id ? null : current));
+      setDeletingAiReviewRoundId((current) => (current === round.id ? null : current));
     }
   };
 
@@ -1662,6 +1662,13 @@ export default function TaskDetailDrawer({
             </div>
           )}
 
+          {/* 删除错误提示 */}
+          {deleteAiReviewError && (
+            <div className="rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-300">
+              {deleteAiReviewError}
+            </div>
+          )}
+
           {/* 统计概况 */}
           <div className="grid gap-3 md:grid-cols-4">
             <InfoTile label="复审轮次">{String(allRounds.length)}</InfoTile>
@@ -1774,6 +1781,21 @@ export default function TaskDetailDrawer({
                               <span className="ml-auto text-[10px] text-zinc-600">
                                 {formatAiReviewTimestamp(round.createdAt)}
                               </span>
+                              {onDeleteAiReviewRecord && round.status !== 'running' && (
+                                <button
+                                  type="button"
+                                  disabled={deletingAiReviewRoundId === round.id}
+                                  onClick={() => void handleDeleteAiReviewRecord(round)}
+                                  title="彻底删除此轮复审记录"
+                                  className="rounded p-0.5 text-zinc-600 transition hover:bg-red-500/10 hover:text-red-400 disabled:opacity-40"
+                                >
+                                  {deletingAiReviewRoundId === round.id ? (
+                                    <RefreshCw className="h-3 w-3 animate-spin" />
+                                  ) : (
+                                    <Trash2 className="h-3 w-3" />
+                                  )}
+                                </button>
+                              )}
                             </div>
 
                             {/* 使用提示词 - 可展开 */}
@@ -1798,14 +1820,51 @@ export default function TaskDetailDrawer({
                                 <span className="text-[10px] font-medium text-zinc-500">使用提示词</span>
                               </button>
                               {promptExpanded && (
-                                <div className="px-3.5 pb-3">
+                                <div className="space-y-2 px-3.5 pb-3">
                                   <div className="rounded-lg border border-indigo-500/20 bg-indigo-500/8 px-3 py-2.5">
+                                    <div className="mb-1 flex items-center gap-1.5">
+                                      {round.roundNumber > 1 ? (
+                                        <p className="text-[10px] font-medium text-indigo-300/60">
+                                          本轮提示词（第 {round.roundNumber} 轮）
+                                        </p>
+                                      ) : (
+                                        <p className="text-[10px] font-medium text-indigo-300/60">
+                                          使用提示词
+                                        </p>
+                                      )}
+                                      {round.promptText && (
+                                        <CopyIconButton
+                                          value={round.promptText}
+                                          label="复制本轮提示词"
+                                          className="rounded p-0.5 text-indigo-300/60 transition hover:bg-indigo-500/15 hover:text-indigo-200"
+                                          iconClassName="h-3 w-3"
+                                        />
+                                      )}
+                                    </div>
                                     <p className="whitespace-pre-wrap text-xs leading-5 text-indigo-100/90">
                                       {round.promptText || (
                                         <span className="text-indigo-300/30">（无提示词）</span>
                                       )}
                                     </p>
                                   </div>
+                                  {round.roundNumber > 1 && round.originalPrompt.trim() && round.originalPrompt.trim() !== round.promptText.trim() && (
+                                    <div className="rounded-lg border border-zinc-700/60 bg-zinc-800/30 px-3 py-2.5">
+                                      <div className="mb-1 flex items-center gap-1.5">
+                                        <p className="text-[10px] font-medium text-zinc-400">
+                                          首轮原始提示词
+                                        </p>
+                                        <CopyIconButton
+                                          value={round.originalPrompt}
+                                          label="复制首轮原始提示词"
+                                          className="rounded p-0.5 text-zinc-400 transition hover:bg-zinc-700/40 hover:text-zinc-200"
+                                          iconClassName="h-3 w-3"
+                                        />
+                                      </div>
+                                      <p className="whitespace-pre-wrap text-xs leading-5 text-zinc-300/90">
+                                        {round.originalPrompt}
+                                      </p>
+                                    </div>
+                                  )}
                                 </div>
                               )}
                             </div>

@@ -96,7 +96,7 @@ export function BoardLayerStack({
   onCloseProjectPanel: () => void;
   onProjectSaved: (updated: ProjectConfig) => void;
   onAiReview?: (run: import('../../../api/task').ModelRunFromDB) => void;
-  onDeleteAiReviewRecord?: (jobId: string) => void | Promise<void>;
+  onDeleteAiReviewRecord?: (roundId: string) => void | Promise<void>;
   onSubmitNextAiReviewRound?: (modelRunId: string, modelName: string, localPath: string, nextPromptOverride?: string) => void | Promise<void>;
 }) {
   return (

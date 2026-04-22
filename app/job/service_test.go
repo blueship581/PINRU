@@ -1188,3 +1188,296 @@ func TestCleanupGitCloneTargetsRemovesCreatedPaths(t *testing.T) {
 		}
 	}
 }
+
+// --- AI 复审前置校验 fail-fast 测试 ---
+
+func newAiReviewTestJobSvc(t *testing.T, st *store.Store) *JobService {
+	t.Helper()
+	cliSvc := appcli.NewWithResolver(func(name string) (string, error) {
+		return "/usr/bin/true", nil
+	})
+	return &JobService{store: st, cliSvc: cliSvc}
+}
+
+func TestSubmitJobAiReviewRejectsWhenTaskPromptMissing(t *testing.T) {
+	testStore := testutil.OpenTestStore(t)
+	taskID := "task-no-prompt"
+	workDir := t.TempDir()
+	task := store.Task{
+		ID:              taskID,
+		GitLabProjectID: 1,
+		ProjectName:     "label-00001",
+		TaskType:        "Bug修复",
+		// PromptText 故意留空
+	}
+	if err := testStore.CreateTaskWithModelRuns(task, []store.ModelRun{{
+		ID: "run-1", TaskID: taskID, ModelName: "cotv21-pro", LocalPath: &workDir,
+	}}); err != nil {
+		t.Fatalf("CreateTaskWithModelRuns() error = %v", err)
+	}
+
+	jobSvc := newAiReviewTestJobSvc(t, testStore)
+	_, err := jobSvc.SubmitJob(SubmitJobRequest{
+		JobType:      "ai_review",
+		TaskID:       taskID,
+		InputPayload: fmt.Sprintf(`{"modelName":"cotv21-pro","localPath":%q}`, workDir),
+		MaxRetries:   1,
+	})
+	if err == nil {
+		t.Fatal("SubmitJob() error = nil, want task-prompt-missing rejection")
+	}
+	if !strings.Contains(err.Error(), "当前任务尚未保存提示词") {
+		t.Fatalf("SubmitJob() error = %q, want task-prompt-missing message", err.Error())
+	}
+
+	jobs, _ := testStore.ListBackgroundJobs(&store.JobFilter{TaskID: &taskID})
+	if len(jobs) != 0 {
+		t.Fatalf("expected no background job created, got %d", len(jobs))
+	}
+	rounds, _ := testStore.ListAiReviewRoundsByTask(taskID)
+	if len(rounds) != 0 {
+		t.Fatalf("expected no review round created, got %d", len(rounds))
+	}
+}
+
+func TestSubmitJobAiReviewRejectsWhenScriptMissing(t *testing.T) {
+	testStore := testutil.OpenTestStore(t)
+	taskID := "task-script-missing"
+	workDir := t.TempDir()
+	task := store.Task{
+		ID:              taskID,
+		GitLabProjectID: 2,
+		ProjectName:     "label-00002",
+		TaskType:        "Bug修复",
+	}
+	if err := testStore.CreateTaskWithModelRuns(task, []store.ModelRun{{
+		ID: "run-2", TaskID: taskID, ModelName: "cotv21-pro", LocalPath: &workDir,
+	}}); err != nil {
+		t.Fatalf("CreateTaskWithModelRuns() error = %v", err)
+	}
+	if err := testStore.UpdateTaskPrompt(taskID, "实现每日任务"); err != nil {
+		t.Fatalf("UpdateTaskPrompt() error = %v", err)
+	}
+
+	jobSvc := newAiReviewTestJobSvc(t, testStore)
+	// 显式把采集脚本路径指向不存在位置
+	jobSvc.cliSvc.SetReviewContextScriptPath(filepath.Join(t.TempDir(), "no-such.py"))
+
+	_, err := jobSvc.SubmitJob(SubmitJobRequest{
+		JobType:      "ai_review",
+		TaskID:       taskID,
+		InputPayload: fmt.Sprintf(`{"modelName":"cotv21-pro","localPath":%q}`, workDir),
+		MaxRetries:   1,
+	})
+	if err == nil {
+		t.Fatal("SubmitJob() error = nil, want script-missing rejection")
+	}
+	if !strings.Contains(err.Error(), "复审上下文采集脚本不存在") {
+		t.Fatalf("SubmitJob() error = %q, want script-missing message", err.Error())
+	}
+}
+
+func TestSubmitJobAiReviewRejectsWhenNoCodeChanges(t *testing.T) {
+	testStore := testutil.OpenTestStore(t)
+	taskID := "task-no-changes"
+	workDir := t.TempDir()
+	task := store.Task{
+		ID:              taskID,
+		GitLabProjectID: 3,
+		ProjectName:     "label-00003",
+		TaskType:        "Bug修复",
+	}
+	if err := testStore.CreateTaskWithModelRuns(task, []store.ModelRun{{
+		ID: "run-3", TaskID: taskID, ModelName: "cotv21-pro", LocalPath: &workDir,
+	}}); err != nil {
+		t.Fatalf("CreateTaskWithModelRuns() error = %v", err)
+	}
+	if err := testStore.UpdateTaskPrompt(taskID, "实现每日任务"); err != nil {
+		t.Fatalf("UpdateTaskPrompt() error = %v", err)
+	}
+
+	jobSvc := newAiReviewTestJobSvc(t, testStore)
+	jobSvc.cliSvc.SetReviewContextOverride(func(_ context.Context, localPath string) (*appcli.PgCodeProjectContext, error) {
+		return &appcli.PgCodeProjectContext{
+			ResolvedPath: localPath,
+			Exists:       true,
+			// 既无 ChangedFiles 也无 RecentFiles → 触发无代码变更
+		}, nil
+	})
+
+	_, err := jobSvc.SubmitJob(SubmitJobRequest{
+		JobType:      "ai_review",
+		TaskID:       taskID,
+		InputPayload: fmt.Sprintf(`{"modelName":"cotv21-pro","localPath":%q}`, workDir),
+		MaxRetries:   1,
+	})
+	if err == nil {
+		t.Fatal("SubmitJob() error = nil, want no-code-changes rejection")
+	}
+	if !strings.Contains(err.Error(), "未检测到代码变更") {
+		t.Fatalf("SubmitJob() error = %q, want no-code-changes message", err.Error())
+	}
+
+	jobs, _ := testStore.ListBackgroundJobs(&store.JobFilter{TaskID: &taskID})
+	if len(jobs) != 0 {
+		t.Fatalf("expected no background job created, got %d", len(jobs))
+	}
+}
+
+func seedDeleteRoundFixture(t *testing.T, st *store.Store, taskID, runID string, workDir string) {
+	t.Helper()
+	task := store.Task{
+		ID:              taskID,
+		GitLabProjectID: 9001,
+		ProjectName:     "label-09001",
+		TaskType:        "Bug修复",
+	}
+	if err := st.CreateTaskWithModelRuns(task, []store.ModelRun{{
+		ID: runID, TaskID: taskID, ModelName: "cotv21-pro", LocalPath: &workDir,
+	}}); err != nil {
+		t.Fatalf("CreateTaskWithModelRuns() error = %v", err)
+	}
+}
+
+func TestDeleteAiReviewRoundDeletesRoundJobAndRecalculates(t *testing.T) {
+	testStore := testutil.OpenTestStore(t)
+	taskID := "task-delete-round"
+	runID := "run-delete-round"
+	workDir := t.TempDir()
+	seedDeleteRoundFixture(t, testStore, taskID, runID, workDir)
+
+	runIDStr := runID
+	// 第 1 轮 pass
+	job1ID := "job-round-1"
+	taskIDPtr := taskID
+	if err := testStore.CreateBackgroundJob(store.BackgroundJob{
+		ID: job1ID, JobType: "ai_review", TaskID: &taskIDPtr, Status: "done",
+		Progress: 100, InputPayload: "{}", MaxRetries: 1, TimeoutSeconds: 600, CreatedAt: 1,
+	}); err != nil {
+		t.Fatalf("CreateBackgroundJob(1) error = %v", err)
+	}
+	if err := testStore.CreateAiReviewRound(store.AiReviewRound{
+		ID: "round-1", TaskID: taskID, ModelRunID: &runIDStr, LocalPath: workDir,
+		ModelName: "cotv21-pro", RoundNumber: 1, Status: "pass",
+		ReviewNotes: "first pass", JobID: &job1ID,
+	}); err != nil {
+		t.Fatalf("CreateAiReviewRound(1) error = %v", err)
+	}
+
+	// 第 2 轮 warning
+	job2ID := "job-round-2"
+	if err := testStore.CreateBackgroundJob(store.BackgroundJob{
+		ID: job2ID, JobType: "ai_review", TaskID: &taskIDPtr, Status: "done",
+		Progress: 100, InputPayload: "{}", MaxRetries: 1, TimeoutSeconds: 600, CreatedAt: 2,
+	}); err != nil {
+		t.Fatalf("CreateBackgroundJob(2) error = %v", err)
+	}
+	if err := testStore.CreateAiReviewRound(store.AiReviewRound{
+		ID: "round-2", TaskID: taskID, ModelRunID: &runIDStr, LocalPath: workDir,
+		ModelName: "cotv21-pro", RoundNumber: 2, Status: "warning",
+		ReviewNotes: "needs fix", JobID: &job2ID,
+	}); err != nil {
+		t.Fatalf("CreateAiReviewRound(2) error = %v", err)
+	}
+	if err := testStore.UpdateModelRunReview(runID, "warning", 2, strPtr("needs fix")); err != nil {
+		t.Fatalf("UpdateModelRunReview() error = %v", err)
+	}
+
+	jobSvc := newAiReviewTestJobSvc(t, testStore)
+	if err := jobSvc.DeleteAiReviewRound("round-2"); err != nil {
+		t.Fatalf("DeleteAiReviewRound() error = %v", err)
+	}
+
+	// round 2 消失
+	r2, _ := testStore.GetAiReviewRound("round-2")
+	if r2 != nil {
+		t.Fatalf("round-2 should be deleted, got %+v", r2)
+	}
+	// job 2 消失
+	j2, _ := testStore.GetBackgroundJob(job2ID)
+	if j2 != nil {
+		t.Fatalf("job-round-2 should be deleted, got %+v", j2)
+	}
+	// round 1 保留
+	r1, _ := testStore.GetAiReviewRound("round-1")
+	if r1 == nil || r1.Status != "pass" {
+		t.Fatalf("round-1 should remain pass, got %+v", r1)
+	}
+	// model_run 汇总回退到 pass/1
+	run, err := testStore.GetModelRunByID(runID)
+	if err != nil {
+		t.Fatalf("GetModelRunByID() error = %v", err)
+	}
+	if run == nil {
+		t.Fatal("GetModelRunByID() = nil")
+	}
+	if run.ReviewStatus != "pass" {
+		t.Fatalf("ReviewStatus = %q, want pass", run.ReviewStatus)
+	}
+	if run.ReviewRound != 1 {
+		t.Fatalf("ReviewRound = %d, want 1", run.ReviewRound)
+	}
+}
+
+func TestDeleteAiReviewRoundRejectsRunning(t *testing.T) {
+	testStore := testutil.OpenTestStore(t)
+	taskID := "task-delete-running"
+	runID := "run-delete-running"
+	workDir := t.TempDir()
+	seedDeleteRoundFixture(t, testStore, taskID, runID, workDir)
+
+	runIDStr := runID
+	if err := testStore.CreateAiReviewRound(store.AiReviewRound{
+		ID: "round-running", TaskID: taskID, ModelRunID: &runIDStr, LocalPath: workDir,
+		ModelName: "cotv21-pro", RoundNumber: 1, Status: "running",
+	}); err != nil {
+		t.Fatalf("CreateAiReviewRound error = %v", err)
+	}
+
+	jobSvc := newAiReviewTestJobSvc(t, testStore)
+	err := jobSvc.DeleteAiReviewRound("round-running")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "复审任务仍在进行中") {
+		t.Fatalf("error = %q, want still-running message", err.Error())
+	}
+	if r, _ := testStore.GetAiReviewRound("round-running"); r == nil {
+		t.Fatal("round should remain after rejection")
+	}
+}
+
+func TestDeleteAiReviewRoundWithoutJob(t *testing.T) {
+	testStore := testutil.OpenTestStore(t)
+	taskID := "task-delete-no-job"
+	runID := "run-delete-no-job"
+	workDir := t.TempDir()
+	seedDeleteRoundFixture(t, testStore, taskID, runID, workDir)
+
+	runIDStr := runID
+	if err := testStore.CreateAiReviewRound(store.AiReviewRound{
+		ID: "round-no-job", TaskID: taskID, ModelRunID: &runIDStr, LocalPath: workDir,
+		ModelName: "cotv21-pro", RoundNumber: 1, Status: "pass",
+		ReviewNotes: "ok",
+	}); err != nil {
+		t.Fatalf("CreateAiReviewRound error = %v", err)
+	}
+	if err := testStore.UpdateModelRunReview(runID, "pass", 1, strPtr("ok")); err != nil {
+		t.Fatalf("UpdateModelRunReview error = %v", err)
+	}
+
+	jobSvc := newAiReviewTestJobSvc(t, testStore)
+	if err := jobSvc.DeleteAiReviewRound("round-no-job"); err != nil {
+		t.Fatalf("DeleteAiReviewRound error = %v", err)
+	}
+	if r, _ := testStore.GetAiReviewRound("round-no-job"); r != nil {
+		t.Fatal("round should be deleted")
+	}
+	run, _ := testStore.GetModelRunByID(runID)
+	if run == nil {
+		t.Fatal("model run missing")
+	}
+	if run.ReviewStatus != "none" {
+		t.Fatalf("ReviewStatus = %q, want none after delete", run.ReviewStatus)
+	}
+}
