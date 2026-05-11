@@ -10,9 +10,12 @@ require (
 )
 
 require (
+	filippo.io/edwards25519 v1.2.0 // indirect
+	github.com/DATA-DOG/go-sqlmock v1.5.2 // indirect
 	github.com/andybalholm/brotli v1.1.1 // indirect
 	github.com/bodgit/plumbing v1.3.0 // indirect
 	github.com/bodgit/windows v1.0.1 // indirect
+	github.com/go-sql-driver/mysql v1.10.0 // indirect
 	github.com/hashicorp/golang-lru/v2 v2.0.7 // indirect
 	github.com/klauspost/compress v1.18.3 // indirect
 	github.com/pierrec/lz4/v4 v4.1.22 // indirect

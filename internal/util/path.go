@@ -165,8 +165,8 @@ func BuildQuestionBankSourcesPath(basePath string) string {
 	return filepath.Join(BuildQuestionBankRootPath(basePath), QuestionBankSourcesFolderName)
 }
 
-func BuildQuestionBankSourcePath(basePath string, questionID int64) string {
-	return filepath.Join(BuildQuestionBankSourcesPath(basePath), strconv.FormatInt(questionID, 10))
+func BuildQuestionBankSourcePath(basePath string, folderName string) string {
+	return filepath.Join(BuildQuestionBankSourcesPath(basePath), strings.TrimSpace(folderName))
 }
 
 func BuildQuestionBankArchivePath(basePath, archiveName string) string {

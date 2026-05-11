@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   deleteQuestionBankItem,
+  getQuestionBankStats,
   importQuestionBankArchives,
   listQuestionBankItems,
   pickQuestionBankArchives,
@@ -10,6 +11,7 @@ import {
   normalizeManagedSourceFolders,
   type ImportLocalSourcesResult,
   type QuestionBankItem,
+  type QuestionBankStats,
   type QuestionBankSyncResult,
   type NormalizeManagedSourceFoldersResult,
 } from '../../../api/git';
@@ -36,6 +38,7 @@ export type QuestionBankState = {
   clearSelection: () => void;
   invertSelectionOnFiltered: () => void;
   reloadQuestionBankItems: () => Promise<void>;
+  questionBankStats: QuestionBankStats[];
   importingLocalSources: boolean;
   localImportError: string;
   localImportResult: ImportLocalSourcesResult | null;
@@ -61,6 +64,7 @@ export function useQuestionBank(projectId: string, questionBankProjectIdsRaw: st
   const loadTasks = useAppStore((state) => state.loadTasks);
 
   const [questionBankItems, setQuestionBankItems] = useState<QuestionBankItem[]>([]);
+  const [questionBankStats, setQuestionBankStats] = useState<QuestionBankStats[]>([]);
   const [questionBankLoading, setQuestionBankLoading] = useState(false);
   const [questionBankError, setQuestionBankError] = useState('');
   const [questionBankFilter, setQuestionBankFilter] = useState('');
@@ -90,6 +94,7 @@ export function useQuestionBank(projectId: string, questionBankProjectIdsRaw: st
   const reloadQuestionBankItems = useCallback(async () => {
     if (!projectId) {
       setQuestionBankItems([]);
+      setQuestionBankStats([]);
       setSelectedQuestionIds([]);
       setQuestionBankError('');
       return;
@@ -104,6 +109,13 @@ export function useQuestionBank(projectId: string, questionBankProjectIdsRaw: st
           items.some((item) => item.questionId === questionId && item.status === 'ready'),
         ),
       );
+      // 拉取每题的剩余变体数与项目类型；trae 不可用时返回 totals 兜底，不阻塞主列表加载。
+      try {
+        const stats = await getQuestionBankStats(projectId);
+        setQuestionBankStats(stats);
+      } catch {
+        setQuestionBankStats([]);
+      }
     } catch (error) {
       setQuestionBankError(error instanceof Error ? error.message : '加载题库失败');
     } finally {
@@ -346,6 +358,7 @@ export function useQuestionBank(projectId: string, questionBankProjectIdsRaw: st
     clearSelection,
     invertSelectionOnFiltered,
     reloadQuestionBankItems,
+    questionBankStats,
     importingLocalSources,
     localImportError,
     localImportResult,

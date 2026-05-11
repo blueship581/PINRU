@@ -372,6 +372,32 @@ func TestCollectReviewContextRejectsWhenScriptMissing(t *testing.T) {
 	}
 }
 
+func TestCollectReviewContextFallsBackWhenPythonScriptFails(t *testing.T) {
+	workDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(workDir, "main.go"), []byte("package main\n"), 0o644); err != nil {
+		t.Fatalf("os.WriteFile(main.go) error = %v", err)
+	}
+
+	scriptPath := filepath.Join(t.TempDir(), "collect_project_context.py")
+	if err := os.WriteFile(scriptPath, []byte("raise SystemExit(1)\n"), 0o755); err != nil {
+		t.Fatalf("os.WriteFile(script) error = %v", err)
+	}
+
+	svc := New()
+	svc.SetReviewContextScriptPath(scriptPath)
+
+	project, err := svc.CollectReviewContext(context.Background(), workDir)
+	if err != nil {
+		t.Fatalf("CollectReviewContext() error = %v, want native fallback", err)
+	}
+	if project == nil || !project.Exists {
+		t.Fatalf("CollectReviewContext() project = %#v, want existing project", project)
+	}
+	if len(project.RecentFiles) == 0 || project.RecentFiles[0].RelativePath != "main.go" {
+		t.Fatalf("CollectReviewContext() recent files = %#v, want main.go", project.RecentFiles)
+	}
+}
+
 func TestBuildCodexReviewPromptIncludesRoundHistory(t *testing.T) {
 	prompt := buildCodexReviewPrompt(CodexReviewRequest{
 		LocalPath:      "/tmp/demo",

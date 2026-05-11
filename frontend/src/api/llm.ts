@@ -21,6 +21,7 @@ export interface GeneratePromptRequest {
   scopes: string[];
   constraints: string[];
   additionalNotes?: string | null;
+  enhanceMultiFile?: boolean;
   thinkingBudget?: string;
 }
 

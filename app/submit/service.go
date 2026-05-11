@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -16,6 +17,19 @@ import (
 )
 
 const mainBranch = "main"
+const sourcePublishAttempts = 2
+
+var (
+	ensureGitHubRepository   = github.EnsureRepository
+	recreateGitHubRepository = github.RecreateRepository
+)
+
+type submitGitHubAuth struct {
+	GitUsername string
+	Token       string
+	Login       string
+	Email       string
+}
 
 // Service handles publishing source repos and creating model PRs on GitHub.
 type SubmitService struct {
@@ -33,6 +47,7 @@ type PublishSourceRepoRequest struct {
 	TaskID          string `json:"taskId"`
 	ModelName       string `json:"modelName"`
 	TargetRepo      string `json:"targetRepo"`
+	RecreateRepo    bool   `json:"recreateRepo"`
 	GitHubUsername  string `json:"githubUsername"`
 	GitHubToken     string `json:"githubToken"`
 }
@@ -65,6 +80,7 @@ type SubmitAllRequest struct {
 	TaskID          string   `json:"taskId"`
 	Models          []string `json:"models"` // selected non-ORIGIN model names
 	TargetRepo      string   `json:"targetRepo"`
+	RecreateRepo    bool     `json:"recreateRepo"`
 	SourceModelName string   `json:"sourceModelName"`
 	GitHubUsername  string   `json:"githubUsername"`
 	GitHubToken     string   `json:"githubToken"`
@@ -94,59 +110,14 @@ func (s *SubmitService) PublishSourceRepo(req PublishSourceRepoRequest) (*Publis
 		return nil, fmt.Errorf(errs.FmtTaskNotFound, req.TaskID)
 	}
 
-	sourceRun, err := s.store.GetModelRun(req.TaskID, req.ModelName)
-	if err != nil || sourceRun == nil {
-		return nil, fmt.Errorf(errs.FmtModelRunNotFound, req.TaskID, req.ModelName)
-	}
-	if sourceRun.LocalPath == nil {
-		return nil, errors.New(errs.MsgSourceMissingLocalRepo)
-	}
-	sourcePath := util.ExpandTilde(*sourceRun.LocalPath)
-
-	authUsername, authToken, err := s.resolveGitHubCredentials(req.GitHubAccountID, req.GitHubUsername, req.GitHubToken)
+	auth, err := s.resolveSubmitGitHubAuth(req.GitHubAccountID, req.GitHubUsername, req.GitHubToken)
 	if err != nil {
 		return nil, err
 	}
 
-	ghUser, err := github.GetAuthenticatedUser(authToken)
+	repo, err := s.publishSourceRepoForTask(task, req.ModelName, strings.TrimSpace(req.TargetRepo), auth, req.RecreateRepo)
 	if err != nil {
-		return nil, fmt.Errorf(errs.FmtGitHubAuthWrap, err)
-	}
-	authorEmail := fmt.Sprintf("%s@users.noreply.github.com", ghUser.Login)
-	if ghUser.Email != nil {
-		authorEmail = *ghUser.Email
-	}
-
-	repo, err := github.EnsureRepository(strings.TrimSpace(req.TargetRepo), authToken, &task.ProjectName)
-	if err != nil {
-		return nil, fmt.Errorf(errs.FmtEnsureGitHubRepoFail, err)
-	}
-
-	workspacePath := gitops.WorkspacePath(strings.TrimSpace(req.TargetRepo))
-	remoteURL := fmt.Sprintf("https://github.com/%s.git", strings.TrimSpace(req.TargetRepo))
-
-	if err := gitops.RecreateWorkspace(workspacePath, remoteURL, ghUser.Login, authorEmail); err != nil {
-		return nil, fmt.Errorf("%s：%w", errs.MsgGitOpFailed, err)
-	}
-	if err := gitops.CopyProjectContents(sourcePath, workspacePath); err != nil {
-		return nil, fmt.Errorf("%s：%w", errs.MsgGitOpFailed, err)
-	}
-	committed, err := gitops.CommitAll(workspacePath, mainBranch, ghUser.Login, authorEmail, "init: 原始项目初始化")
-	if err != nil {
-		return nil, fmt.Errorf("%s：%w", errs.MsgGitOpFailed, err)
-	}
-	if !committed {
-		return nil, errors.New(errs.MsgSourceDirNoCommit)
-	}
-	if err := gitops.EnsureBranch(workspacePath, mainBranch); err != nil {
-		return nil, fmt.Errorf("%s：%w", errs.MsgGitOpFailed, err)
-	}
-	if err := gitops.PushBranch(workspacePath, mainBranch, authUsername, authToken); err != nil {
-		return nil, fmt.Errorf("%s：%w", errs.MsgGitPushFailed, err)
-	}
-
-	if err := github.SetDefaultBranch(strings.TrimSpace(req.TargetRepo), mainBranch, authToken); err != nil {
-		return nil, fmt.Errorf("%s：%w", errs.MsgDefaultBranchFail, err)
+		return nil, err
 	}
 
 	return &PublishSourceRepoResult{
@@ -160,8 +131,8 @@ func (s *SubmitService) SubmitModelRun(req SubmitModelRunRequest) (*SubmitModelR
 		return nil, err
 	}
 
-	_, err := s.store.GetTask(req.TaskID)
-	if err != nil {
+	task, err := s.store.GetTask(req.TaskID)
+	if err != nil || task == nil {
 		return nil, fmt.Errorf(errs.FmtTaskNotFound, req.TaskID)
 	}
 
@@ -169,28 +140,27 @@ func (s *SubmitService) SubmitModelRun(req SubmitModelRunRequest) (*SubmitModelR
 	if err != nil || modelRun == nil {
 		return nil, fmt.Errorf(errs.FmtModelRunNotFound, req.TaskID, req.ModelName)
 	}
-	if modelRun.LocalPath == nil {
-		return nil, errors.New(errs.MsgModelMissingLocalDir)
+	sourceRun, _ := s.store.GetModelRun(req.TaskID, s.resolveTaskSourceModelName(task, ""))
+	modelPath, err := s.resolveModelRunPathForSubmit(task, sourceRun, modelRun, req.ModelName)
+	if err != nil {
+		return nil, err
 	}
-	modelPath := util.ExpandTilde(*modelRun.LocalPath)
+	modelPath = util.ExpandTilde(modelPath)
 
-	workspacePath := gitops.WorkspacePath(strings.TrimSpace(req.TargetRepo))
-	if _, err := os.Stat(workspacePath); os.IsNotExist(err) {
-		return nil, errors.New(errs.MsgSourceNotUploaded)
-	}
-
-	authUsername, authToken, err := s.resolveGitHubCredentials(req.GitHubAccountID, req.GitHubUsername, req.GitHubToken)
+	auth, err := s.resolveSubmitGitHubAuth(req.GitHubAccountID, req.GitHubUsername, req.GitHubToken)
 	if err != nil {
 		return nil, err
 	}
 
-	ghUser, err := github.GetAuthenticatedUser(authToken)
-	if err != nil {
-		return nil, fmt.Errorf(errs.FmtGitHubAuthWrap, err)
-	}
-	authorEmail := fmt.Sprintf("%s@users.noreply.github.com", ghUser.Login)
-	if ghUser.Email != nil {
-		authorEmail = *ghUser.Email
+	targetRepo := strings.TrimSpace(req.TargetRepo)
+	workspacePath := gitops.WorkspacePath(targetRepo)
+	if !gitops.WorkspaceHasBranch(workspacePath, mainBranch) {
+		sourceModelName := s.resolveTaskSourceModelName(task, "")
+		if _, prepErr := s.publishSourceRepoForTask(task, sourceModelName, targetRepo, auth, false); prepErr != nil {
+			if _, recoverErr := s.recoverSourceWorkspaceFromRemote(targetRepo, auth); recoverErr != nil {
+				return nil, fmt.Errorf("%s：源码重新上传失败：%v；远端 main 恢复失败：%w", errs.MsgSourceNotUploaded, prepErr, recoverErr)
+			}
+		}
 	}
 
 	branchName := strings.TrimSpace(req.ModelName)
@@ -206,7 +176,7 @@ func (s *SubmitService) SubmitModelRun(req SubmitModelRunRequest) (*SubmitModelR
 		return nil, s.failModelRun(req.TaskID, req.ModelName, &branchName, now, fmt.Errorf("%s：%w", errs.MsgGitOpFailed, err))
 	}
 	commitMsg := fmt.Sprintf("feat: %s 模型实现", branchName)
-	committed, err := gitops.CommitAll(workspacePath, branchName, ghUser.Login, authorEmail, commitMsg)
+	committed, err := gitops.CommitAll(workspacePath, branchName, auth.Login, auth.Email, commitMsg)
 	if err != nil {
 		return nil, s.failModelRun(req.TaskID, req.ModelName, &branchName, now, fmt.Errorf("%s：%w", errs.MsgGitOpFailed, err))
 	}
@@ -214,14 +184,14 @@ func (s *SubmitService) SubmitModelRun(req SubmitModelRunRequest) (*SubmitModelR
 		return nil, s.failModelRun(req.TaskID, req.ModelName, &branchName, now, fmt.Errorf(errs.FmtModelNoDiff, branchName))
 	}
 
-	if err := gitops.PushBranch(workspacePath, branchName, authUsername, authToken); err != nil {
+	if err := gitops.PushBranch(workspacePath, branchName, auth.GitUsername, auth.Token); err != nil {
 		return nil, s.failModelRun(req.TaskID, req.ModelName, &branchName, now, fmt.Errorf("%s：%w", errs.MsgGitPushFailed, err))
 	}
 
-	repoOwner := strings.SplitN(strings.TrimSpace(req.TargetRepo), "/", 2)[0]
+	repoOwner := strings.SplitN(targetRepo, "/", 2)[0]
 	prURL, err := github.EnsurePullRequest(
-		strings.TrimSpace(req.TargetRepo), repoOwner, branchName, branchName, branchName,
-		authToken)
+		targetRepo, repoOwner, branchName, branchName, branchName,
+		auth.Token)
 	if err != nil {
 		return nil, s.failModelRun(req.TaskID, req.ModelName, &branchName, now, fmt.Errorf(errs.FmtGitHubPRCreateWrap, err))
 	}
@@ -273,21 +243,12 @@ func (s *SubmitService) SubmitAll(req SubmitAllRequest) (*SubmitAllResult, error
 		return nil, fmt.Errorf(errs.FmtSourceModelNoPath, sourceModelName)
 	}
 
-	authUsername, token, err := s.resolveGitHubCredentials(req.GitHubAccountID, req.GitHubUsername, req.GitHubToken)
+	auth, err := s.resolveSubmitGitHubAuth(req.GitHubAccountID, req.GitHubUsername, req.GitHubToken)
 	if err != nil {
 		return nil, err
 	}
 
 	targetRepo := strings.TrimSpace(req.TargetRepo)
-
-	ghUser, err := github.GetAuthenticatedUser(token)
-	if err != nil {
-		return nil, fmt.Errorf(errs.FmtGitHubAuthWrap, err)
-	}
-	authorEmail := fmt.Sprintf("%s@users.noreply.github.com", ghUser.Login)
-	if ghUser.Email != nil {
-		authorEmail = *ghUser.Email
-	}
 
 	result := &SubmitAllResult{}
 	now := time.Now().Unix()
@@ -297,41 +258,19 @@ func (s *SubmitService) SubmitAll(req SubmitAllRequest) (*SubmitAllResult, error
 		return nil, fmt.Errorf(errs.FmtSourceStateBackFail, err)
 	}
 
-	sourcePath := util.ExpandTilde(*sourceRun.LocalPath)
-	repo, repoErr := github.EnsureRepository(targetRepo, token, &task.ProjectName)
-	if repoErr == nil {
-		workspacePath := gitops.WorkspacePath(targetRepo)
-		remoteURL := fmt.Sprintf("https://github.com/%s.git", targetRepo)
-
-		if err := gitops.RecreateWorkspace(workspacePath, remoteURL, ghUser.Login, authorEmail); err != nil {
-			repoErr = fmt.Errorf("%s：%w", errs.MsgGitOpFailed, err)
-		} else if err := gitops.CopyProjectContents(sourcePath, workspacePath); err != nil {
-			repoErr = fmt.Errorf("%s：%w", errs.MsgGitOpFailed, err)
-		} else {
-			committed, err := gitops.CommitAll(workspacePath, mainBranch, ghUser.Login, authorEmail, "init: 原始项目初始化")
-			if err != nil {
-				repoErr = fmt.Errorf("%s：%w", errs.MsgGitOpFailed, err)
-			} else if !committed {
-				repoErr = errors.New(errs.MsgSourceDirNoCommit)
-			} else if err := gitops.EnsureBranch(workspacePath, mainBranch); err != nil {
-				repoErr = fmt.Errorf("%s：%w", errs.MsgGitOpFailed, err)
-			} else if err := gitops.PushBranch(workspacePath, mainBranch, authUsername, token); err != nil {
-				repoErr = fmt.Errorf("%s：%w", errs.MsgGitPushFailed, err)
-			}
-			if repoErr == nil {
-				if err := github.SetDefaultBranch(targetRepo, mainBranch, token); err != nil {
-					repoErr = fmt.Errorf("%s：%w", errs.MsgDefaultBranchFail, err)
-				}
-			}
-		}
-	}
+	repo, repoErr := s.publishSourceRepoForTask(task, sourceModelName, targetRepo, auth, req.RecreateRepo)
 
 	if repoErr != nil {
-		if err := s.failTaskAndModelRun(req.TaskID, "Error", sourceModelName, nil, now, repoErr); err != nil {
-			return nil, err
+		recoveredRepo, recoverErr := s.recoverSourceWorkspaceFromRemote(targetRepo, auth)
+		if recoverErr != nil {
+			combinedErr := fmt.Errorf("源码重新上传失败：%v；远端 main 恢复失败：%w", repoErr, recoverErr)
+			if err := s.failTaskAndModelRun(req.TaskID, "Error", sourceModelName, nil, now, combinedErr); err != nil {
+				return nil, err
+			}
+			result.RepoError = combinedErr.Error()
+			return result, nil
 		}
-		result.RepoError = repoErr.Error()
-		return result, nil
+		repo = recoveredRepo
 	}
 
 	finishedAt := time.Now().Unix()
@@ -363,18 +302,16 @@ func (s *SubmitService) SubmitAll(req SubmitAllRequest) (*SubmitAllResult, error
 			return nil, fmt.Errorf(errs.FmtReadModelRunFail, modelName, err)
 		}
 		if run == nil {
-			// Derive path from ORIGIN sibling
-			var derivedPath *string
-			if sourceRun.LocalPath != nil {
-				lp := *sourceRun.LocalPath
-				p := filepath.Join(filepath.Dir(lp), modelName)
-				derivedPath = &p
+			derivedPath, pathErr := s.resolveModelRunPathForSubmit(task, sourceRun, nil, modelName)
+			var derivedPathPtr *string
+			if pathErr == nil && strings.TrimSpace(derivedPath) != "" {
+				derivedPathPtr = &derivedPath
 			}
 			newRun := store.ModelRun{
 				ID:        fmt.Sprintf("%s-%s-%d", req.TaskID, modelName, time.Now().UnixNano()),
 				TaskID:    req.TaskID,
 				ModelName: modelName,
-				LocalPath: derivedPath,
+				LocalPath: derivedPathPtr,
 			}
 			if err := s.store.CreateModelRun(newRun); err != nil {
 				mResult.Error = fmt.Sprintf("创建模型记录失败: %v", err)
@@ -398,7 +335,14 @@ func (s *SubmitService) SubmitAll(req SubmitAllRequest) (*SubmitAllResult, error
 			continue
 		}
 
-		modelPath := util.ExpandTilde(*run.LocalPath)
+		modelPath, err := s.resolveModelRunPathForSubmit(task, sourceRun, run, modelName)
+		if err != nil {
+			mResult.Error = fmt.Sprintf("解析模型目录失败: %v", err)
+			result.Models = append(result.Models, mResult)
+			allOK = false
+			continue
+		}
+		modelPath = util.ExpandTilde(modelPath)
 		branchName := modelName
 		mNow := time.Now().Unix()
 		if err := s.persistModelRunState(req.TaskID, modelName, "running", &branchName, nil, &mNow, nil, stringPtr(""), nil); err != nil {
@@ -415,15 +359,15 @@ func (s *SubmitService) SubmitAll(req SubmitAllRequest) (*SubmitAllResult, error
 			mErr = fmt.Errorf("%s：%w", errs.MsgGitOpFailed, err)
 		} else {
 			commitMsg := fmt.Sprintf("feat: %s 模型实现", branchName)
-			committed, err := gitops.CommitAll(workspacePath, branchName, ghUser.Login, authorEmail, commitMsg)
+			committed, err := gitops.CommitAll(workspacePath, branchName, auth.Login, auth.Email, commitMsg)
 			if err != nil {
 				mErr = fmt.Errorf("%s：%w", errs.MsgGitOpFailed, err)
 			} else if !committed {
 				mErr = errors.New(errs.MsgNoDiffToMain)
-			} else if err := gitops.PushBranch(workspacePath, branchName, authUsername, token); err != nil {
+			} else if err := gitops.PushBranch(workspacePath, branchName, auth.GitUsername, auth.Token); err != nil {
 				mErr = fmt.Errorf("%s：%w", errs.MsgGitPushFailed, err)
 			} else {
-				prURL, err := github.EnsurePullRequest(targetRepo, repoOwner, branchName, branchName, branchName, token)
+				prURL, err := github.EnsurePullRequest(targetRepo, repoOwner, branchName, branchName, branchName, auth.Token)
 				if err != nil {
 					mErr = fmt.Errorf(errs.FmtPRCreateFail, err)
 				} else {
@@ -459,6 +403,106 @@ func (s *SubmitService) SubmitAll(req SubmitAllRequest) (*SubmitAllResult, error
 		}
 	}
 	return result, nil
+}
+
+func (s *SubmitService) resolveModelRunPathForSubmit(task *store.Task, sourceRun, run *store.ModelRun, modelName string) (string, error) {
+	selectedPath := findModelRunFolderForSubmit(task, sourceRun, run, modelName)
+	if strings.TrimSpace(selectedPath) == "" {
+		return "", errors.New(errs.MsgModelMissingLocalDir)
+	}
+
+	if run != nil {
+		currentPath := ""
+		if run.LocalPath != nil {
+			currentPath = strings.TrimSpace(*run.LocalPath)
+		}
+		if util.NormalizePath(currentPath) != util.NormalizePath(selectedPath) {
+			pathValue := selectedPath
+			if err := s.store.UpdateModelRunLocalPath(task.ID, run.ModelName, &pathValue); err != nil {
+				return "", err
+			}
+			run.LocalPath = &pathValue
+		}
+	}
+	return selectedPath, nil
+}
+
+func findModelRunFolderForSubmit(task *store.Task, sourceRun, run *store.ModelRun, modelName string) string {
+	trimmedModelName := strings.TrimSpace(modelName)
+	if trimmedModelName == "" {
+		return ""
+	}
+
+	if taskDir := submitTaskDirectory(task, sourceRun, run); taskDir != "" {
+		exactPath := filepath.Join(taskDir, trimmedModelName)
+		if submitDirectoryExists(exactPath) {
+			return exactPath
+		}
+		if containingPath := findContainingModelFolder(taskDir, trimmedModelName); containingPath != "" {
+			return containingPath
+		}
+	}
+
+	if run != nil && run.LocalPath != nil {
+		runPath := strings.TrimSpace(*run.LocalPath)
+		if runPath != "" {
+			return runPath
+		}
+	}
+	if sourceRun != nil && sourceRun.LocalPath != nil && strings.TrimSpace(*sourceRun.LocalPath) != "" {
+		return filepath.Join(filepath.Dir(strings.TrimSpace(*sourceRun.LocalPath)), trimmedModelName)
+	}
+	return ""
+}
+
+func submitTaskDirectory(task *store.Task, sourceRun, run *store.ModelRun) string {
+	if task != nil && task.LocalPath != nil && strings.TrimSpace(*task.LocalPath) != "" {
+		return strings.TrimSpace(*task.LocalPath)
+	}
+	if sourceRun != nil && sourceRun.LocalPath != nil && strings.TrimSpace(*sourceRun.LocalPath) != "" {
+		return filepath.Dir(strings.TrimSpace(*sourceRun.LocalPath))
+	}
+	if run != nil && run.LocalPath != nil && strings.TrimSpace(*run.LocalPath) != "" {
+		return filepath.Dir(strings.TrimSpace(*run.LocalPath))
+	}
+	return ""
+}
+
+func findContainingModelFolder(taskDir, modelName string) string {
+	entries, err := os.ReadDir(util.ExpandTilde(taskDir))
+	if err != nil {
+		return ""
+	}
+
+	needle := strings.ToLower(strings.TrimSpace(modelName))
+	candidates := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if strings.HasPrefix(name, ".") {
+			continue
+		}
+		if strings.Contains(strings.ToLower(name), needle) {
+			candidates = append(candidates, name)
+		}
+	}
+	if len(candidates) == 0 {
+		return ""
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		if len(candidates[i]) != len(candidates[j]) {
+			return len(candidates[i]) < len(candidates[j])
+		}
+		return candidates[i] < candidates[j]
+	})
+	return filepath.Join(taskDir, candidates[0])
+}
+
+func submitDirectoryExists(path string) bool {
+	info, err := os.Stat(util.ExpandTilde(path))
+	return err == nil && info.IsDir()
 }
 
 func (s *SubmitService) persistModelRunState(
@@ -561,4 +605,115 @@ func (s *SubmitService) resolveGitHubCredentials(accountID, username, token stri
 	}
 
 	return username, token, nil
+}
+
+func (s *SubmitService) resolveSubmitGitHubAuth(accountID, username, token string) (*submitGitHubAuth, error) {
+	authUsername, authToken, err := s.resolveGitHubCredentials(accountID, username, token)
+	if err != nil {
+		return nil, err
+	}
+
+	ghUser, err := github.GetAuthenticatedUser(authToken)
+	if err != nil {
+		return nil, fmt.Errorf(errs.FmtGitHubAuthWrap, err)
+	}
+
+	auth := &submitGitHubAuth{
+		GitUsername: ghUser.Login,
+		Token:       authToken,
+		Login:       ghUser.Login,
+		Email:       fmt.Sprintf("%s@users.noreply.github.com", ghUser.Login),
+	}
+	if strings.TrimSpace(auth.GitUsername) == "" {
+		auth.GitUsername = authUsername
+	}
+	if ghUser.Email != nil && strings.TrimSpace(*ghUser.Email) != "" {
+		auth.Email = strings.TrimSpace(*ghUser.Email)
+	}
+	return auth, nil
+}
+
+func (s *SubmitService) publishSourceRepoForTask(task *store.Task, sourceModelName, targetRepo string, auth *submitGitHubAuth, recreateRepo bool) (*github.Repo, error) {
+	sourceRun, err := s.store.GetModelRun(task.ID, sourceModelName)
+	if err != nil || sourceRun == nil {
+		return nil, fmt.Errorf(errs.FmtSourceModelMissing, sourceModelName)
+	}
+	if sourceRun.LocalPath == nil {
+		return nil, errors.New(errs.MsgSourceMissingLocalRepo)
+	}
+
+	repo, err := prepareGitHubRepository(targetRepo, auth.Token, &task.ProjectName, recreateRepo)
+	if err != nil {
+		return nil, fmt.Errorf(errs.FmtEnsureGitHubRepoFail, err)
+	}
+
+	sourcePath := util.ExpandTilde(*sourceRun.LocalPath)
+	workspacePath := gitops.WorkspacePath(targetRepo)
+	remoteURL := fmt.Sprintf("https://github.com/%s.git", targetRepo)
+
+	var lastErr error
+	for attempt := 1; attempt <= sourcePublishAttempts; attempt++ {
+		if err := gitops.RecreateWorkspace(workspacePath, remoteURL, auth.Login, auth.Email); err != nil {
+			lastErr = fmt.Errorf("%s：%w", errs.MsgGitOpFailed, err)
+		} else if err := gitops.CopyProjectContents(sourcePath, workspacePath); err != nil {
+			lastErr = fmt.Errorf("%s：%w", errs.MsgGitOpFailed, err)
+		} else {
+			committed, err := gitops.CommitAll(workspacePath, mainBranch, auth.Login, auth.Email, "init: 原始项目初始化")
+			if err != nil {
+				lastErr = fmt.Errorf("%s：%w", errs.MsgGitOpFailed, err)
+			} else if !committed {
+				lastErr = errors.New(errs.MsgSourceDirNoCommit)
+			} else if err := gitops.EnsureBranch(workspacePath, mainBranch); err != nil {
+				lastErr = fmt.Errorf("%s：%w", errs.MsgGitOpFailed, err)
+			} else if err := gitops.PushBranch(workspacePath, mainBranch, auth.GitUsername, auth.Token); err != nil {
+				lastErr = fmt.Errorf("%s：%w", errs.MsgGitPushFailed, err)
+			} else if err := github.SetDefaultBranch(targetRepo, mainBranch, auth.Token); err != nil {
+				lastErr = fmt.Errorf("%s：%w", errs.MsgDefaultBranchFail, err)
+			} else {
+				return repo, nil
+			}
+		}
+		if attempt < sourcePublishAttempts {
+			time.Sleep(700 * time.Millisecond)
+		}
+	}
+
+	return repo, lastErr
+}
+
+func prepareGitHubRepository(targetRepo, token string, description *string, recreateRepo bool) (*github.Repo, error) {
+	if recreateRepo {
+		return recreateGitHubRepository(targetRepo, token, description)
+	}
+	return ensureGitHubRepository(targetRepo, token, description)
+}
+
+func (s *SubmitService) recoverSourceWorkspaceFromRemote(targetRepo string, auth *submitGitHubAuth) (*github.Repo, error) {
+	repo, err := github.GetRepository(targetRepo, auth.Token)
+	if err != nil {
+		return nil, fmt.Errorf("%s：%w", errs.MsgSourceNotUploaded, err)
+	}
+	if repo == nil {
+		return nil, fmt.Errorf("%s：远端仓库不存在", errs.MsgSourceNotUploaded)
+	}
+
+	workspacePath := gitops.WorkspacePath(targetRepo)
+	remoteURL := fmt.Sprintf("https://github.com/%s.git", targetRepo)
+	if err := gitops.RecreateWorkspaceFromRemote(workspacePath, remoteURL, mainBranch, auth.GitUsername, auth.Token, auth.Login, auth.Email); err != nil {
+		return nil, fmt.Errorf("%s：%w", errs.MsgSourceNotUploaded, err)
+	}
+	return repo, nil
+}
+
+func (s *SubmitService) resolveTaskSourceModelName(task *store.Task, fallback string) string {
+	if task != nil && task.ProjectConfigID != nil && strings.TrimSpace(*task.ProjectConfigID) != "" {
+		project, err := s.store.GetProject(strings.TrimSpace(*task.ProjectConfigID))
+		if err == nil && project != nil && strings.TrimSpace(project.SourceModelFolder) != "" {
+			return strings.TrimSpace(project.SourceModelFolder)
+		}
+	}
+	if strings.TrimSpace(fallback) != "" {
+		return strings.TrimSpace(fallback)
+	}
+	return "ORIGIN"
 }

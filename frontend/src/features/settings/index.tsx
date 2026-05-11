@@ -4,6 +4,7 @@ import {
   Database,
   Github,
   Gitlab,
+  Server,
   Settings as SettingsIcon,
 } from 'lucide-react';
 import { useAppStore } from '../../store';
@@ -47,11 +48,13 @@ import {
   type ProviderFormState,
   type ProviderTestResult,
 } from './components/SettingsPanels';
+import { TraeDBSettingsPanel } from './components/TraeDBSettingsPanel';
 
 const TABS = [
   { id: 'gitlab', label: 'GitLab', icon: Gitlab },
   { id: 'github', label: 'GitHub', icon: Github },
   { id: 'llm', label: '大语言模型', icon: Cpu },
+  { id: 'trae-db', label: 'Trae 数据库', icon: Server },
   { id: 'general', label: '通用设置', icon: SettingsIcon },
   { id: 'data', label: '数据管理', icon: Database },
 ];
@@ -703,6 +706,8 @@ export default function Settings() {
                 onDeleteProvider={handleDeleteProvider}
               />
             )}
+
+            {activeTab === 'trae-db' && <TraeDBSettingsPanel />}
 
             {activeTab === 'general' && (
               <GeneralSettingsPanel

@@ -28,3 +28,4 @@ export type ScopeOption = (typeof SCOPE_TYPES)[number];
 // localStorage keys shared between the Prompt page and the context menu
 export const LS_KEY_CONSTRAINTS = 'pinru:gen-constraints';
 export const LS_KEY_SCOPE = 'pinru:gen-scope';
+export const LS_KEY_ENHANCE_MULTI_FILE = 'pinru:gen-enhance-multi-file';

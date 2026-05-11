@@ -280,6 +280,34 @@ export async function addModelRun(req: AddModelRunRequest): Promise<void> {
   return callService('TaskService', 'AddModelRun', req);
 }
 
+export interface AddProjectModelRunRequest {
+  projectConfigId: string;
+  modelName: string;
+}
+
+export interface AddProjectModelRunTaskResult {
+  taskId: string;
+  projectName: string;
+  status: 'created' | 'skipped' | 'failed';
+  error?: string | null;
+}
+
+export interface AddProjectModelRunResult {
+  projectConfigId: string;
+  modelName: string;
+  total: number;
+  created: number;
+  skipped: number;
+  failed: AddProjectModelRunTaskResult[];
+  results: AddProjectModelRunTaskResult[];
+}
+
+export async function addProjectModelRun(
+  req: AddProjectModelRunRequest,
+): Promise<AddProjectModelRunResult> {
+  return callService('TaskService', 'AddProjectModelRun', req);
+}
+
 export async function deleteModelRun(taskId: string, modelName: string): Promise<void> {
   return callService('TaskService', 'DeleteModelRun', taskId, modelName);
 }

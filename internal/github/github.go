@@ -69,7 +69,7 @@ func GetAuthenticatedUser(token string) (*User, error) {
 }
 
 func EnsureRepository(targetRepo, token string, description *string) (*Repo, error) {
-	repo, err := getRepository(targetRepo, token)
+	repo, err := GetRepository(targetRepo, token)
 	if err == nil {
 		return repo, nil
 	}
@@ -77,6 +77,32 @@ func EnsureRepository(targetRepo, token string, description *string) (*Repo, err
 		return nil, err
 	}
 	return createRepository(targetRepo, token, description)
+}
+
+func RecreateRepository(targetRepo, token string, description *string) (*Repo, error) {
+	if _, err := DeleteRepositoryIfExists(targetRepo, token); err != nil {
+		return nil, err
+	}
+	return createRepository(targetRepo, token, description)
+}
+
+func DeleteRepositoryIfExists(targetRepo, token string) (bool, error) {
+	resp, err := doRequest("DELETE", apiBase+"/repos/"+targetRepo, token, nil)
+	if err != nil {
+		return false, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return false, nil
+	}
+	if err := checkStatus(resp); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func GetRepository(targetRepo, token string) (*Repo, error) {
+	return getRepository(targetRepo, token)
 }
 
 func SetDefaultBranch(targetRepo, branch, token string) error {

@@ -11,6 +11,7 @@ import (
 	"github.com/blueship581/pinru/internal/github"
 	"github.com/blueship581/pinru/internal/gitlab"
 	"github.com/blueship581/pinru/internal/store"
+	"github.com/blueship581/pinru/internal/trae"
 	"github.com/blueship581/pinru/internal/util"
 )
 
@@ -25,12 +26,19 @@ type TraeSettings struct {
 // Service manages application configuration, projects, LLM providers, and
 // GitHub accounts.
 type ConfigService struct {
-	store *store.Store
+	store         *store.Store
+	traeProvider  *trae.Provider
 }
 
 // NewService creates a new config service.
 func New(store *store.Store) *ConfigService {
 	return &ConfigService{store: store}
+}
+
+// SetTraeProvider 注入 trae 数据库 Provider，用于在保存配置后触发 Reload。
+// main.go 在 ConfigService、TraeProvider 都构造完后调用一次。
+func (s *ConfigService) SetTraeProvider(provider *trae.Provider) {
+	s.traeProvider = provider
 }
 
 // GitLabSettings is the sanitized view of GitLab credentials returned to the frontend.
@@ -356,7 +364,8 @@ func (s *ConfigService) validateQuestionBankProjectIDs(p store.Project) error {
 	}
 
 	for _, questionID := range questionIDs {
-		if _, err := gitlab.FetchProject(strconv.FormatInt(questionID, 10), url, token, skipTLSVerify); err != nil {
+		projectRef := util.BuildQuestionBankGitLabProjectRef(questionID)
+		if _, err := gitlab.FetchProject(projectRef, url, token, skipTLSVerify); err != nil {
 			return fmt.Errorf(errs.FmtQuestionBankProjectIDNotFound, strconv.FormatInt(questionID, 10))
 		}
 	}
@@ -392,5 +401,124 @@ func (s *ConfigService) SaveTraeSettings(workspaceStoragePath, logsPath string) 
 }
 
 func isSensitiveConfigKey(key string) bool {
-	return strings.EqualFold(strings.TrimSpace(key), "gitlab_token")
+	normalized := strings.ToLower(strings.TrimSpace(key))
+	return normalized == "gitlab_token" || normalized == trae.ConfigKeyPassword
+}
+
+// TraeDBSettings 是返回给前端的 trae 数据库配置（密码已隐藏）。
+type TraeDBSettings struct {
+	Host        string   `json:"host"`
+	Port        int      `json:"port"`
+	User        string   `json:"user"`
+	DBName      string   `json:"dbName"`
+	HasPassword bool     `json:"hasPassword"`
+	UserIDs     []string `json:"userIds"`
+}
+
+// GetTraeDBSettings 返回 store 中保存的 trae 数据库配置（敏感字段已脱敏）。
+func (s *ConfigService) GetTraeDBSettings() (*TraeDBSettings, error) {
+	host, err := s.store.GetConfig(trae.ConfigKeyHost)
+	if err != nil {
+		return nil, err
+	}
+	portRaw, err := s.store.GetConfig(trae.ConfigKeyPort)
+	if err != nil {
+		return nil, err
+	}
+	user, err := s.store.GetConfig(trae.ConfigKeyUser)
+	if err != nil {
+		return nil, err
+	}
+	password, err := s.store.GetConfig(trae.ConfigKeyPassword)
+	if err != nil {
+		return nil, err
+	}
+	dbName, err := s.store.GetConfig(trae.ConfigKeyDBName)
+	if err != nil {
+		return nil, err
+	}
+	userIDsRaw, err := s.store.GetConfig(trae.ConfigKeyUserIDs)
+	if err != nil {
+		return nil, err
+	}
+	port := 0
+	if v := strings.TrimSpace(portRaw); v != "" {
+		if parsed, perr := strconv.Atoi(v); perr == nil {
+			port = parsed
+		}
+	}
+	return &TraeDBSettings{
+		Host:        strings.TrimSpace(host),
+		Port:        port,
+		User:        strings.TrimSpace(user),
+		DBName:      strings.TrimSpace(dbName),
+		HasPassword: strings.TrimSpace(password) != "",
+		UserIDs:     trae.ParseUserIDs(userIDsRaw),
+	}, nil
+}
+
+// SaveTraeDBSettings 持久化 trae 数据库连接参数。当 password 留空时表示
+// "不修改",沿用 store 中已有值;非空时覆盖。保存后会触发 trae provider 重载。
+func (s *ConfigService) SaveTraeDBSettings(host string, port int, user, password, dbName string, userIDs []string) error {
+	if err := s.store.SetConfig(trae.ConfigKeyHost, strings.TrimSpace(host)); err != nil {
+		return err
+	}
+	portValue := ""
+	if port > 0 {
+		portValue = strconv.Itoa(port)
+	}
+	if err := s.store.SetConfig(trae.ConfigKeyPort, portValue); err != nil {
+		return err
+	}
+	if err := s.store.SetConfig(trae.ConfigKeyUser, strings.TrimSpace(user)); err != nil {
+		return err
+	}
+	if err := s.store.SetConfig(trae.ConfigKeyDBName, strings.TrimSpace(dbName)); err != nil {
+		return err
+	}
+	if strings.TrimSpace(password) != "" {
+		if err := s.store.SetConfig(trae.ConfigKeyPassword, password); err != nil {
+			return err
+		}
+	}
+	userIDsJSON, err := trae.MarshalUserIDs(userIDs)
+	if err != nil {
+		return err
+	}
+	if err := s.store.SetConfig(trae.ConfigKeyUserIDs, userIDsJSON); err != nil {
+		return err
+	}
+	if s.traeProvider != nil {
+		s.traeProvider.Reload()
+	}
+	return nil
+}
+
+// TestTraeDBConnection 用前端传入的连接参数尝试 Open + Close。当 password 为空时
+// 沿用 store 中已保存的密码,便于"只测当前已存配置"的场景。
+func (s *ConfigService) TestTraeDBConnection(host string, port int, user, password, dbName string) (bool, error) {
+	if strings.TrimSpace(password) == "" {
+		stored, err := s.store.GetConfig(trae.ConfigKeyPassword)
+		if err != nil {
+			return false, err
+		}
+		password = stored
+	}
+	if port <= 0 {
+		port = 3306
+	}
+	cfg := trae.Config{
+		Host:     strings.TrimSpace(host),
+		Port:     port,
+		User:     strings.TrimSpace(user),
+		Password: password,
+		DBName:   strings.TrimSpace(dbName),
+	}
+	if cfg.Host == "" || cfg.User == "" || cfg.DBName == "" {
+		return false, fmt.Errorf("host/user/db 不能为空")
+	}
+	if err := trae.TestConnection(cfg); err != nil {
+		return false, err
+	}
+	return true, nil
 }

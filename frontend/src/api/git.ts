@@ -178,6 +178,21 @@ export async function listQuestionBankItems(projectId: string): Promise<Question
   return callService('GitService', 'ListQuestionBankItems', projectId);
 }
 
+export interface QuestionBankSlot {
+  taskType: string;
+  remaining: number;
+}
+
+export interface QuestionBankStats {
+  questionId: number;
+  businessDomain: string;
+  slots: QuestionBankSlot[];
+}
+
+export async function getQuestionBankStats(projectId: string): Promise<QuestionBankStats[]> {
+  return callService('GitService', 'GetQuestionBankStats', projectId);
+}
+
 export async function scanLocalQuestionBank(projectId: string): Promise<ImportLocalSourcesResult> {
   return callService('GitService', 'ScanLocalQuestionBank', projectId);
 }

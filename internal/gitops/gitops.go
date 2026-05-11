@@ -208,6 +208,37 @@ func RecreateWorkspace(path, remoteURL, authorName, authorEmail string) error {
 	return runGit(path, "remote", "add", "origin", remoteURL)
 }
 
+func RecreateWorkspaceFromRemote(path, remoteURL, branch, username, token, authorName, authorEmail string) error {
+	if _, err := os.Stat(path); err == nil {
+		if err := removeManagedWorkspace(path); err != nil {
+			return err
+		}
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+
+	cmd := exec.Command("git", "clone", "--branch", branch, "--single-branch", remoteURL, path)
+	cmd.Env = append(os.Environ(), buildGitAuthEnv(remoteURL, username, token, false)...)
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return err
+	}
+	if err := runGit(path, "config", "user.name", authorName); err != nil {
+		return err
+	}
+	return runGit(path, "config", "user.email", authorEmail)
+}
+
+func WorkspaceHasBranch(path, branch string) bool {
+	if _, err := os.Stat(filepath.Join(path, ".git")); err != nil {
+		return false
+	}
+	cmd := exec.Command("git", "rev-parse", "--verify", branch)
+	cmd.Dir = path
+	return cmd.Run() == nil
+}
+
 func CopyProjectContents(src, dst string) error {
 	if _, err := os.Stat(src); os.IsNotExist(err) {
 		return fmt.Errorf(errs.FmtSourceDirNotExist, src)
@@ -266,8 +297,15 @@ func PushBranch(path, branch, username, token string) error {
 	pushCmd := exec.Command("git", "push", "origin", branch+":"+branch, "--force")
 	pushCmd.Dir = path
 	pushCmd.Env = append(os.Environ(), buildGitAuthEnv(originURL, username, token, false)...)
-	pushCmd.Stderr = os.Stderr
-	return pushCmd.Run()
+	output, err := pushCmd.CombinedOutput()
+	if err != nil {
+		detail := strings.TrimSpace(string(output))
+		if detail == "" {
+			return err
+		}
+		return fmt.Errorf("%w: %s", err, detail)
+	}
+	return nil
 }
 
 func WorkspaceRoot() string {

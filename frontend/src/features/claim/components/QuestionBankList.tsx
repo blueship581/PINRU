@@ -5,6 +5,8 @@ import {
   getQuestionBankSourceKindLabel,
   getQuestionBankStatusMeta,
 } from '../utils/claimUtils';
+import { getTaskTypePresentation, getTaskTypeShortLabel } from '../../../api/config';
+import type { QuestionSlot } from './QuestionBankPanel';
 
 function truncatePath(path: string, maxSegments = 3) {
   if (!path) return '';
@@ -35,6 +37,8 @@ export default function QuestionBankList({
   deleteError,
   loading,
   error,
+  getQuestionSlots,
+  getQuestionBusinessDomain,
 }: {
   filteredItems: QuestionBankItem[];
   selectableFilteredItems: QuestionBankItem[];
@@ -57,6 +61,8 @@ export default function QuestionBankList({
   deleteError: string;
   loading: boolean;
   error: string;
+  getQuestionSlots: (questionId: number) => QuestionSlot[];
+  getQuestionBusinessDomain: (questionId: number) => string;
 }) {
   const hasSelectable = selectableFilteredItems.length > 0;
   return (
@@ -143,6 +149,8 @@ export default function QuestionBankList({
               refreshing={refreshingQuestionId === item.questionId}
               onDelete={onDelete}
               deleting={deletingQuestionId === item.questionId}
+              slots={getQuestionSlots(item.questionId)}
+              businessDomain={getQuestionBusinessDomain(item.questionId)}
             />
           ))}
         </ul>
@@ -161,13 +169,18 @@ const QuestionBankRow: FC<{
   refreshing: boolean;
   onDelete: (item: QuestionBankItem) => void;
   deleting: boolean;
-}> = ({ item, checked, onToggleSelection, onRefresh, refreshing, onDelete, deleting }) => {
+  slots: QuestionSlot[];
+  businessDomain: string;
+}> = ({ item, checked, onToggleSelection, onRefresh, refreshing, onDelete, deleting, slots, businessDomain }) => {
   const [expanded, setExpanded] = useState(false);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const confirmTimerRef = useRef<number | null>(null);
   const statusMeta = getQuestionBankStatusMeta(item.status);
   const selectable = item.status === 'ready';
   const hasDetails = Boolean(item.sourcePath || item.archivePath || item.errorMessage);
+
+  const visibleSlots = slots.filter((s) => s.remaining > 0);
+  const allDone = slots.length > 0 && visibleSlots.length === 0;
 
   useEffect(() => {
     return () => {
@@ -192,13 +205,11 @@ const QuestionBankRow: FC<{
       />
 
       <div className="min-w-0 flex-1">
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
           <button
             type="button"
             onClick={() => hasDetails && setExpanded((prev) => !prev)}
-            className={`flex min-w-0 items-center gap-1 text-left ${
-              hasDetails ? 'cursor-default' : 'cursor-default'
-            }`}
+            className="flex min-w-0 items-center gap-1 text-left cursor-default"
           >
             {hasDetails &&
               (expanded ? (
@@ -213,11 +224,36 @@ const QuestionBankRow: FC<{
           <span className="flex-none text-[10px] uppercase tracking-wider text-stone-400 dark:text-stone-500">
             {getQuestionBankSourceKindLabel(item.sourceKind)}
           </span>
+          {businessDomain && (
+            <span className="flex-none rounded bg-sky-50 px-1.5 py-0.5 text-[10px] font-medium text-sky-700 dark:bg-sky-500/10 dark:text-sky-300">
+              {businessDomain}
+            </span>
+          )}
           <span
             className={`flex-none rounded px-1.5 py-0.5 text-[10px] font-medium ${statusMeta.className}`}
           >
             {statusMeta.label}
           </span>
+
+          {/* Task type slots */}
+          {allDone ? (
+            <span className="text-[10px] text-stone-400/60 dark:text-stone-500/60">已做完</span>
+          ) : (
+            visibleSlots.map(({ taskType, remaining }) => {
+              const p = getTaskTypePresentation(taskType);
+              const short = getTaskTypeShortLabel(taskType);
+              return (
+                <span
+                  key={taskType}
+                  title={`${p.label}：还可设计 ${remaining} 个变体`}
+                  className={`inline-flex items-center gap-0.5 rounded border px-1.5 py-0.5 text-[9px] font-medium ${p.badge}`}
+                >
+                  <span>{short}</span>
+                  <span className="tabular-nums opacity-80">{remaining}</span>
+                </span>
+              );
+            })
+          )}
         </div>
 
         {expanded && hasDetails && (

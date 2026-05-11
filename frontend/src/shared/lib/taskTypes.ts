@@ -104,6 +104,18 @@ const TASK_TYPE_LABELS: Record<string, string> = {
   Feature迭代: 'Feature 迭代',
 };
 
+const TASK_TYPE_SHORT_LABELS: Record<string, string> = {
+  未归类: '未分',
+  Bug修复: 'Bug',
+  代码生成: '生成',
+  Feature迭代: '迭代',
+  代码理解: '理解',
+  代码重构: '重构',
+  性能优化: '性能',
+  工程化: '工程',
+  代码测试: '测试',
+};
+
 const TASK_TYPE_TONES = [
   {
     dot: 'bg-violet-500',
@@ -188,6 +200,11 @@ export function normalizeTaskTypeName(value: string) {
 export function getTaskTypeDisplayLabel(value: string) {
   const normalized = normalizeTaskTypeName(value);
   return TASK_TYPE_LABELS[normalized] ?? normalized;
+}
+
+export function getTaskTypeShortLabel(value: string) {
+  const normalized = normalizeTaskTypeName(value);
+  return TASK_TYPE_SHORT_LABELS[normalized] ?? normalized;
 }
 
 export function supportsQuickAiReviewTaskType(value: string) {

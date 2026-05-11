@@ -1,9 +1,12 @@
+import { useMemo } from 'react';
 import { useQuestionBank } from '../hooks/useQuestionBank';
 import { SyncToolbar } from './QuestionBankSyncCards';
 import QuestionBankList from './QuestionBankList';
 import BulkCreateSection from './BulkCreateSection';
 import GitLabProjectAdder from './GitLabProjectAdder';
 import type { ClaimProjectState } from '../hooks/useClaimProject';
+
+export type QuestionSlot = { taskType: string; remaining: number };
 
 export default function QuestionBankPanel({
   project,
@@ -16,6 +19,27 @@ export default function QuestionBankPanel({
     activeProject?.id ?? '',
     activeProject?.questionBankProjectIds ?? '',
   );
+
+  const statsByQuestionId = useMemo(() => {
+    const map = new Map<number, { slots: QuestionSlot[]; businessDomain: string }>();
+    for (const stat of qb.questionBankStats) {
+      map.set(stat.questionId, {
+        slots: stat.slots.map((s) => ({ taskType: s.taskType, remaining: s.remaining })),
+        businessDomain: stat.businessDomain,
+      });
+    }
+    return map;
+  }, [qb.questionBankStats]);
+
+  const getQuestionSlots = useMemo(() => {
+    return (questionId: number): QuestionSlot[] =>
+      statsByQuestionId.get(questionId)?.slots ?? [];
+  }, [statsByQuestionId]);
+
+  const getQuestionBusinessDomain = useMemo(() => {
+    return (questionId: number): string =>
+      statsByQuestionId.get(questionId)?.businessDomain ?? '';
+  }, [statsByQuestionId]);
 
   if (!activeProject) {
     return (
@@ -72,6 +96,8 @@ export default function QuestionBankPanel({
         deleteError={qb.deleteError}
         loading={qb.questionBankLoading}
         error={qb.questionBankError}
+        getQuestionSlots={getQuestionSlots}
+        getQuestionBusinessDomain={getQuestionBusinessDomain}
       />
 
       <BulkCreateSection

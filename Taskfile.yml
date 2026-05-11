@@ -29,6 +29,29 @@ tasks:
       - codesign --force --deep --sign - dist/PINRU.app
       - echo "Packaged to dist/PINRU.app"
 
+  dmg:
+    desc: Build DMG for current arch (default arm64). Set ARCH=amd64 or ARCH=universal to override.
+    cmds:
+      - ./scripts/build_dmg.sh "{{.ARCH}}"
+    vars:
+      ARCH: '{{.ARCH | default "arm64"}}'
+
+  dmg-arm64:
+    desc: Build PINRU-<version>-macos-arm64.dmg
+    cmds:
+      - ARCH=arm64 ./scripts/build_dmg.sh arm64
+
+  dmg-amd64:
+    desc: Build PINRU-<version>-macos-amd64.dmg (cross-compile from any Mac)
+    cmds:
+      - ARCH=amd64 ./scripts/build_dmg.sh amd64
+
+  dmg-all:
+    desc: Build both arm64 and amd64 DMG packages
+    cmds:
+      - ARCH=arm64 ./scripts/build_dmg.sh arm64
+      - ARCH=amd64 ./scripts/build_dmg.sh amd64
+
   clean:
     desc: Clean build artifacts
     cmds:

@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -1676,6 +1677,10 @@ func buildExtractedTraeSession(userID, rawSessionID string, turn traeMappedTurn,
 }
 
 func buildTraeFullSessionID(userID, traceID, rawSessionID, assistantMessageID, userMessageID string, timestamp time.Time) string {
+	ts := timestamp
+	if t, ok := objectIDTimestamp(assistantMessageID, timestamp.Location()); ok {
+		ts = t
+	}
 	return fmt.Sprintf(
 		".%s:%s_%s.%s.%s:Trae CN.T(%s)",
 		userID,
@@ -1683,8 +1688,22 @@ func buildTraeFullSessionID(userID, traceID, rawSessionID, assistantMessageID, u
 		rawSessionID,
 		assistantMessageID,
 		userMessageID,
-		formatTraeTimestamp(timestamp),
+		formatTraeTimestamp(ts),
 	)
+}
+
+func objectIDTimestamp(id string, loc *time.Location) (time.Time, bool) {
+	if len(id) < 8 {
+		return time.Time{}, false
+	}
+	n, err := strconv.ParseUint(id[:8], 16, 32)
+	if err != nil {
+		return time.Time{}, false
+	}
+	if loc == nil {
+		loc = time.Local
+	}
+	return time.Unix(int64(n), 0).In(loc), true
 }
 
 func formatTraeTimestamp(timestamp time.Time) string {

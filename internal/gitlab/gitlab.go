@@ -80,6 +80,10 @@ func FetchProject(projectRef, apiURL, token string, skipTLSVerify bool) (*Projec
 }
 
 func DownloadArchive(projectID int64, apiURL, token, destination string, sha *string, skipTLSVerify bool) error {
+	return DownloadArchiveByRef(fmt.Sprintf("%d", projectID), apiURL, token, destination, sha, skipTLSVerify)
+}
+
+func DownloadArchiveByRef(projectRef, apiURL, token, destination string, sha *string, skipTLSVerify bool) error {
 	baseURL, err := normalizeAPIBaseURL(apiURL)
 	if err != nil {
 		return err
@@ -92,7 +96,7 @@ func DownloadArchive(projectID int64, apiURL, token, destination string, sha *st
 	parent := filepath.Dir(dest)
 	os.MkdirAll(parent, 0755)
 
-	archiveURL := fmt.Sprintf("%s/api/v4/projects/%d/repository/archive.tar.gz", baseURL, projectID)
+	archiveURL := fmt.Sprintf("%s/api/v4/projects/%s/repository/archive.tar.gz", baseURL, neturl.PathEscape(projectRef))
 	if sha != nil && *sha != "" {
 		archiveURL += "?sha=" + neturl.QueryEscape(*sha)
 	}

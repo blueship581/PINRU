@@ -403,6 +403,7 @@ export function PromptGenerationBar({
   genTaskType,
   genConstraints,
   genScope,
+  genEnhanceMultiFile,
   sending,
   promptGenerationStatus,
   promptGenerationMeta,
@@ -410,6 +411,7 @@ export function PromptGenerationBar({
   onTaskTypeChange,
   onConstraintToggle,
   onScopeChange,
+  onEnhanceMultiFileChange,
   onGenerateClick,
   onConfirm,
   onCancelConfirm,
@@ -420,6 +422,7 @@ export function PromptGenerationBar({
   genTaskType: string;
   genConstraints: string[];
   genScope: string;
+  genEnhanceMultiFile: boolean;
   sending: boolean;
   promptGenerationStatus: PromptGenerationStatus;
   promptGenerationMeta: PromptGenerationMeta;
@@ -427,6 +430,7 @@ export function PromptGenerationBar({
   onTaskTypeChange: (value: string) => void;
   onConstraintToggle: (value: string) => void;
   onScopeChange: (value: string) => void;
+  onEnhanceMultiFileChange: (value: boolean) => void;
   onGenerateClick: () => void;
   onConfirm: () => void;
   onCancelConfirm: () => void;
@@ -455,10 +459,19 @@ export function PromptGenerationBar({
       {/* Constraints multi-select */}
       <MultiSelectDropdown
         label="约束种类"
-        options={constraintTypes as Array<{ value: string; label: string }>}
-        selected={genConstraints}
+        options={[
+          ...(constraintTypes as Array<{ value: string; label: string }>),
+          { value: '__enhance_multi_file__', label: '增强文件（多文件 + 贴合项目）' },
+        ]}
+        selected={genEnhanceMultiFile ? [...genConstraints, '__enhance_multi_file__'] : genConstraints}
         disabled={isDisabled}
-        onToggle={onConstraintToggle}
+        onToggle={(value) => {
+          if (value === '__enhance_multi_file__') {
+            onEnhanceMultiFileChange(!genEnhanceMultiFile);
+          } else {
+            onConstraintToggle(value);
+          }
+        }}
       />
 
       {/* Scope single-select */}

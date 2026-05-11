@@ -22,6 +22,7 @@ import {
   SCOPE_TYPES,
   LS_KEY_CONSTRAINTS,
   LS_KEY_SCOPE,
+  LS_KEY_ENHANCE_MULTI_FILE,
   PROMPT_GEN_TIPS,
 } from '../../../shared/lib/promptConstants';
 import { formatTaskDisplayId } from '../../../shared/lib/taskId';
@@ -201,7 +202,7 @@ export function TaskCardContextMenu({
   onOpenLocalFolder: () => void;
   onStatusChange: (status: TaskStatus) => void;
   onTaskTypeChange: (taskType: string) => void;
-  onGeneratePrompt: (constraints: string[], scope: string) => void;
+  onGeneratePrompt: (constraints: string[], scope: string, enhanceMultiFile: boolean) => void;
   onQuickAiReview?: (directory: TaskChildDirectory) => void;
 }) {
   const [panel, setPanel] = useState<ContextMenuPanel | null>(null);
@@ -213,6 +214,9 @@ export function TaskCardContextMenu({
   });
   const [menuScope, setMenuScope] = useState<string>(() => {
     try { return localStorage.getItem(LS_KEY_SCOPE) ?? ''; } catch { return ''; }
+  });
+  const [menuEnhanceMultiFile, setMenuEnhanceMultiFile] = useState<boolean>(() => {
+    try { return localStorage.getItem(LS_KEY_ENHANCE_MULTI_FILE) === '1'; } catch { return false; }
   });
 
   const toggleMenuConstraint = (value: string) => {
@@ -226,6 +230,14 @@ export function TaskCardContextMenu({
   const handleMenuScopeChange = (value: string) => {
     setMenuScope(value);
     try { localStorage.setItem(LS_KEY_SCOPE, value); } catch {}
+  };
+
+  const handleMenuEnhanceMultiFileToggle = () => {
+    setMenuEnhanceMultiFile((prev) => {
+      const next = !prev;
+      try { localStorage.setItem(LS_KEY_ENHANCE_MULTI_FILE, next ? '1' : '0'); } catch {}
+      return next;
+    });
   };
   const currentTaskType = normalizeTaskTypeName(task.taskType) || task.taskType;
   const quickAiReviewVisible = Boolean(onQuickAiReview) && supportsQuickAiReviewTaskType(currentTaskType);
@@ -654,6 +666,20 @@ export function TaskCardContextMenu({
                                 </span>
                               </label>
                             ))}
+                            <label
+                              className="flex items-center gap-2 cursor-default"
+                              title="勾选后让首轮提示词天然需要多文件协同改动，并贴合当前项目"
+                            >
+                              <input
+                                type="checkbox"
+                                checked={menuEnhanceMultiFile}
+                                onChange={handleMenuEnhanceMultiFileToggle}
+                                className="w-3 h-3 accent-indigo-600 cursor-default shrink-0"
+                              />
+                              <span className="text-[12px] text-indigo-600 dark:text-indigo-300 font-medium">
+                                增强文件
+                              </span>
+                            </label>
                           </div>
                         </div>
 
@@ -684,6 +710,8 @@ export function TaskCardContextMenu({
                           </div>
                         </div>
 
+                        <div className="border-t border-stone-200/60 dark:border-stone-700/60 my-2" />
+
                         <div className="rounded-xl border border-amber-200/80 bg-amber-50/90 px-3 py-2.5 dark:border-amber-500/20 dark:bg-amber-500/10">
                           <div className="flex items-start gap-2">
                             <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-700 dark:text-amber-300" />
@@ -707,7 +735,7 @@ export function TaskCardContextMenu({
                         <button
                           type="button"
                           disabled={!menuScope}
-                          onClick={() => onGeneratePrompt(menuConstraints, menuScope)}
+                          onClick={() => onGeneratePrompt(menuConstraints, menuScope, menuEnhanceMultiFile)}
                           className="mt-3 w-full shrink-0 py-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 disabled:opacity-40 text-white text-[12px] font-semibold transition-colors cursor-default"
                         >
                           开始生成

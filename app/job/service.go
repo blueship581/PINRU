@@ -719,10 +719,10 @@ type GitCloneResult struct {
 }
 
 type QuestionBankMaterializePayload struct {
-	BankSourcePath string               `json:"bankSourcePath"`
-	TargetSourcePath string             `json:"targetSourcePath"`
-	SourceModelID string                `json:"sourceModelId"`
-	CopyTargets   []GitCloneCopyTarget  `json:"copyTargets"`
+	BankSourcePath   string               `json:"bankSourcePath"`
+	TargetSourcePath string               `json:"targetSourcePath"`
+	SourceModelID    string               `json:"sourceModelId"`
+	CopyTargets      []GitCloneCopyTarget `json:"copyTargets"`
 }
 
 func (s *JobService) executeGitClone(
@@ -888,6 +888,7 @@ type PrSubmitPayload struct {
 	TaskID          string   `json:"taskId"`
 	Models          []string `json:"models"`
 	TargetRepo      string   `json:"targetRepo"`
+	RecreateRepo    bool     `json:"recreateRepo"`
 	SourceModelName string   `json:"sourceModelName"`
 	GitHubUsername  string   `json:"githubUsername"`
 	GitHubToken     string   `json:"githubToken"`
@@ -923,6 +924,7 @@ func (s *JobService) executePrSubmit(
 			TaskID:          payload.TaskID,
 			Models:          payload.Models,
 			TargetRepo:      payload.TargetRepo,
+			RecreateRepo:    payload.RecreateRepo,
 			SourceModelName: payload.SourceModelName,
 			GitHubUsername:  payload.GitHubUsername,
 			GitHubToken:     payload.GitHubToken,
@@ -974,11 +976,11 @@ func (s *JobService) executePrSubmit(
 
 // AiReviewPayload 描述一次 ai_review 任务的参数。
 type AiReviewPayload struct {
-	ReviewRoundID      *string              `json:"reviewRoundId,omitempty"`
-	ModelRunID         *string              `json:"modelRunId"`
-	ModelName          string               `json:"modelName"`
-	LocalPath          string               `json:"localPath"`
-	NextPromptOverride string               `json:"nextPromptOverride,omitempty"`
+	ReviewRoundID      *string                `json:"reviewRoundId,omitempty"`
+	ModelRunID         *string                `json:"modelRunId"`
+	ModelName          string                 `json:"modelName"`
+	LocalPath          string                 `json:"localPath"`
+	NextPromptOverride string                 `json:"nextPromptOverride,omitempty"`
 	RoundSnapshot      *AiReviewRoundSnapshot `json:"roundSnapshot,omitempty"`
 
 	// Deprecated: 兼容旧版前端，映射到 ReviewRoundID

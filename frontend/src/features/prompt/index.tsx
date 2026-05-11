@@ -82,6 +82,7 @@ import {
   SCOPE_TYPES,
   LS_KEY_CONSTRAINTS,
   LS_KEY_SCOPE,
+  LS_KEY_ENHANCE_MULTI_FILE,
 } from '../../shared/lib/promptConstants';
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -188,6 +189,11 @@ export default function Prompt() {
     try {
       return localStorage.getItem(LS_KEY_SCOPE) ?? '';
     } catch { return ''; }
+  });
+  const [genEnhanceMultiFile, setGenEnhanceMultiFile] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem(LS_KEY_ENHANCE_MULTI_FILE) === '1';
+    } catch { return false; }
   });
   const [confirmingRegenerate, setConfirmingRegenerate] = useState(false);
 
@@ -325,6 +331,10 @@ export default function Prompt() {
   useEffect(() => {
     try { localStorage.setItem(LS_KEY_SCOPE, genScope); } catch {}
   }, [genScope]);
+
+  useEffect(() => {
+    try { localStorage.setItem(LS_KEY_ENHANCE_MULTI_FILE, genEnhanceMultiFile ? '1' : '0'); } catch {}
+  }, [genEnhanceMultiFile]);
 
   // Reset confirm state when task changes
   useEffect(() => {
@@ -576,12 +586,16 @@ export default function Prompt() {
   const handleGenerateConfirmed = () => {
     if (!genTaskType || !genScope) return;
     const constraints = genConstraints.length > 0 ? genConstraints.join(',') : '无约束';
-    const prompt = [
+    const lines = [
       `[PINRU] /评审项目提示词生成`,
       `taskType: ${genTaskType}`,
       `constraints: ${constraints}`,
       `scope: ${genScope}`,
-    ].join('\n');
+    ];
+    if (genEnhanceMultiFile) {
+      lines.push('enhanceMultiFile: true');
+    }
+    const prompt = lines.join('\n');
     void handleSend(prompt, { autoSavePrompt: true });
   };
 
@@ -950,6 +964,7 @@ export default function Prompt() {
           genTaskType={genTaskType}
           genConstraints={genConstraints}
           genScope={genScope}
+          genEnhanceMultiFile={genEnhanceMultiFile}
           sending={sending}
           promptGenerationStatus={promptGenerationStatus}
           promptGenerationMeta={promptGenerationMeta}
@@ -963,6 +978,7 @@ export default function Prompt() {
             )
           }
           onScopeChange={setGenScope}
+          onEnhanceMultiFileChange={setGenEnhanceMultiFile}
           onGenerateClick={handleGenerateClick}
           onConfirm={handleGenerateConfirm}
           onCancelConfirm={() => setConfirmingRegenerate(false)}

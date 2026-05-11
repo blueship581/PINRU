@@ -14,6 +14,7 @@ import {
   getTaskTypeDisplayLabel,
   getTaskTypeQuotaRawValue,
   getTaskTypePresentation,
+  getTaskTypeShortLabel,
   normalizeTaskTypeName,
   parseProjectTaskTypes,
   parseTaskTypeQuotas,
@@ -51,6 +52,7 @@ export {
   getTaskTypeDisplayLabel,
   getTaskTypeQuotaRawValue,
   getTaskTypePresentation,
+  getTaskTypeShortLabel,
   normalizeTaskTypeName,
   parseProjectTaskTypes,
   parseTaskTypeQuotas,
@@ -153,6 +155,57 @@ export async function getTraeSettings(): Promise<TraeSettings> {
 
 export async function saveTraeSettings(workspaceStoragePath: string, logsPath: string): Promise<void> {
   return callService('ConfigService', 'SaveTraeSettings', workspaceStoragePath, logsPath);
+}
+
+export interface TraeDBSettings {
+  host: string;
+  port: number;
+  user: string;
+  dbName: string;
+  hasPassword: boolean;
+  userIds: string[];
+}
+
+export async function getTraeDBSettings(): Promise<TraeDBSettings> {
+  return callService('ConfigService', 'GetTraeDBSettings');
+}
+
+export async function saveTraeDBSettings(
+  host: string,
+  port: number,
+  user: string,
+  password: string,
+  dbName: string,
+  userIds: string[],
+): Promise<void> {
+  return callService(
+    'ConfigService',
+    'SaveTraeDBSettings',
+    host,
+    port,
+    user,
+    password,
+    dbName,
+    userIds,
+  );
+}
+
+export async function testTraeDBConnection(
+  host: string,
+  port: number,
+  user: string,
+  password: string,
+  dbName: string,
+): Promise<boolean> {
+  return callService(
+    'ConfigService',
+    'TestTraeDBConnection',
+    host,
+    port,
+    user,
+    password,
+    dbName,
+  );
 }
 
 // Project CRUD — now backed by dedicated DB table

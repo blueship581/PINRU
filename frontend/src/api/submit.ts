@@ -14,6 +14,7 @@ export interface PublishSourceRepoRequest {
   taskId: string;
   modelName: string;
   targetRepo: string;
+  recreateRepo?: boolean;
   githubUsername: string;
   githubToken: string;
 }
@@ -45,6 +46,7 @@ export interface SubmitAllRequest {
   taskId: string;
   models: string[];
   targetRepo: string;
+  recreateRepo?: boolean;
   sourceModelName?: string;
   githubUsername: string;
   githubToken: string;

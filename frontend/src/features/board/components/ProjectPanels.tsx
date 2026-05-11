@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { motion } from 'motion/react';
 import { Loader2, Plus, RefreshCw, X } from 'lucide-react';
 import TaskTypeQuotaEditor from '../../../shared/components/TaskTypeQuotaEditor';
@@ -17,11 +17,37 @@ import {
   normalizeManagedSourceFolders,
   type NormalizeManagedSourceFoldersResult,
 } from '../../../api/git';
+import { addProjectModelRun, type AddProjectModelRunResult } from '../../../api/task';
 import { parseQuestionBankProjectIds } from '../../claim/utils/claimUtils';
 import { InfoCard } from './BoardPresentation';
 
 function isOriginModel(name: string) {
   return name.trim().toUpperCase() === 'ORIGIN';
+}
+
+function findAddedModels(previousModels: string[], nextModels: string[]) {
+  const previousNames = new Set(previousModels.map((model) => model.trim().toUpperCase()));
+  return nextModels.filter((model) => !previousNames.has(model.trim().toUpperCase()));
+}
+
+function isSourceModel(name: string, sourceModelFolder: string) {
+  return name.trim().toUpperCase() === sourceModelFolder.trim().toUpperCase();
+}
+
+function formatProjectModelSyncError(results: AddProjectModelRunResult[]) {
+  const failedResults = results.filter((result) => result.failed.length > 0);
+  if (failedResults.length === 0) return '';
+
+  return failedResults
+    .map((result) => {
+      const sample = result.failed
+        .slice(0, 3)
+        .map((item) => `${item.projectName || item.taskId}: ${item.error || '创建失败'}`)
+        .join('；');
+      const suffix = result.failed.length > 3 ? `；另 ${result.failed.length - 3} 个失败` : '';
+      return `${result.modelName} 有 ${result.failed.length} 个题目未创建：${sample}${suffix}`;
+    })
+    .join('\n');
 }
 
 export function EmptyProjectAside({
@@ -228,7 +254,7 @@ export function ProjectPanel({
 }: {
   project: ProjectConfig;
   onClose: () => void;
-  onSaved: (updated: ProjectConfig) => void;
+  onSaved: (updated: ProjectConfig, options?: { keepOpen?: boolean }) => void;
 }) {
   const initialTaskSettings = useMemo(() => getProjectTaskSettings(project), [project]);
   const [form, setForm] = useState<ProjectConfig>({ ...project });
@@ -239,15 +265,20 @@ export function ProjectPanel({
   const [taskTypes, setTaskTypes] = useState<string[]>(() => initialTaskSettings.taskTypes);
   const [quotas, setQuotas] = useState<TaskTypeQuotas>(() => initialTaskSettings.quotas);
   const [totals, setTotals] = useState(() => initialTaskSettings.totals);
+  const previousProjectIdRef = useRef(project.id);
 
   useEffect(() => {
+    const projectChanged = previousProjectIdRef.current !== project.id;
+    previousProjectIdRef.current = project.id;
     setForm({ ...project });
     setTaskTypes(initialTaskSettings.taskTypes);
     setQuotas(initialTaskSettings.quotas);
     setTotals(initialTaskSettings.totals);
     setAddingModel(false);
     setNewModelInput('');
-    setError('');
+    if (projectChanged) {
+      setError('');
+    }
   }, [initialTaskSettings, project]);
 
   const setField = <
@@ -314,11 +345,29 @@ export function ProjectPanel({
         defaultSubmitRepo: form.defaultSubmitRepo.trim(),
         ...serializeProjectTaskSettings(taskTypes, quotas, totals),
       };
+      const addedModels = findAddedModels(normalizeProjectModels(project.models), modelList).filter(
+        (model) => !isSourceModel(model, sourceModelFolder),
+      );
       await updateProject(nextProject);
+      const syncResults: AddProjectModelRunResult[] = [];
+      for (const modelName of addedModels) {
+        syncResults.push(
+          await addProjectModelRun({
+            projectConfigId: nextProject.id,
+            modelName,
+          }),
+        );
+      }
       const refreshedProjects = await getProjects();
       const updatedProject =
         refreshedProjects.find((item) => item.id === nextProject.id) ?? nextProject;
-      onSaved(updatedProject);
+      const syncError = formatProjectModelSyncError(syncResults);
+      if (syncError) {
+        onSaved(updatedProject, { keepOpen: true });
+        setError(syncError);
+      } else {
+        onSaved(updatedProject);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : '保存失败');
     } finally {

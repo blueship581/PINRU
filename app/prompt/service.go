@@ -14,18 +14,25 @@ import (
 	"github.com/blueship581/pinru/internal/llm"
 	internalprompt "github.com/blueship581/pinru/internal/prompt"
 	"github.com/blueship581/pinru/internal/store"
+	"github.com/blueship581/pinru/internal/trae"
 	"github.com/blueship581/pinru/internal/util"
 )
 
 // Service handles prompt generation and storage for tasks.
 type PromptService struct {
-	store  *store.Store
-	cliSvc *appcli.CliService
+	store        *store.Store
+	cliSvc       *appcli.CliService
+	traeProvider *trae.Provider
 }
 
 // NewService creates a new prompt service.
 func New(store *store.Store, cliSvc *appcli.CliService) *PromptService {
 	return &PromptService{store: store, cliSvc: cliSvc}
+}
+
+// SetTraeProvider 注入 trae provider，用于把远端兄弟提示词一并喂给生成器。
+func (s *PromptService) SetTraeProvider(provider *trae.Provider) {
+	s.traeProvider = provider
 }
 
 // GeneratePromptRequest carries parameters for prompt generation.
@@ -36,6 +43,7 @@ type GeneratePromptRequest struct {
 	Scopes          []string `json:"scopes"`
 	Constraints     []string `json:"constraints"`
 	AdditionalNotes *string  `json:"additionalNotes"`
+	EnhanceMultiFile bool    `json:"enhanceMultiFile"`
 	ThinkingBudget  string   `json:"thinkingBudget"`
 }
 
@@ -119,6 +127,11 @@ func (s *PromptService) GenerateTaskPromptWithContext(ctx context.Context, req G
 		} else {
 			siblingPrompts = collectSiblingPrompts(siblings)
 		}
+	}
+
+	// 叠加 trae 远端兄弟提示词（跨设备/跨人）。trae 不可用时静默降级。
+	if remote, ok := s.fetchTraeSiblingPrompts(ctx, task.GitLabProjectID); ok {
+		siblingPrompts = mergeRemoteSiblingPrompts(siblingPrompts, remote)
 	}
 
 	startedAt := time.Now().Unix()
@@ -348,6 +361,18 @@ func buildSkillPrompt(req GeneratePromptRequest, siblingPrompts []siblingPrompt)
 		sb.WriteString("\n")
 	}
 
+	if req.EnhanceMultiFile {
+		sb.WriteString("enhanceMultiFile: true\n")
+		sb.WriteString("\n---\n")
+		sb.WriteString("增强出题（多文件改动）：\n")
+		sb.WriteString("请基于本仓库的真实结构出题，让题目天然需要在多个文件、多个层次上协同改动，并贴合项目现有架构与命名约定。要求：\n")
+		sb.WriteString("- 题目必须落在仓库已存在的真实业务领域上，不能是脱离仓库的通用需求\n")
+		sb.WriteString("- 设计点要让正常解法自然涉及多文件协同（典型如：业务规则变化要同步更新接口/服务/存储/前端展示，或新增能力需要扩展点+实现+调用方+测试同时改动）\n")
+		sb.WriteString("- 用业务语言隐式带出多文件诉求，不得在正文里出现\"修改多个文件\"\"跨文件\"\"涉及多模块\"等暴露评测意图的措辞\n")
+		sb.WriteString("- 可适度引入下列任一隐式驱动因素让改动自然外溢：与现有功能的兼容性、复用现有约定、补齐对应配置/常量、扩展点可插拔、保持与既有同类实现风格一致\n")
+		sb.WriteString("- 仍然遵守正文 80 字以内、单段连贯、不出现技术标识符的硬性规则\n")
+	}
+
 	if len(siblingPrompts) > 0 {
 		sb.WriteString("\n---\n")
 		sb.WriteString("同题源已有提示词（来自同一代码仓库的其他试题）：\n")
@@ -386,6 +411,57 @@ func collectSiblingPrompts(tasks []store.Task) []siblingPrompt {
 		})
 	}
 	return result
+}
+
+// fetchTraeSiblingPrompts 从 trae 数据库取同 question_id 下每个 trae_window 的首轮 prompt。
+// trae 未配置或查询失败时返回 ok=false，调用方按本地兜底。
+func (s *PromptService) fetchTraeSiblingPrompts(ctx context.Context, questionID int64) ([]trae.SiblingPrompt, bool) {
+	if s.traeProvider == nil || questionID <= 0 {
+		return nil, false
+	}
+	client, err := s.traeProvider.Get()
+	if err != nil || client == nil {
+		return nil, false
+	}
+	queryCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
+	prompts, err := client.ListFirstRoundPromptsByQuestion(queryCtx, questionID)
+	if err != nil {
+		slog.Warn("trae sibling prompts failed", "questionId", questionID, "err", err)
+		return nil, false
+	}
+	return prompts, true
+}
+
+// mergeRemoteSiblingPrompts 把 trae 远端兄弟提示词追加到本地结果后，按 prompt 文本去重。
+func mergeRemoteSiblingPrompts(local []siblingPrompt, remote []trae.SiblingPrompt) []siblingPrompt {
+	seen := make(map[string]struct{}, len(local)+len(remote))
+	for _, sp := range local {
+		seen[strings.TrimSpace(sp.PromptText)] = struct{}{}
+	}
+	merged := make([]siblingPrompt, 0, len(local)+len(remote))
+	merged = append(merged, local...)
+	for _, r := range remote {
+		text := strings.TrimSpace(r.UserPrompt)
+		if text == "" {
+			continue
+		}
+		if _, exists := seen[text]; exists {
+			continue
+		}
+		seen[text] = struct{}{}
+		taskType := strings.TrimSpace(r.TaskType)
+		taskID := r.RepoID
+		if strings.TrimSpace(taskID) == "" {
+			taskID = "trae:" + r.WindowID
+		}
+		merged = append(merged, siblingPrompt{
+			TaskID:     taskID,
+			TaskType:   taskType,
+			PromptText: text,
+		})
+	}
+	return merged
 }
 
 type promptProviderSelection struct {

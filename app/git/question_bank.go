@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/blueship581/pinru/internal/errs"
 	gl "github.com/blueship581/pinru/internal/gitlab"
@@ -28,16 +29,16 @@ type QuestionBankSyncDetail struct {
 }
 
 type QuestionBankSyncResult struct {
-	ProjectID    string                    `json:"projectId"`
-	ProjectName  string                    `json:"projectName"`
-	SyncedCount  int                       `json:"syncedCount"`
-	SkippedCount int                       `json:"skippedCount"`
-	ErrorCount   int                       `json:"errorCount"`
-	Details      []QuestionBankSyncDetail  `json:"details"`
+	ProjectID    string                   `json:"projectId"`
+	ProjectName  string                   `json:"projectName"`
+	SyncedCount  int                      `json:"syncedCount"`
+	SkippedCount int                      `json:"skippedCount"`
+	ErrorCount   int                      `json:"errorCount"`
+	Details      []QuestionBankSyncDetail `json:"details"`
 }
 
 type localQuestionBankTrackedState struct {
-	paths              map[string]struct{}
+	paths               map[string]struct{}
 	existingQuestionIDs map[int64]store.QuestionBankItem
 }
 
@@ -416,6 +417,171 @@ func (s *GitService) RefreshQuestionBankItem(projectID string, questionID int64)
 	return s.syncGitLabQuestionBank(projectID, []int64{questionID}, true)
 }
 
+// QuestionBankSlot 描述某题某 taskType 的剩余可生成变体数。
+// remaining 为 -1 表示项目未对该 taskType 设置 totals 上限（前端按"无配额限制"渲染）。
+type QuestionBankSlot struct {
+	TaskType  string `json:"taskType"`
+	Remaining int    `json:"remaining"`
+}
+
+// QuestionBankStats 是单题在题库面板的统计信息：每个 taskType 还剩多少变体可设计、
+// 以及从 trae 拉到的 business_domain（项目类型）。
+type QuestionBankStats struct {
+	QuestionID     int64              `json:"questionId"`
+	BusinessDomain string             `json:"businessDomain"`
+	Slots          []QuestionBankSlot `json:"slots"`
+}
+
+// GetQuestionBankStats 计算指定项目下，每道题在 trae 中已用变体数对照项目 totals
+// 后的剩余可设计数，并附上 trae 题库主表中的 business_domain。
+// trae 不可用时仍返回基于 totals 的剩余数（视为"未占用"），business_domain 为空。
+func (s *GitService) GetQuestionBankStats(projectID string) ([]QuestionBankStats, error) {
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		return nil, errors.New(errs.MsgProjectRequired)
+	}
+	project, err := s.store.GetProject(projectID)
+	if err != nil {
+		return nil, err
+	}
+	if project == nil {
+		return nil, fmt.Errorf(errs.FmtStoreProjectNotFound, projectID)
+	}
+
+	// 单题上限存放在 TaskTypeQuotas（前端「单题上限」编辑器写入），TaskTypeTotals
+	// 是项目级任务总量（整个项目可创建多少道）。剩余可设计变体数 = 单题上限 − 已用变体。
+	totals, err := parseTaskTypeTotalsJSON(project.TaskTypeQuotas)
+	if err != nil {
+		return nil, err
+	}
+	if len(totals.orderedKeys) == 0 {
+		// 早期项目可能只填了 totals，不影响兜底逻辑。
+		totals, err = parseTaskTypeTotalsJSON(project.TaskTypeTotals)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	items, err := s.store.ListQuestionBankItems(project.ID)
+	if err != nil {
+		return nil, err
+	}
+
+	questionIDs := make([]int64, 0, len(items))
+	for _, item := range items {
+		if item.QuestionID > 0 {
+			questionIDs = append(questionIDs, item.QuestionID)
+		}
+	}
+
+	usedByQID := map[int64]map[string]int{}
+	metaByQID := map[int64]string{}
+	if s.traeProvider != nil && len(questionIDs) > 0 {
+		if client, err := s.traeProvider.Get(); err == nil && client != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+			defer cancel()
+			if used, err := client.CountUsedVariantsByQuestions(ctx, questionIDs); err == nil {
+				for qid, qv := range used {
+					usedByQID[qid] = qv.UsedByTaskType
+				}
+			}
+			if metas, err := client.GetQuestionMetaByIDs(ctx, questionIDs); err == nil {
+				for qid, m := range metas {
+					if d := strings.TrimSpace(m.BusinessDomain); d != "" {
+						metaByQID[qid] = d
+					}
+				}
+			}
+		}
+	}
+
+	// 叠加本地 tasks 的占用：本地刚领的题在 trae 还没记录，必须本地兜底。
+	// 用 max(trae 已用变体, 本地 task 数) 而非相加，避免「本地领过且 trae 已同步」时双重计数。
+	// 原因：领题时 reconcileTraeClaimSequence 会把本地 sequence 推到 trae max+1，本地 task
+	// 与 trae 记录最终对应同一组 version，做并集计数等价于取 max。
+	localTasks, err := s.store.ListTasks(&project.ID)
+	if err != nil {
+		return nil, err
+	}
+	localCounts := map[int64]map[string]int{}
+	for _, task := range localTasks {
+		qid := task.GitLabProjectID
+		if qid <= 0 {
+			continue
+		}
+		taskType := strings.TrimSpace(task.TaskType)
+		if taskType == "" {
+			continue
+		}
+		inner, ok := localCounts[qid]
+		if !ok {
+			inner = map[string]int{}
+			localCounts[qid] = inner
+		}
+		inner[taskType]++
+	}
+	for qid, byType := range localCounts {
+		merged, ok := usedByQID[qid]
+		if !ok {
+			merged = map[string]int{}
+			usedByQID[qid] = merged
+		}
+		for taskType, localCount := range byType {
+			if localCount > merged[taskType] {
+				merged[taskType] = localCount
+			}
+		}
+	}
+
+	stats := make([]QuestionBankStats, 0, len(items))
+	for _, item := range items {
+		used := usedByQID[item.QuestionID]
+		slots := make([]QuestionBankSlot, 0, len(totals.orderedKeys))
+		for _, taskType := range totals.orderedKeys {
+			total := totals.values[taskType]
+			usedCount := 0
+			if used != nil {
+				usedCount = used[taskType]
+			}
+			remaining := total - usedCount
+			if remaining < 0 {
+				remaining = 0
+			}
+			slots = append(slots, QuestionBankSlot{TaskType: taskType, Remaining: remaining})
+		}
+		stats = append(stats, QuestionBankStats{
+			QuestionID:     item.QuestionID,
+			BusinessDomain: metaByQID[item.QuestionID],
+			Slots:          slots,
+		})
+	}
+	return stats, nil
+}
+
+type orderedTotals struct {
+	orderedKeys []string
+	values      map[string]int
+}
+
+// parseTaskTypeTotalsJSON 解析 projects.task_type_totals JSON。空对象返回空 map。
+// 保持 JSON 中字段顺序需要手动解码；这里用 map + 排序键作为"项目级类型清单"。
+func parseTaskTypeTotalsJSON(raw string) (orderedTotals, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" || trimmed == "{}" {
+		return orderedTotals{values: map[string]int{}}, nil
+	}
+	values := map[string]int{}
+	if err := json.Unmarshal([]byte(trimmed), &values); err != nil {
+		return orderedTotals{}, fmt.Errorf("解析 task_type_totals 失败：%w", err)
+	}
+	keys := make([]string, 0, len(values))
+	for k := range values {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return orderedTotals{orderedKeys: keys, values: values}, nil
+}
+
 // pruneMissingLocalQuestionBankItems removes question-bank rows whose backing
 // files on disk have been deleted out-of-band. Only local-sourced entries are
 // considered — GitLab entries are managed by the sync flow and stay put. A
@@ -730,19 +896,18 @@ func (s *GitService) scanLocalSourceCandidateToQuestionBank(
 	project store.Project,
 	candidate localSourceCandidate,
 ) (ImportLocalSourceDetail, store.QuestionBankItem, error) {
-	finalSourcePath := util.NormalizePath(util.BuildQuestionBankSourcePath(project.CloneBasePath, candidate.SyntheticProject))
+	sourceFolderName := buildQuestionBankLocalSourceFolderName(candidate.DisplayName)
+	finalSourcePath := util.NormalizePath(util.BuildQuestionBankSourcePath(project.CloneBasePath, sourceFolderName))
 	stagingSourcePath := finalSourcePath + "._pinru_tmp"
 	finalArchivePath := ""
 	if candidate.Kind == "archive" {
-		archiveBase := filepath.Base(candidate.Path)
-		ext := filepath.Ext(archiveBase)
-		stem := strings.TrimSuffix(archiveBase, ext)
-		cleanedStem := stripArchivesManagedPrefix(stem)
+		ext := strings.ToLower(filepath.Ext(candidate.Path))
 		finalArchivePath = util.NormalizePath(filepath.Join(
 			util.BuildQuestionBankArchivesPath(project.CloneBasePath),
-			fmt.Sprintf("%d-%s%s", candidate.SyntheticProject, cleanedStem, ext),
+			sourceFolderName+ext,
 		))
 	}
+	archiveAlreadyFinal := candidate.Kind == "archive" && finalArchivePath != "" && util.SamePath(candidate.Path, finalArchivePath)
 	archiveStagingPath := ""
 	directoryMoved := false
 	archiveMoved := false
@@ -751,7 +916,7 @@ func (s *GitService) scanLocalSourceCandidateToQuestionBank(
 	if managedDirectoryExists(finalSourcePath) {
 		return ImportLocalSourceDetail{}, store.QuestionBankItem{}, fmt.Errorf(errs.FmtTargetDirExists, filepath.Base(finalSourcePath))
 	}
-	if candidate.Kind == "archive" && finalArchivePath != "" {
+	if candidate.Kind == "archive" && finalArchivePath != "" && !archiveAlreadyFinal {
 		if _, err := os.Stat(util.ExpandTilde(finalArchivePath)); err == nil {
 			return ImportLocalSourceDetail{}, store.QuestionBankItem{}, fmt.Errorf(errs.FmtTargetDirExists, filepath.Base(finalArchivePath))
 		}
@@ -775,7 +940,7 @@ func (s *GitService) scanLocalSourceCandidateToQuestionBank(
 				_ = os.Rename(util.ExpandTilde(archiveStagingPath), util.ExpandTilde(candidate.Path))
 			}
 		}
-		if finalArchivePath != "" {
+		if finalArchivePath != "" && !archiveAlreadyFinal {
 			if _, err := os.Stat(util.ExpandTilde(finalArchivePath)); err == nil {
 				_ = os.Rename(util.ExpandTilde(finalArchivePath), util.ExpandTilde(candidate.Path))
 			}
@@ -801,15 +966,19 @@ func (s *GitService) scanLocalSourceCandidateToQuestionBank(
 		if err := os.MkdirAll(filepath.Dir(util.ExpandTilde(finalArchivePath)), 0o755); err != nil {
 			return ImportLocalSourceDetail{}, store.QuestionBankItem{}, err
 		}
-		archiveStagingPath = finalArchivePath + "._pinru_tmp"
-		if err := os.RemoveAll(util.ExpandTilde(archiveStagingPath)); err != nil {
-			return ImportLocalSourceDetail{}, store.QuestionBankItem{}, err
+		archivePathForExtract := candidate.Path
+		if !archiveAlreadyFinal {
+			archiveStagingPath = finalArchivePath + "._pinru_tmp"
+			if err := os.RemoveAll(util.ExpandTilde(archiveStagingPath)); err != nil {
+				return ImportLocalSourceDetail{}, store.QuestionBankItem{}, err
+			}
+			if err := os.Rename(util.ExpandTilde(candidate.Path), util.ExpandTilde(archiveStagingPath)); err != nil {
+				return ImportLocalSourceDetail{}, store.QuestionBankItem{}, err
+			}
+			archiveMoved = true
+			archivePathForExtract = archiveStagingPath
 		}
-		if err := os.Rename(util.ExpandTilde(candidate.Path), util.ExpandTilde(archiveStagingPath)); err != nil {
-			return ImportLocalSourceDetail{}, store.QuestionBankItem{}, err
-		}
-		archiveMoved = true
-		if err := extractArchiveByExtension(archiveStagingPath, candidate.Path, stagingSourcePath); err != nil {
+		if err := extractArchiveByExtension(archivePathForExtract, candidate.Path, stagingSourcePath); err != nil {
 			return ImportLocalSourceDetail{}, store.QuestionBankItem{}, err
 		}
 	default:
@@ -924,8 +1093,9 @@ func (s *GitService) syncGitLabQuestionBank(projectID string, questionIDs []int6
 
 	for _, questionID := range targetIDs {
 		existing := existingByID[questionID]
-		targetSourcePath := util.NormalizePath(util.BuildQuestionBankSourcePath(project.CloneBasePath, questionID))
 		displayName := buildGitLabQuestionBankDisplayName(questionID)
+		targetSourcePath := util.NormalizePath(util.BuildQuestionBankSourcePath(project.CloneBasePath, displayName))
+		originRef := util.BuildQuestionBankGitLabProjectRef(questionID)
 		if !force && strings.TrimSpace(existing.SourceKind) == "gitlab" && managedDirectoryExists(existing.SourcePath) {
 			if strings.TrimSpace(existing.DisplayName) != displayName {
 				updated := existing
@@ -942,7 +1112,7 @@ func (s *GitService) syncGitLabQuestionBank(projectID string, questionIDs []int6
 			continue
 		}
 
-		_, fetchErr := gl.FetchProject(strconv.FormatInt(questionID, 10), url, token, skipTLSVerify)
+		_, fetchErr := gl.FetchProject(originRef, url, token, skipTLSVerify)
 
 		if fetchErr != nil {
 			if existing.QuestionID == 0 {
@@ -954,7 +1124,7 @@ func (s *GitService) syncGitLabQuestionBank(projectID string, questionIDs []int6
 					DisplayName:     displayName,
 					SourceKind:      "gitlab",
 					SourcePath:      sourcePath,
-					OriginRef:       strconv.FormatInt(questionID, 10),
+					OriginRef:       originRef,
 					Status:          "error",
 					ErrorMessage:    &errorMessage,
 				})
@@ -1001,7 +1171,7 @@ func (s *GitService) syncSingleGitLabQuestionBankItem(
 	token string,
 	skipTLSVerify bool,
 ) error {
-	finalSourcePath := util.NormalizePath(util.BuildQuestionBankSourcePath(project.CloneBasePath, questionID))
+	finalSourcePath := util.NormalizePath(util.BuildQuestionBankSourcePath(project.CloneBasePath, displayName))
 	stagingSourcePath := finalSourcePath + "._pinru_tmp"
 	if err := os.RemoveAll(util.ExpandTilde(stagingSourcePath)); err != nil {
 		return err
@@ -1010,7 +1180,8 @@ func (s *GitService) syncSingleGitLabQuestionBankItem(
 		return err
 	}
 
-	if err := gl.DownloadArchive(questionID, url, token, stagingSourcePath, nil, skipTLSVerify); err != nil {
+	originRef := util.BuildQuestionBankGitLabProjectRef(questionID)
+	if err := gl.DownloadArchiveByRef(originRef, url, token, stagingSourcePath, nil, skipTLSVerify); err != nil {
 		errorMessage := err.Error()
 		_ = s.store.UpsertQuestionBankItem(store.QuestionBankItem{
 			ProjectConfigID: project.ID,
@@ -1018,7 +1189,7 @@ func (s *GitService) syncSingleGitLabQuestionBankItem(
 			DisplayName:     displayName,
 			SourceKind:      "gitlab",
 			SourcePath:      finalSourcePath,
-			OriginRef:       strconv.FormatInt(questionID, 10),
+			OriginRef:       originRef,
 			Status:          "error",
 			ErrorMessage:    &errorMessage,
 		})
@@ -1042,7 +1213,7 @@ func (s *GitService) syncSingleGitLabQuestionBankItem(
 		DisplayName:     displayName,
 		SourceKind:      "gitlab",
 		SourcePath:      finalSourcePath,
-		OriginRef:       strconv.FormatInt(questionID, 10),
+		OriginRef:       originRef,
 		Status:          "ready",
 		ErrorMessage:    nil,
 	})
@@ -1087,6 +1258,13 @@ func questionBankSourceKind(kind string) string {
 	default:
 		return strings.TrimSpace(kind)
 	}
+}
+
+// buildQuestionBankLocalSourceFolderName returns the directory name to use for
+// a local question-bank source entry. The name is derived directly from the
+// display name so that the on-disk layout is human-readable.
+func buildQuestionBankLocalSourceFolderName(displayName string) string {
+	return strings.TrimSpace(displayName)
 }
 
 func extractArchiveByExtension(archivePath, originalPath, destination string) error {
@@ -1171,5 +1349,5 @@ func (s *GitService) resolveProjectGitLabArchiveCredentials(project store.Projec
 }
 
 func buildGitLabQuestionBankDisplayName(questionID int64) string {
-	return fmt.Sprintf("label-%05d", questionID)
+	return util.FormatQuestionBankLabel(questionID)
 }

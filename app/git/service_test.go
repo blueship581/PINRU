@@ -451,6 +451,57 @@ func TestImportLocalSourcesImportsZipArchiveAndAvoidsDuplicateReimport(t *testin
 	}
 }
 
+func TestImportQuestionBankArchivesImportsCopiedArchiveFromArchivesDir(t *testing.T) {
+	testStore := testutil.OpenTestStore(t)
+	defer testStore.Close()
+
+	project := store.Project{
+		ID:                "project-local-picked-zip",
+		Name:              "Demo",
+		GitLabURL:         "https://gitlab.example.com",
+		GitLabToken:       "glpat-test",
+		CloneBasePath:     t.TempDir(),
+		Models:            "ORIGIN,claude-code",
+		SourceModelFolder: "ORIGIN",
+	}
+	if err := testStore.CreateProject(project); err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+
+	sourceDir := t.TempDir()
+	archivePath := filepath.Join(sourceDir, "picked-demo.zip")
+	createZipArchive(t, archivePath, map[string]string{
+		"picked-demo/README.md": "# Picked Demo\n",
+	})
+
+	s := &GitService{store: testStore}
+	result, err := s.ImportQuestionBankArchives(project.ID, []string{archivePath})
+	if err != nil {
+		t.Fatalf("ImportQuestionBankArchives() error = %v", err)
+	}
+	if result.ImportedCount != 1 || result.SkippedCount != 0 || result.ErrorCount != 0 {
+		t.Fatalf("unexpected import summary: %+v", result)
+	}
+
+	items, err := testStore.ListQuestionBankItems(project.ID)
+	if err != nil {
+		t.Fatalf("ListQuestionBankItems() error = %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("question bank items len = %d, want 1", len(items))
+	}
+	item := items[0]
+	if item.ArchivePath == nil {
+		t.Fatalf("expected archived source path, got %+v", item)
+	}
+	wantArchivePath := filepath.Join(project.CloneBasePath, "question_bank", "archives", "picked-demo.zip")
+	if !util.SamePath(*item.ArchivePath, wantArchivePath) {
+		t.Fatalf("ArchivePath = %q, want %q", *item.ArchivePath, wantArchivePath)
+	}
+	assertPathExists(t, *item.ArchivePath)
+	assertPathExists(t, filepath.Join(item.SourcePath, "README.md"))
+}
+
 func TestImportLocalSourcesImportsSevenZipArchive(t *testing.T) {
 	testStore := testutil.OpenTestStore(t)
 	defer testStore.Close()

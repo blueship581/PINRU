@@ -1,10 +1,12 @@
 package task
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"hash/fnv"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,24 +15,33 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	appgit "github.com/blueship581/pinru/app/git"
 	"github.com/blueship581/pinru/internal/errs"
+	"github.com/blueship581/pinru/internal/gitops"
 	internalprompt "github.com/blueship581/pinru/internal/prompt"
 	"github.com/blueship581/pinru/internal/store"
+	"github.com/blueship581/pinru/internal/trae"
 	"github.com/blueship581/pinru/internal/util"
 	"github.com/google/uuid"
 )
 
 // Service manages task lifecycle and model runs.
 type TaskService struct {
-	store  *store.Store
-	gitSvc *appgit.GitService
+	store        *store.Store
+	gitSvc       *appgit.GitService
+	traeProvider *trae.Provider
 }
 
 // NewService creates a new task service.
 func New(store *store.Store, gitSvc *appgit.GitService) *TaskService {
 	return &TaskService{store: store, gitSvc: gitSvc}
+}
+
+// SetTraeProvider 注入 trae provider，用于跨设备配额校验和领题序号推进。
+func (s *TaskService) SetTraeProvider(provider *trae.Provider) {
+	s.traeProvider = provider
 }
 
 // CreateTaskRequest carries the parameters for creating a new task.
@@ -79,6 +90,29 @@ type AddModelRunRequest struct {
 	LocalPath *string `json:"localPath"`
 }
 
+// AddProjectModelRunRequest adds a model run to every existing task in a project.
+type AddProjectModelRunRequest struct {
+	ProjectConfigID string `json:"projectConfigId"`
+	ModelName       string `json:"modelName"`
+}
+
+type AddProjectModelRunTaskResult struct {
+	TaskID      string  `json:"taskId"`
+	ProjectName string  `json:"projectName"`
+	Status      string  `json:"status"`
+	Error       *string `json:"error"`
+}
+
+type AddProjectModelRunResult struct {
+	ProjectConfigID string                         `json:"projectConfigId"`
+	ModelName       string                         `json:"modelName"`
+	Total           int                            `json:"total"`
+	Created         int                            `json:"created"`
+	Skipped         int                            `json:"skipped"`
+	Failed          []AddProjectModelRunTaskResult `json:"failed"`
+	Results         []AddProjectModelRunTaskResult `json:"results"`
+}
+
 type TaskChildDirectory struct {
 	Name         string  `json:"name"`
 	Path         string  `json:"path"`
@@ -122,6 +156,12 @@ func (s *TaskService) CreateTask(req CreateTaskRequest) (*store.Task, error) {
 	if err := s.enforceTaskTypeUpperLimit(req); err != nil {
 		return nil, err
 	}
+
+	req, err := s.reconcileTraeClaimSequence(req)
+	if err != nil {
+		return nil, err
+	}
+	taskID = buildTaskID(req)
 
 	task := store.Task{
 		ID:              taskID,
@@ -251,12 +291,10 @@ func (s *TaskService) UpdateModelRunSessionInfo(req UpdateModelRunSessionRequest
 }
 
 func (s *TaskService) AddModelRun(req AddModelRunRequest) error {
+	req.TaskID = strings.TrimSpace(req.TaskID)
+	req.ModelName = strings.TrimSpace(req.ModelName)
 	if req.TaskID == "" || req.ModelName == "" {
 		return errors.New(errs.MsgModelNameAndTaskIDReq)
-	}
-	if req.LocalPath != nil {
-		normalized := util.NormalizePath(*req.LocalPath)
-		req.LocalPath = &normalized
 	}
 	existing, err := s.store.GetModelRun(req.TaskID, req.ModelName)
 	if err != nil {
@@ -265,13 +303,154 @@ func (s *TaskService) AddModelRun(req AddModelRunRequest) error {
 	if existing != nil {
 		return fmt.Errorf(errs.FmtModelExists, req.ModelName)
 	}
+
+	task, err := s.store.GetTask(req.TaskID)
+	if err != nil {
+		return err
+	}
+	if task == nil {
+		return fmt.Errorf(errs.FmtTaskNotFound, req.TaskID)
+	}
+
+	localPath, err := s.copySourceForAddedModelRun(context.Background(), task, req)
+	if err != nil {
+		return err
+	}
 	run := store.ModelRun{
 		ID:        uuid.New().String(),
 		TaskID:    req.TaskID,
 		ModelName: req.ModelName,
-		LocalPath: req.LocalPath,
+		LocalPath: localPath,
 	}
-	return s.store.CreateModelRun(run)
+	if err := s.store.CreateModelRun(run); err != nil {
+		if localPath != nil && strings.TrimSpace(*localPath) != "" {
+			_ = os.RemoveAll(util.ExpandTilde(*localPath))
+		}
+		return err
+	}
+	return nil
+}
+
+func (s *TaskService) AddProjectModelRun(req AddProjectModelRunRequest) (*AddProjectModelRunResult, error) {
+	projectConfigID := strings.TrimSpace(req.ProjectConfigID)
+	modelName := strings.TrimSpace(req.ModelName)
+	if projectConfigID == "" || modelName == "" {
+		return nil, errors.New("项目 ID 和模型名称不能为空")
+	}
+
+	tasks, err := s.store.ListTasks(&projectConfigID)
+	if err != nil {
+		return nil, err
+	}
+	sort.SliceStable(tasks, func(i, j int) bool {
+		if tasks[i].CreatedAt == tasks[j].CreatedAt {
+			return tasks[i].ID < tasks[j].ID
+		}
+		return tasks[i].CreatedAt < tasks[j].CreatedAt
+	})
+
+	result := &AddProjectModelRunResult{
+		ProjectConfigID: projectConfigID,
+		ModelName:       modelName,
+		Total:           len(tasks),
+		Failed:          []AddProjectModelRunTaskResult{},
+		Results:         []AddProjectModelRunTaskResult{},
+	}
+	for _, task := range tasks {
+		item := AddProjectModelRunTaskResult{
+			TaskID:      task.ID,
+			ProjectName: task.ProjectName,
+		}
+
+		existing, err := s.store.GetModelRun(task.ID, modelName)
+		if err != nil {
+			errText := err.Error()
+			item.Status = "failed"
+			item.Error = &errText
+			result.Failed = append(result.Failed, item)
+			result.Results = append(result.Results, item)
+			continue
+		}
+		if existing != nil {
+			item.Status = "skipped"
+			result.Skipped++
+			result.Results = append(result.Results, item)
+			continue
+		}
+
+		if err := s.AddModelRun(AddModelRunRequest{TaskID: task.ID, ModelName: modelName}); err != nil {
+			errText := err.Error()
+			item.Status = "failed"
+			item.Error = &errText
+			result.Failed = append(result.Failed, item)
+			result.Results = append(result.Results, item)
+			continue
+		}
+
+		item.Status = "created"
+		result.Created++
+		result.Results = append(result.Results, item)
+	}
+	return result, nil
+}
+
+func (s *TaskService) copySourceForAddedModelRun(ctx context.Context, task *store.Task, req AddModelRunRequest) (*string, error) {
+	sourceRun, err := s.resolveSourceModelRun(task)
+	if err != nil {
+		return nil, err
+	}
+	if sourceRun.LocalPath == nil || strings.TrimSpace(*sourceRun.LocalPath) == "" {
+		return nil, errors.New(errs.MsgSourceMissingLocalRepo)
+	}
+
+	sourcePath := util.NormalizePath(*sourceRun.LocalPath)
+	targetPath := ""
+	if req.LocalPath != nil && strings.TrimSpace(*req.LocalPath) != "" {
+		targetPath = util.NormalizePath(*req.LocalPath)
+	} else {
+		rootPath := ""
+		if task != nil && task.LocalPath != nil && strings.TrimSpace(*task.LocalPath) != "" {
+			rootPath = util.NormalizePath(*task.LocalPath)
+		}
+		if rootPath == "" {
+			rootPath = filepath.Dir(sourcePath)
+		}
+		targetPath = util.NormalizePath(filepath.Join(rootPath, req.ModelName))
+	}
+	if targetPath == "" {
+		return nil, errors.New(errs.MsgTaskNoLocalDir)
+	}
+	if util.SamePath(sourcePath, targetPath) {
+		return nil, fmt.Errorf("新增模型目录不能与源码目录相同: %s", targetPath)
+	}
+	if err := gitops.CopyProjectDirectory(ctx, sourcePath, targetPath); err != nil {
+		return nil, err
+	}
+	return &targetPath, nil
+}
+
+func (s *TaskService) resolveSourceModelRun(task *store.Task) (*store.ModelRun, error) {
+	if task == nil {
+		return nil, errors.New(errs.MsgTaskRequired)
+	}
+	sourceModelName, err := s.resolveTaskSourceModelName(task)
+	if err != nil {
+		return nil, err
+	}
+	sourceRun, err := s.store.GetModelRun(task.ID, sourceModelName)
+	if err != nil {
+		return nil, err
+	}
+	if sourceRun == nil && !strings.EqualFold(sourceModelName, "ORIGIN") {
+		sourceRun, err = s.store.GetModelRun(task.ID, "ORIGIN")
+		if err != nil {
+			return nil, err
+		}
+	}
+	if sourceRun == nil {
+		return nil, fmt.Errorf(errs.FmtSourceModelMissing, sourceModelName)
+	}
+	return sourceRun, nil
 }
 
 func normalizeCreateTaskRequestPaths(req CreateTaskRequest) CreateTaskRequest {
@@ -757,7 +936,191 @@ func (s *TaskService) enforceTaskTypeUpperLimit(req CreateTaskRequest) error {
 	if count >= limit {
 		return fmt.Errorf(errs.FmtGitLabQuotaReached, req.GitLabProjectID, taskType, limit)
 	}
+
+	// 跨设备/跨人统计：把 trae MySQL 中同 question_id+task_type 的已用 window 数也计入。
+	if traeUsed, ok := s.lookupTraeUsedCount(req.GitLabProjectID, taskType); ok {
+		merged := count
+		if traeUsed > merged {
+			merged = traeUsed
+		}
+		if merged >= limit {
+			return fmt.Errorf(errs.FmtGitLabQuotaReached, req.GitLabProjectID, taskType, limit)
+		}
+	}
 	return nil
+}
+
+// lookupTraeUsedCount 返回 trae 中同题同类型的已用窗口数；trae 不可用时返回 (0,false)。
+func (s *TaskService) lookupTraeUsedCount(questionID int64, taskType string) (int, bool) {
+	if s.traeProvider == nil {
+		return 0, false
+	}
+	client, err := s.traeProvider.Get()
+	if err != nil || client == nil {
+		return 0, false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	count, err := client.CountUsedWindows(ctx, questionID, taskType)
+	if err != nil {
+		slog.Warn("trae count used windows failed", "questionId", questionID, "taskType", taskType, "err", err)
+		return 0, false
+	}
+	return count, true
+}
+
+// lookupTraeMaxVersion 返回 trae 中同 question_id 下出现过的最大 -N 版本号。
+func (s *TaskService) lookupTraeMaxVersion(questionID int64) (int, bool) {
+	if s.traeProvider == nil {
+		return 0, false
+	}
+	client, err := s.traeProvider.Get()
+	if err != nil || client == nil {
+		return 0, false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	max, err := client.MaxVersionForQuestion(ctx, questionID)
+	if err != nil {
+		slog.Warn("trae max version failed", "questionId", questionID, "err", err)
+		return 0, false
+	}
+	return max, true
+}
+
+// reconcileTraeClaimSequence 自动将请求中的 claimSequence 提升至 trae 中未占用的最小值。
+// 若 trae 中已有更大的版本号，将 sequence 调整为 max+1 并同步重写 LocalPath /
+// SourceLocalPath 中的尾号，最后把磁盘上前端按旧序号 clone 的目录原地改名。
+func (s *TaskService) reconcileTraeClaimSequence(req CreateTaskRequest) (CreateTaskRequest, error) {
+	if req.GitLabProjectID <= 0 {
+		return req, nil
+	}
+	requested := claimSequenceForRequest(req)
+	if requested <= 0 {
+		return req, nil
+	}
+	max, ok := s.lookupTraeMaxVersion(req.GitLabProjectID)
+	if !ok || max <= 0 {
+		return req, nil
+	}
+	if requested > max {
+		return req, nil
+	}
+
+	bumped := max + 1
+	req.ClaimSequence = &bumped
+
+	updated, err := rewriteManagedClaimPaths(req, requested, bumped)
+	if err != nil {
+		return req, err
+	}
+	return updated, nil
+}
+
+// rewriteManagedClaimPaths 把 req 中按 prevSeq 命名的 managed 工作目录与源码目录改成
+// nextSeq 形式，先在磁盘上重命名再回写到 req。仅当尾号确实匹配旧序号时才动手，
+// 避免误改用户自定义路径。
+func rewriteManagedClaimPaths(req CreateTaskRequest, prevSeq, nextSeq int) (CreateTaskRequest, error) {
+	if prevSeq == nextSeq || prevSeq <= 0 || nextSeq <= 0 {
+		return req, nil
+	}
+
+	if req.LocalPath != nil {
+		newTaskPath, err := renameManagedSequencedDir(
+			*req.LocalPath,
+			util.BuildManagedTaskFolderName(req.ProjectName, req.TaskType),
+			prevSeq,
+			nextSeq,
+		)
+		if err != nil {
+			return req, err
+		}
+		if newTaskPath != "" {
+			req.LocalPath = &newTaskPath
+		}
+	}
+
+	if req.SourceLocalPath != nil {
+		// 源码目录通常嵌在 LocalPath 之下，外层 LocalPath 改名后整段前缀都会变；
+		// 这里同时尝试改前缀（外层重命名带来的）和改尾号（源码自身的 -N）。
+		updated := *req.SourceLocalPath
+		if req.LocalPath != nil {
+			// 外层任务目录可能已经被重命名，把旧前缀替换成新前缀。
+			oldTaskFolder := util.BuildManagedTaskFolderNameWithSequence(req.ProjectName, req.TaskType, prevSeq)
+			newTaskFolder := util.BuildManagedTaskFolderNameWithSequence(req.ProjectName, req.TaskType, nextSeq)
+			updated = replaceManagedPathSegment(updated, oldTaskFolder, newTaskFolder)
+		}
+		newSourcePath, err := renameManagedSequencedDir(
+			updated,
+			util.BuildManagedSourceFolderName(req.GitLabProjectID, req.TaskType),
+			prevSeq,
+			nextSeq,
+		)
+		if err != nil {
+			return req, err
+		}
+		if newSourcePath != "" {
+			updated = newSourcePath
+		}
+		req.SourceLocalPath = &updated
+	}
+
+	return req, nil
+}
+
+// renameManagedSequencedDir 当 path 末尾恰好是 "<baseName>-<prevSeq>" 时，把它改成
+// "<baseName>-<nextSeq>"；如果磁盘上原目录存在则一并 os.Rename。返回新路径；如果
+// 路径与预期形态不符则返回空串（调用方按需保留原值）。
+func renameManagedSequencedDir(rawPath, baseName string, prevSeq, nextSeq int) (string, error) {
+	trimmed := strings.TrimSpace(rawPath)
+	if trimmed == "" || baseName == "" {
+		return "", nil
+	}
+	expanded := util.ExpandTilde(trimmed)
+	parent := filepath.Dir(expanded)
+	currentName := filepath.Base(expanded)
+
+	expectedOld := fmt.Sprintf("%s-%d", baseName, prevSeq)
+	if currentName != expectedOld {
+		return "", nil
+	}
+
+	newName := fmt.Sprintf("%s-%d", baseName, nextSeq)
+	newPath := filepath.Join(parent, newName)
+
+	if info, err := os.Stat(expanded); err == nil && info.IsDir() {
+		if _, statErr := os.Stat(newPath); statErr == nil {
+			return "", fmt.Errorf("目标目录已存在，无法将 %s 重命名为 %s", expanded, newPath)
+		} else if !os.IsNotExist(statErr) {
+			return "", statErr
+		}
+		if err := os.Rename(expanded, newPath); err != nil {
+			return "", fmt.Errorf("重命名领题目录失败：%w", err)
+		}
+	} else if err != nil && !os.IsNotExist(err) {
+		return "", err
+	}
+
+	return newPath, nil
+}
+
+// replaceManagedPathSegment 把 path 中名为 oldSegment 的一段路径替换为 newSegment。
+// 仅替换完整段，避免误伤同名前缀。
+func replaceManagedPathSegment(path, oldSegment, newSegment string) string {
+	if oldSegment == "" || oldSegment == newSegment {
+		return path
+	}
+	expanded := util.ExpandTilde(strings.TrimSpace(path))
+	if expanded == "" {
+		return path
+	}
+	parts := strings.Split(expanded, string(filepath.Separator))
+	for i, part := range parts {
+		if part == oldSegment {
+			parts[i] = newSegment
+		}
+	}
+	return strings.Join(parts, string(filepath.Separator))
 }
 
 func (s *TaskService) ensureTaskTypeChangeWithinUpperLimit(taskID, nextTaskType string) (*store.Task, error) {

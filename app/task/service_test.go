@@ -144,6 +144,337 @@ func TestCreateTaskAllowsMultipleClaimSetsWithinSameProject(t *testing.T) {
 	}
 }
 
+func TestAddModelRunCopiesSourceIntoNewModelFolder(t *testing.T) {
+	testStore := testutil.OpenTestStore(t)
+	defer testStore.Close()
+
+	taskDir := t.TempDir()
+	sourcePath := filepath.Join(taskDir, "ORIGIN")
+	if err := os.MkdirAll(sourcePath, 0o755); err != nil {
+		t.Fatalf("MkdirAll(sourcePath) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sourcePath, "README.md"), []byte("source"), 0o644); err != nil {
+		t.Fatalf("WriteFile(source) error = %v", err)
+	}
+
+	taskID := "task-add-model-copy"
+	if err := testStore.CreateTask(store.Task{
+		ID:              taskID,
+		GitLabProjectID: 1849,
+		ProjectName:     "label-01849",
+		TaskType:        "Bug修复",
+		LocalPath:       &taskDir,
+	}); err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+	if err := testStore.CreateModelRun(store.ModelRun{
+		ID:        "run-origin-add-model",
+		TaskID:    taskID,
+		ModelName: "ORIGIN",
+		LocalPath: &sourcePath,
+	}); err != nil {
+		t.Fatalf("CreateModelRun(ORIGIN) error = %v", err)
+	}
+
+	s := &TaskService{store: testStore}
+	if err := s.AddModelRun(AddModelRunRequest{
+		TaskID:    taskID,
+		ModelName: "new-model",
+	}); err != nil {
+		t.Fatalf("AddModelRun() error = %v", err)
+	}
+
+	targetPath := filepath.Join(taskDir, "new-model")
+	if content, err := os.ReadFile(filepath.Join(targetPath, "README.md")); err != nil {
+		t.Fatalf("ReadFile(copied) error = %v", err)
+	} else if string(content) != "source" {
+		t.Fatalf("copied content = %q, want source", string(content))
+	}
+
+	run, err := testStore.GetModelRun(taskID, "new-model")
+	if err != nil {
+		t.Fatalf("GetModelRun(new-model) error = %v", err)
+	}
+	if run == nil {
+		t.Fatalf("expected new model run")
+	}
+	if run.LocalPath == nil || !util.SamePath(*run.LocalPath, targetPath) {
+		t.Fatalf("LocalPath = %v, want %q", run.LocalPath, targetPath)
+	}
+}
+
+func TestAddModelRunDoesNotCreateRecordWhenTargetFolderExists(t *testing.T) {
+	testStore := testutil.OpenTestStore(t)
+	defer testStore.Close()
+
+	taskDir := t.TempDir()
+	sourcePath := filepath.Join(taskDir, "ORIGIN")
+	targetPath := filepath.Join(taskDir, "new-model")
+	if err := os.MkdirAll(sourcePath, 0o755); err != nil {
+		t.Fatalf("MkdirAll(sourcePath) error = %v", err)
+	}
+	if err := os.MkdirAll(targetPath, 0o755); err != nil {
+		t.Fatalf("MkdirAll(targetPath) error = %v", err)
+	}
+
+	taskID := "task-add-model-existing-folder"
+	if err := testStore.CreateTask(store.Task{
+		ID:              taskID,
+		GitLabProjectID: 1850,
+		ProjectName:     "label-01850",
+		TaskType:        "Bug修复",
+		LocalPath:       &taskDir,
+	}); err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+	if err := testStore.CreateModelRun(store.ModelRun{
+		ID:        "run-origin-existing-folder",
+		TaskID:    taskID,
+		ModelName: "ORIGIN",
+		LocalPath: &sourcePath,
+	}); err != nil {
+		t.Fatalf("CreateModelRun(ORIGIN) error = %v", err)
+	}
+
+	s := &TaskService{store: testStore}
+	err := s.AddModelRun(AddModelRunRequest{
+		TaskID:    taskID,
+		ModelName: "new-model",
+	})
+	if err == nil {
+		t.Fatalf("expected target folder exists error")
+	}
+	if !strings.Contains(err.Error(), "已存在") {
+		t.Fatalf("error = %q, want target exists message", err.Error())
+	}
+
+	run, err := testStore.GetModelRun(taskID, "new-model")
+	if err != nil {
+		t.Fatalf("GetModelRun(new-model) error = %v", err)
+	}
+	if run != nil {
+		t.Fatalf("run should not be created when copy fails: %+v", run)
+	}
+}
+
+func TestAddProjectModelRunCopiesModelForAllProjectTasks(t *testing.T) {
+	testStore := testutil.OpenTestStore(t)
+	defer testStore.Close()
+
+	projectID := "project-add-model-all"
+	taskIDs := []string{"task-project-model-1", "task-project-model-2"}
+	for index, taskID := range taskIDs {
+		taskDir := t.TempDir()
+		sourcePath := filepath.Join(taskDir, "ORIGIN")
+		if err := os.MkdirAll(sourcePath, 0o755); err != nil {
+			t.Fatalf("MkdirAll(sourcePath) error = %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(sourcePath, "README.md"), []byte(taskID), 0o644); err != nil {
+			t.Fatalf("WriteFile(source) error = %v", err)
+		}
+		if err := testStore.CreateTask(store.Task{
+			ID:              taskID,
+			GitLabProjectID: int64(2000 + index),
+			ProjectName:     taskID,
+			TaskType:        "Bug修复",
+			LocalPath:       &taskDir,
+			ProjectConfigID: &projectID,
+		}); err != nil {
+			t.Fatalf("CreateTask(%s) error = %v", taskID, err)
+		}
+		if err := testStore.CreateModelRun(store.ModelRun{
+			ID:        "run-origin-" + taskID,
+			TaskID:    taskID,
+			ModelName: "ORIGIN",
+			LocalPath: &sourcePath,
+		}); err != nil {
+			t.Fatalf("CreateModelRun(ORIGIN %s) error = %v", taskID, err)
+		}
+	}
+
+	otherProjectID := "project-other"
+	if err := testStore.CreateTask(store.Task{
+		ID:              "task-other-project",
+		GitLabProjectID: 3000,
+		ProjectName:     "other",
+		ProjectConfigID: &otherProjectID,
+	}); err != nil {
+		t.Fatalf("CreateTask(other) error = %v", err)
+	}
+
+	s := &TaskService{store: testStore}
+	result, err := s.AddProjectModelRun(AddProjectModelRunRequest{
+		ProjectConfigID: projectID,
+		ModelName:       "new-model",
+	})
+	if err != nil {
+		t.Fatalf("AddProjectModelRun() error = %v", err)
+	}
+	if result.Total != 2 || result.Created != 2 || result.Skipped != 0 || len(result.Failed) != 0 {
+		t.Fatalf("result = %+v, want total=2 created=2 skipped=0 failed=0", result)
+	}
+
+	for _, taskID := range taskIDs {
+		run, err := testStore.GetModelRun(taskID, "new-model")
+		if err != nil {
+			t.Fatalf("GetModelRun(%s, new-model) error = %v", taskID, err)
+		}
+		if run == nil || run.LocalPath == nil {
+			t.Fatalf("expected new model run with local path for %s, got %+v", taskID, run)
+		}
+		if content, err := os.ReadFile(filepath.Join(*run.LocalPath, "README.md")); err != nil {
+			t.Fatalf("ReadFile(copied %s) error = %v", taskID, err)
+		} else if string(content) != taskID {
+			t.Fatalf("copied content for %s = %q", taskID, string(content))
+		}
+	}
+
+	run, err := testStore.GetModelRun("task-other-project", "new-model")
+	if err != nil {
+		t.Fatalf("GetModelRun(other, new-model) error = %v", err)
+	}
+	if run != nil {
+		t.Fatalf("other project task should not be modified: %+v", run)
+	}
+}
+
+func TestAddProjectModelRunSkipsExistingModelRuns(t *testing.T) {
+	testStore := testutil.OpenTestStore(t)
+	defer testStore.Close()
+
+	projectID := "project-add-model-skip"
+	taskDir := t.TempDir()
+	sourcePath := filepath.Join(taskDir, "ORIGIN")
+	existingPath := filepath.Join(taskDir, "new-model")
+	if err := os.MkdirAll(sourcePath, 0o755); err != nil {
+		t.Fatalf("MkdirAll(sourcePath) error = %v", err)
+	}
+	if err := os.MkdirAll(existingPath, 0o755); err != nil {
+		t.Fatalf("MkdirAll(existingPath) error = %v", err)
+	}
+	taskID := "task-project-model-skip"
+	if err := testStore.CreateTask(store.Task{
+		ID:              taskID,
+		GitLabProjectID: 2100,
+		ProjectName:     "skip",
+		LocalPath:       &taskDir,
+		ProjectConfigID: &projectID,
+	}); err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+	if err := testStore.CreateModelRun(store.ModelRun{
+		ID:        "run-origin-skip",
+		TaskID:    taskID,
+		ModelName: "ORIGIN",
+		LocalPath: &sourcePath,
+	}); err != nil {
+		t.Fatalf("CreateModelRun(ORIGIN) error = %v", err)
+	}
+	if err := testStore.CreateModelRun(store.ModelRun{
+		ID:        "run-existing-skip",
+		TaskID:    taskID,
+		ModelName: "new-model",
+		LocalPath: &existingPath,
+	}); err != nil {
+		t.Fatalf("CreateModelRun(existing) error = %v", err)
+	}
+
+	s := &TaskService{store: testStore}
+	result, err := s.AddProjectModelRun(AddProjectModelRunRequest{
+		ProjectConfigID: projectID,
+		ModelName:       "new-model",
+	})
+	if err != nil {
+		t.Fatalf("AddProjectModelRun() error = %v", err)
+	}
+	if result.Total != 1 || result.Created != 0 || result.Skipped != 1 || len(result.Failed) != 0 {
+		t.Fatalf("result = %+v, want skipped existing run", result)
+	}
+	if len(result.Results) != 1 || result.Results[0].Status != "skipped" {
+		t.Fatalf("results = %+v, want one skipped item", result.Results)
+	}
+}
+
+func TestAddProjectModelRunContinuesAfterTaskFailure(t *testing.T) {
+	testStore := testutil.OpenTestStore(t)
+	defer testStore.Close()
+
+	projectID := "project-add-model-partial"
+	type taskFixture struct {
+		id                  string
+		prepareTargetFolder bool
+	}
+	fixtures := []taskFixture{
+		{id: "task-project-model-ok-1"},
+		{id: "task-project-model-fail", prepareTargetFolder: true},
+		{id: "task-project-model-ok-2"},
+	}
+	for index, fixture := range fixtures {
+		taskDir := t.TempDir()
+		sourcePath := filepath.Join(taskDir, "ORIGIN")
+		if err := os.MkdirAll(sourcePath, 0o755); err != nil {
+			t.Fatalf("MkdirAll(sourcePath) error = %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(sourcePath, "README.md"), []byte(fixture.id), 0o644); err != nil {
+			t.Fatalf("WriteFile(source) error = %v", err)
+		}
+		if fixture.prepareTargetFolder {
+			if err := os.MkdirAll(filepath.Join(taskDir, "new-model"), 0o755); err != nil {
+				t.Fatalf("MkdirAll(target) error = %v", err)
+			}
+		}
+		if err := testStore.CreateTask(store.Task{
+			ID:              fixture.id,
+			GitLabProjectID: int64(2200 + index),
+			ProjectName:     fixture.id,
+			LocalPath:       &taskDir,
+			ProjectConfigID: &projectID,
+		}); err != nil {
+			t.Fatalf("CreateTask(%s) error = %v", fixture.id, err)
+		}
+		if err := testStore.CreateModelRun(store.ModelRun{
+			ID:        "run-origin-" + fixture.id,
+			TaskID:    fixture.id,
+			ModelName: "ORIGIN",
+			LocalPath: &sourcePath,
+		}); err != nil {
+			t.Fatalf("CreateModelRun(ORIGIN %s) error = %v", fixture.id, err)
+		}
+	}
+
+	s := &TaskService{store: testStore}
+	result, err := s.AddProjectModelRun(AddProjectModelRunRequest{
+		ProjectConfigID: projectID,
+		ModelName:       "new-model",
+	})
+	if err != nil {
+		t.Fatalf("AddProjectModelRun() error = %v", err)
+	}
+	if result.Total != 3 || result.Created != 2 || result.Skipped != 0 || len(result.Failed) != 1 {
+		t.Fatalf("result = %+v, want total=3 created=2 failed=1", result)
+	}
+	if result.Failed[0].TaskID != "task-project-model-fail" {
+		t.Fatalf("failed task = %+v, want task-project-model-fail", result.Failed[0])
+	}
+
+	for _, taskID := range []string{"task-project-model-ok-1", "task-project-model-ok-2"} {
+		run, err := testStore.GetModelRun(taskID, "new-model")
+		if err != nil {
+			t.Fatalf("GetModelRun(%s, new-model) error = %v", taskID, err)
+		}
+		if run == nil {
+			t.Fatalf("expected new model run for %s", taskID)
+		}
+	}
+	run, err := testStore.GetModelRun("task-project-model-fail", "new-model")
+	if err != nil {
+		t.Fatalf("GetModelRun(failed, new-model) error = %v", err)
+	}
+	if run != nil {
+		t.Fatalf("failed task should not create run: %+v", run)
+	}
+}
+
 func TestCreateTaskEnforcesPerProjectTaskTypeUpperLimit(t *testing.T) {
 	testStore := testutil.OpenTestStore(t)
 	defer testStore.Close()
@@ -1187,5 +1518,107 @@ func TestGetTaskReadmeFallsBackToManagedSourceFolderNamedLikeParent(t *testing.T
 	}
 	if readme.Content != "same-name source" {
 		t.Fatalf("Content = %q", readme.Content)
+	}
+}
+
+func TestRewriteManagedClaimPathsRenamesDirsAndUpdatesRequest(t *testing.T) {
+	cloneBase := t.TempDir()
+	projectName := "label-01231"
+	taskType := "代码生成"
+
+	oldTaskFolderName := util.BuildManagedTaskFolderNameWithSequence(projectName, taskType, 1)
+	newTaskFolderName := util.BuildManagedTaskFolderNameWithSequence(projectName, taskType, 8)
+
+	oldTaskPath := filepath.Join(cloneBase, oldTaskFolderName)
+	oldSourceFolderName := util.BuildManagedSourceFolderNameWithSequence(1231, taskType, 1)
+	oldSourcePath := filepath.Join(oldTaskPath, oldSourceFolderName)
+
+	if err := os.MkdirAll(oldSourcePath, 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+
+	req := CreateTaskRequest{
+		GitLabProjectID: 1231,
+		ProjectName:     projectName,
+		TaskType:        taskType,
+		LocalPath:       strPtr(oldTaskPath),
+		SourceLocalPath: strPtr(oldSourcePath),
+	}
+
+	updated, err := rewriteManagedClaimPaths(req, 1, 8)
+	if err != nil {
+		t.Fatalf("rewriteManagedClaimPaths() error = %v", err)
+	}
+
+	expectedTaskPath := filepath.Join(cloneBase, newTaskFolderName)
+	expectedSourceFolderName := util.BuildManagedSourceFolderNameWithSequence(1231, taskType, 8)
+	expectedSourcePath := filepath.Join(expectedTaskPath, expectedSourceFolderName)
+
+	if updated.LocalPath == nil || *updated.LocalPath != expectedTaskPath {
+		got := ""
+		if updated.LocalPath != nil {
+			got = *updated.LocalPath
+		}
+		t.Fatalf("LocalPath = %q, want %q", got, expectedTaskPath)
+	}
+	if updated.SourceLocalPath == nil || *updated.SourceLocalPath != expectedSourcePath {
+		got := ""
+		if updated.SourceLocalPath != nil {
+			got = *updated.SourceLocalPath
+		}
+		t.Fatalf("SourceLocalPath = %q, want %q", got, expectedSourcePath)
+	}
+
+	if _, err := os.Stat(expectedTaskPath); err != nil {
+		t.Fatalf("expected task dir %q to exist after rename: %v", expectedTaskPath, err)
+	}
+	if _, err := os.Stat(expectedSourcePath); err != nil {
+		t.Fatalf("expected source dir %q to exist after rename: %v", expectedSourcePath, err)
+	}
+	if _, err := os.Stat(oldTaskPath); !os.IsNotExist(err) {
+		t.Fatalf("old task dir %q should be gone, stat err = %v", oldTaskPath, err)
+	}
+}
+
+func TestRewriteManagedClaimPathsNoOpWhenSequencesEqual(t *testing.T) {
+	req := CreateTaskRequest{
+		GitLabProjectID: 1231,
+		ProjectName:     "label-01231",
+		TaskType:        "代码生成",
+		LocalPath:       strPtr("/tmp/whatever"),
+	}
+
+	updated, err := rewriteManagedClaimPaths(req, 5, 5)
+	if err != nil {
+		t.Fatalf("rewriteManagedClaimPaths() error = %v", err)
+	}
+	if updated.LocalPath == nil || *updated.LocalPath != "/tmp/whatever" {
+		t.Fatalf("LocalPath should be unchanged, got %v", updated.LocalPath)
+	}
+}
+
+func TestRewriteManagedClaimPathsLeavesNonManagedPathsAlone(t *testing.T) {
+	cloneBase := t.TempDir()
+	customPath := filepath.Join(cloneBase, "totally-custom-folder")
+	if err := os.MkdirAll(customPath, 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+
+	req := CreateTaskRequest{
+		GitLabProjectID: 1231,
+		ProjectName:     "label-01231",
+		TaskType:        "代码生成",
+		LocalPath:       strPtr(customPath),
+	}
+
+	updated, err := rewriteManagedClaimPaths(req, 1, 8)
+	if err != nil {
+		t.Fatalf("rewriteManagedClaimPaths() error = %v", err)
+	}
+	if updated.LocalPath == nil || *updated.LocalPath != customPath {
+		t.Fatalf("non-managed LocalPath should be untouched, got %v", updated.LocalPath)
+	}
+	if _, err := os.Stat(customPath); err != nil {
+		t.Fatalf("custom dir should still exist: %v", err)
 	}
 }

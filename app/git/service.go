@@ -9,24 +9,33 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	appprompt "github.com/blueship581/pinru/app/prompt"
 	"github.com/blueship581/pinru/internal/errs"
 	gl "github.com/blueship581/pinru/internal/gitlab"
 	"github.com/blueship581/pinru/internal/gitops"
 	"github.com/blueship581/pinru/internal/store"
+	"github.com/blueship581/pinru/internal/trae"
 	"github.com/blueship581/pinru/internal/util"
 	"github.com/wailsapp/wails/v3/pkg/application"
 )
 
 // Service wraps git and GitLab operations.
 type GitService struct {
-	store *store.Store
+	store        *store.Store
+	traeProvider *trae.Provider
 }
 
 // NewService creates a new git service.
 func New(store *store.Store) *GitService {
 	return &GitService{store: store}
+}
+
+// SetTraeProvider 注入 trae provider，用于在题库面板显示跨用户的剩余变体数与项目类型。
+// 未设置时所有 trae 相关字段降级为本地兜底（剩余 = totals，business_domain 为空）。
+func (s *GitService) SetTraeProvider(provider *trae.Provider) {
+	s.traeProvider = provider
 }
 
 // GitLabProjectLookupResult bundles a project reference with its resolved data or error.
@@ -273,6 +282,12 @@ func (s *GitService) PlanManagedClaimPaths(
 		usedSequences[seq] = struct{}{}
 	}
 	for seq := range taskSequences {
+		usedSequences[seq] = struct{}{}
+	}
+
+	// 把 trae 中已经出现过的所有 -N 序号都标记为已用，避免新领题与跨设备/历史记录冲突。
+	// trae 不可用时静默跳过，回退到本地集合。
+	for seq := range s.lookupTraeUsedSequencesForQuestion(projectID) {
 		usedSequences[seq] = struct{}{}
 	}
 
@@ -980,4 +995,23 @@ func managedDirectoryExists(path string) bool {
 	}
 	info, err := os.Stat(util.ExpandTilde(path))
 	return err == nil && info.IsDir()
+}
+
+// lookupTraeUsedSequencesForQuestion 返回 trae 中该题已出现过的 -N 版本号集合。
+// trae 不可用时返回空集，调用方按本地集合兜底。
+func (s *GitService) lookupTraeUsedSequencesForQuestion(questionID int64) map[int]struct{} {
+	if s.traeProvider == nil || questionID <= 0 {
+		return nil
+	}
+	client, err := s.traeProvider.Get()
+	if err != nil || client == nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	versions, err := client.ListUsedVersionsForQuestion(ctx, questionID)
+	if err != nil {
+		return nil
+	}
+	return versions
 }

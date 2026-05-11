@@ -239,6 +239,36 @@ func TestCopyProjectDirectoryLeavesPlainSourceWithoutGitRepo(t *testing.T) {
 	}
 }
 
+func TestRecreateWorkspaceFromRemoteClonesMainBranch(t *testing.T) {
+	root := t.TempDir()
+	remoteWork := filepath.Join(root, "remote-work")
+	remoteBare := filepath.Join(root, "remote.git")
+	workspace := filepath.Join(root, "workspace")
+
+	if err := os.MkdirAll(remoteWork, 0o755); err != nil {
+		t.Fatalf("MkdirAll(remoteWork) error = %v", err)
+	}
+	initTestGitRepo(t, remoteWork, "main")
+	if err := os.WriteFile(filepath.Join(remoteWork, "README.md"), []byte("demo"), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	gitInDir(t, remoteWork, "add", "README.md")
+	gitInDir(t, remoteWork, "commit", "-m", "initial")
+	gitInDir(t, remoteWork, "init", "--bare", remoteBare)
+	gitInDir(t, remoteWork, "remote", "add", "origin", remoteBare)
+	gitInDir(t, remoteWork, "push", "origin", "main")
+
+	if err := RecreateWorkspaceFromRemote(workspace, remoteBare, "main", "", "", "Test User", "test@example.com"); err != nil {
+		t.Fatalf("RecreateWorkspaceFromRemote() error = %v", err)
+	}
+	if !WorkspaceHasBranch(workspace, "main") {
+		t.Fatalf("expected workspace to have main branch")
+	}
+	if got := gitOutput(t, workspace, "log", "-1", "--pretty=%s"); got != "initial" {
+		t.Fatalf("last commit = %q, want initial", got)
+	}
+}
+
 func initTestGitRepo(t *testing.T, path, branch string) {
 	t.Helper()
 	if err := runGit(path, "init", "-b", branch); err != nil {

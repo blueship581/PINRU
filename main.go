@@ -23,6 +23,7 @@ import (
 	appsubmit "github.com/blueship581/pinru/app/submit"
 	apptask "github.com/blueship581/pinru/app/task"
 	"github.com/blueship581/pinru/internal/store"
+	"github.com/blueship581/pinru/internal/trae"
 	"github.com/blueship581/pinru/migrations"
 	"github.com/wailsapp/wails/v3/pkg/application"
 )
@@ -46,11 +47,16 @@ func main() {
 	defer db.Close()
 
 	configSvc := appconfig.New(db)
+	traeProvider := trae.NewProvider(db)
+	configSvc.SetTraeProvider(traeProvider)
 	gitSvc := appgit.New(db)
+	gitSvc.SetTraeProvider(traeProvider)
 	taskSvc := apptask.New(db, gitSvc)
+	taskSvc.SetTraeProvider(traeProvider)
 	submitSvc := appsubmit.New(db)
 	cliSvc := appcli.New()
 	promptSvc := appprompt.New(db, cliSvc)
+	promptSvc.SetTraeProvider(traeProvider)
 	chatSvc := appchat.New(db, cliSvc)
 	jobSvc := appjob.New(db, promptSvc, gitSvc, submitSvc, taskSvc, cliSvc)
 

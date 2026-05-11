@@ -13,6 +13,7 @@ import { useAppStore } from '../../store';
 import { getPathBase } from '../../shared/lib/sourceFolders';
 import { toErrorMessage } from '../../shared/lib/errorMessage';
 import { CopyIconButton } from '../../shared/components/CopyIconButton';
+import { buildDefaultSubmitRepo, extractGitHubRepoPath } from '../../shared/lib/submitRepoName';
 
 const selectCls =
   'w-full bg-stone-50 dark:bg-[#171B22] border border-stone-200 dark:border-[#232834] rounded-2xl px-4 py-2.5 text-sm font-medium focus:outline-none focus:ring-2 focus:ring-slate-400/30 transition-shadow';
@@ -32,6 +33,8 @@ export default function Submit() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [selectedModels, setSelectedModels] = useState<Set<string>>(new Set());
+  const [onlyUnsubmitted, setOnlyUnsubmitted] = useState(true);
+  const [recreateRepo, setRecreateRepo] = useState(false);
   // 追踪当前提交 job 的 ID，用于在 job 完成时刷新结果
   const pendingJobId = useRef<string | null>(null);
   // 记录上次已写入 URL 的 taskId，避免 searchParams 引用抖动引起的重复 replaceState
@@ -60,6 +63,10 @@ export default function Submit() {
       modelRuns.find((r) => r.modelName.trim().toUpperCase() === sourceModelName.toUpperCase()) ?? null,
     [modelRuns, sourceModelName],
   );
+  const sourceRunRepo = useMemo(
+    () => extractGitHubRepoPath(sourceRun?.originUrl ?? ''),
+    [sourceRun],
+  );
   const sourceDirectoryName = useMemo(
     () => getPathBase(sourceRun?.localPath) || sourceRun?.modelName || '',
     [sourceRun],
@@ -70,10 +77,28 @@ export default function Submit() {
     if (activeProject?.defaultSubmitRepo?.trim()) {
       return activeProject.defaultSubmitRepo.trim();
     }
+    if (sourceRunRepo) {
+      return sourceRunRepo;
+    }
     if (!account) return '';
-    const projectName = activeProject?.name ?? task.projectName;
-    return `${account.username}/${slugify(projectName)}-${taskId}`;
-  }, [account, task, taskId, activeProject]);
+    return buildDefaultSubmitRepo(account.username, task.projectName);
+  }, [account, task, activeProject, sourceRunRepo]);
+
+  const successfulModelNames = useMemo(() => {
+    return new Set(
+      modelRuns
+        .filter((run) => run.status === 'done' && !!run.prUrl)
+        .map((run) => run.modelName.trim().toUpperCase()),
+    );
+  }, [modelRuns]);
+
+  const submitModelNames = useMemo(() => {
+    const names = [...selectedModels];
+    if (!onlyUnsubmitted) {
+      return names;
+    }
+    return names.filter((name) => !successfulModelNames.has(name.trim().toUpperCase()));
+  }, [onlyUnsubmitted, selectedModels, successfulModelNames]);
 
   // Results stored in DB: origin_url from sourceRun, pr_url / submit_error from other runs
   const hasResults = useMemo(() =>
@@ -164,6 +189,10 @@ export default function Submit() {
 
   const handleSubmit = async () => {
     if (!task || !account || !repo || !sourceRun) return;
+    if (selectedModels.size > 0 && submitModelNames.length === 0) {
+      setError('没有可提交的模型');
+      return;
+    }
     setBusy(true);
     setError('');
     try {
@@ -175,8 +204,9 @@ export default function Submit() {
         inputPayload: JSON.stringify({
           githubAccountId: account.id,
           taskId,
-          models: [...selectedModels],
+          models: submitModelNames,
           targetRepo: repo,
+          recreateRepo,
           sourceModelName,
           githubUsername: account.username,
           githubToken: '',
@@ -191,7 +221,13 @@ export default function Submit() {
     }
   };
 
-  const ready = !!task && !!account && !!repo && !!sourceRun && !busy;
+  const ready =
+    !!task &&
+    !!account &&
+    !!repo &&
+    !!sourceRun &&
+    !busy &&
+    (selectedModels.size === 0 || submitModelNames.length > 0);
 
   return (
     <div className="h-full flex flex-col p-8 bg-stone-50 dark:bg-[#161615]">
@@ -303,9 +339,27 @@ export default function Submit() {
             </div>
           )}
 
+          {taskId && projectPrModelNames.length > 0 && (
+            <label className="flex items-start gap-3 rounded-xl border border-stone-200 dark:border-[#232834] bg-stone-50 dark:bg-[#171B22] px-4 py-3 text-stone-700 dark:text-stone-300">
+              <input
+                type="checkbox"
+                checked={onlyUnsubmitted}
+                onChange={(event) => setOnlyUnsubmitted(event.target.checked)}
+                disabled={busy}
+                className="mt-0.5 h-4 w-4 rounded accent-slate-700 dark:accent-slate-300 cursor-default"
+              />
+              <span className="space-y-1">
+                <span className="block text-sm font-semibold">只提交未成功推送的 PR</span>
+                <span className="block text-xs leading-5 text-stone-500 dark:text-stone-400">
+                  已成功提交过的模型会自动跳过；目标仓库会优先复用上次提交的仓库地址。
+                </span>
+              </span>
+            </label>
+          )}
+
           {/* 目标仓库 */}
           {repo && (
-            <div>
+            <div className="space-y-3">
               <span className="block text-sm font-medium text-stone-500 dark:text-stone-400 mb-1.5">目标仓库</span>
               <p className="font-mono text-sm text-stone-800 dark:text-stone-200 bg-stone-100 dark:bg-[#1E2128] rounded-xl px-4 py-2.5 border border-stone-200/60 dark:border-[#2A2F3A]">
                 {repo}
@@ -313,6 +367,21 @@ export default function Submit() {
               <p className="text-xs text-stone-400 mt-1.5">
                 自动创建{selectedModels.size > 0 ? <> &middot; 源码 &rarr; main &middot; {selectedModels.size} 个模型 &rarr; PR</> : <> &middot; 仅上传源码到 main</>}
               </p>
+              <label className="flex items-start gap-3 rounded-xl border border-red-200/70 bg-red-50 px-4 py-3 text-red-700 dark:border-red-900/40 dark:bg-red-950/20 dark:text-red-300">
+                <input
+                  type="checkbox"
+                  checked={recreateRepo}
+                  onChange={(event) => setRecreateRepo(event.target.checked)}
+                  disabled={busy}
+                  className="mt-0.5 h-4 w-4 rounded accent-red-600 cursor-default"
+                />
+                <span className="space-y-1">
+                  <span className="block text-sm font-semibold">如果目标仓库已存在，先删除并重建</span>
+                  <span className="block text-xs leading-5 text-red-600 dark:text-red-300/80">
+                    会永久删除远端仓库历史、Issues、PR 和关联内容，再重新创建同名仓库。
+                  </span>
+                </span>
+              </label>
             </div>
           )}
 
@@ -455,13 +524,3 @@ function normalizeAccounts(accs: GitHubAccountConfig[]) {
   const hasDef = accs.some((a) => a.isDefault);
   return accs.map((a, i) => ({ ...a, isDefault: hasDef ? a.isDefault : i === 0 }));
 }
-
-function slugify(name: string) {
-  return name.trim()
-    .replace(/[^\x00-\x7F]+/g, '')     // remove non-ASCII (中文等)
-    .replace(/[^a-zA-Z0-9._-]/g, '-')  // replace remaining non-allowed with -
-    .replace(/-{2,}/g, '-')
-    .replace(/^[-.]|[-.]$/g, '')
-    || 'project';
-}
-

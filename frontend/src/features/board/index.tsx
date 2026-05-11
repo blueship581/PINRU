@@ -452,7 +452,7 @@ export default function Board() {
     setSelectedTaskIds(new Set());
   };
 
-  const handleGeneratePromptFromContextMenu = (constraints: string[], scope: string) => {
+  const handleGeneratePromptFromContextMenu = (constraints: string[], scope: string, enhanceMultiFile: boolean) => {
     if (!taskCardContextMenu) return;
     const { task } = taskCardContextMenu;
     closeTaskCardContextMenu();
@@ -464,6 +464,7 @@ export default function Board() {
           taskType: task.taskType,
           constraints: constraints.length > 0 ? constraints : ['无约束'],
           scopes: scope ? [scope] : [],
+          enhanceMultiFile,
           thinkingBudget: '',
         });
         await submitJob({
@@ -829,9 +830,12 @@ export default function Board() {
         }}
         showProjectPanel={showProjectPanel}
         onCloseProjectPanel={() => setShowProjectPanel(false)}
-        onProjectSaved={(updated) => {
+        onProjectSaved={(updated, options) => {
           setActiveProject(updated);
-          setShowProjectPanel(false);
+          void loadTasks();
+          if (!options?.keepOpen) {
+            setShowProjectPanel(false);
+          }
         }}
         onAiReview={aiReviewVisible ? handleAiReview : undefined}
         onDeleteAiReviewRecord={aiReviewVisible ? handleDeleteAiReviewRecord : undefined}

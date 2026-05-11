@@ -10,6 +10,7 @@ import type {
   GitHubAccountConfig,
   GitLabSettings,
   ProjectConfig,
+  TraeDBSettings,
   TraeSettings,
 } from './config';
 import type {
@@ -20,6 +21,7 @@ import type {
   ManagedClaimPathPlan,
   NormalizeManagedSourceFoldersResult,
   QuestionBankItem,
+  QuestionBankStats,
   QuestionBankSyncResult,
 } from './git';
 import type {
@@ -46,6 +48,8 @@ import type {
   AiReviewNodeFromDB,
   AiReviewRoundFromDB,
   AddModelRunRequest,
+  AddProjectModelRunRequest,
+  AddProjectModelRunResult,
   BatchUpdateResult,
   BatchUpdateTasksRequest,
   CreateTaskRequest,
@@ -109,6 +113,15 @@ export type WailsServiceContract = {
     DeleteGitHubAccount: ServiceMethod<[id: string], void>;
     GetTraeSettings: ServiceMethod<[], TraeSettings>;
     SaveTraeSettings: ServiceMethod<[workspaceStoragePath: string, logsPath: string], void>;
+    GetTraeDBSettings: ServiceMethod<[], TraeDBSettings>;
+    SaveTraeDBSettings: ServiceMethod<
+      [host: string, port: number, user: string, password: string, dbName: string, userIds: string[]],
+      void
+    >;
+    TestTraeDBConnection: ServiceMethod<
+      [host: string, port: number, user: string, password: string, dbName: string],
+      boolean
+    >;
   };
   GitService: {
     FetchGitLabProject: ServiceMethod<[projectRef: string, url: string, token: string], GitLabProject>;
@@ -148,6 +161,7 @@ export type WailsServiceContract = {
       NormalizeManagedSourceFoldersResult
     >;
     ListQuestionBankItems: ServiceMethod<[projectId: string], QuestionBankItem[]>;
+    GetQuestionBankStats: ServiceMethod<[projectId: string], QuestionBankStats[]>;
     ScanLocalQuestionBank: ServiceMethod<[projectId: string], ImportLocalSourcesResult>;
     SyncGitLabQuestionBank: ServiceMethod<
       [projectId: string, questionIds: number[]],
@@ -203,6 +217,7 @@ export type WailsServiceContract = {
     OpenTaskLocalFolder: ServiceMethod<[id: string], void>;
     UpdateModelRunSessionInfo: ServiceMethod<[request: UpdateModelRunSessionRequest], void>;
     AddModelRun: ServiceMethod<[request: AddModelRunRequest], void>;
+    AddProjectModelRun: ServiceMethod<[request: AddProjectModelRunRequest], AddProjectModelRunResult>;
     DeleteModelRun: ServiceMethod<[taskId: string, modelName: string], void>;
     UpdateTaskReportFields: ServiceMethod<[request: UpdateTaskReportFieldsRequest], void>;
     BatchUpdateTasks: ServiceMethod<[request: BatchUpdateTasksRequest], BatchUpdateResult>;

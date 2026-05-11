@@ -74,7 +74,7 @@ export function BoardLayerStack({
   onOpenLocalFolder: () => void;
   onTaskCardStatusChange: (status: TaskStatus) => void;
   onTaskCardTaskTypeChange: (taskType: string) => void;
-  onTaskCardGeneratePrompt: (constraints: string[], scope: string) => void;
+  onTaskCardGeneratePrompt: (constraints: string[], scope: string, enhanceMultiFile: boolean) => void;
   onTaskCardQuickAiReview?: (directory: import('../../../api/task').TaskChildDirectory) => void;
   showProjectOverview: boolean;
   activeProject: ProjectConfig | null;
@@ -94,7 +94,7 @@ export function BoardLayerStack({
   onOpenSubmit: () => void;
   showProjectPanel: boolean;
   onCloseProjectPanel: () => void;
-  onProjectSaved: (updated: ProjectConfig) => void;
+  onProjectSaved: (updated: ProjectConfig, options?: { keepOpen?: boolean }) => void;
   onAiReview?: (run: import('../../../api/task').ModelRunFromDB) => void;
   onDeleteAiReviewRecord?: (roundId: string) => void | Promise<void>;
   onSubmitNextAiReviewRound?: (modelRunId: string, modelName: string, localPath: string, nextPromptOverride?: string) => void | Promise<void>;

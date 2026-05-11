@@ -160,6 +160,37 @@ export APPLE_NOTARY_PROFILE='pinru-notary'
 
 打包产物位于 `dist/PINRU.app`。
 
+**打包为 DMG 分发包**
+
+```bash
+# arm64（Apple Silicon，默认）
+task dmg-arm64
+# 产物：dist/PINRU-0.2.0-macos-arm64.dmg
+
+# amd64（Intel，在任意 Mac 上交叉编译）
+task dmg-amd64
+# 产物：dist/PINRU-0.2.0-macos-amd64.dmg
+
+# 同时打包两种架构
+task dmg-all
+
+# 也可直接调用脚本，支持更多环境变量
+ARCH=arm64 APPLE_SIGNING_IDENTITY="Developer ID Application: ..." \
+  APPLE_NOTARY_PROFILE=pinru-notary \
+  ./scripts/build_dmg.sh
+```
+
+| 环境变量 | 默认值 | 说明 |
+|----------|--------|------|
+| `ARCH` | `arm64` | 目标架构：`arm64` / `amd64` / `universal` |
+| `VERSION` | 读取 Info.plist | 覆盖 DMG 文件名中的版本号 |
+| `SKIP_BUILD` | `0` | 设为 `1` 跳过编译，直接使用已有二进制 |
+| `APPLE_SIGNING_IDENTITY` | 空（ad-hoc） | Developer ID 签名身份 |
+| `APPLE_NOTARY_PROFILE` | 空 | notarytool keychain profile 名称 |
+| `OUTPUT_DIR` | `dist` | DMG 输出目录 |
+
+DMG 内含 `PINRU.app` 与 `/Applications` 软链接，用户拖拽即可完成安装。
+
 > **未签名应急方案**（仅限本机测试，不可分发）
 > ```bash
 > xattr -dr com.apple.quarantine /path/to/PINRU.app
